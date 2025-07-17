@@ -143,7 +143,7 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to request device authorization: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("device authorization request failed with status %d", resp.StatusCode)
@@ -197,7 +197,7 @@ func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to poll device authorization: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Parse response
 	var tokenResp TokenResponse
@@ -271,7 +271,7 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user info: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("userinfo request failed with status %d", resp.StatusCode)

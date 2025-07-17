@@ -36,6 +36,10 @@ func NewPolicyEngine(cfg *config.Config) (*PolicyEngine, error) {
 
 // EvaluateRequest evaluates an authentication request against policies
 func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest) (*PolicyResult, error) {
+	if req == nil {
+		return nil, fmt.Errorf("authentication request cannot be nil")
+	}
+	
 	log.Debug().
 		Str("user_id", req.UserID).
 		Str("source_ip", req.SourceIP).

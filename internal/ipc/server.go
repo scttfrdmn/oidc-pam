@@ -118,7 +118,7 @@ func (s *Server) Stop() error {
 
 		// Close listener
 		if s.listener != nil {
-			s.listener.Close()
+			_ = s.listener.Close()
 		}
 
 		// Wait for goroutines to finish
@@ -150,7 +150,7 @@ func (s *Server) acceptConnections(ctx context.Context) {
 		default:
 			// Set accept timeout
 			if conn, ok := s.listener.(*net.UnixListener); ok {
-				conn.SetDeadline(time.Now().Add(1 * time.Second))
+				_ = conn.SetDeadline(time.Now().Add(1 * time.Second))
 			}
 
 			conn, err := s.listener.Accept()
@@ -182,10 +182,10 @@ func (s *Server) acceptConnections(ctx context.Context) {
 // handleConnection handles a single IPC connection
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Set connection timeout
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	log.Debug().
 		Str("remote_addr", conn.RemoteAddr().String()).

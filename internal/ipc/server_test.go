@@ -22,7 +22,7 @@ func TestNewServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -41,7 +41,7 @@ func TestServerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -88,7 +88,7 @@ func TestServerConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -131,7 +131,7 @@ func TestServerMultipleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -195,7 +195,7 @@ func TestServerStopBeforeStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -216,7 +216,7 @@ func TestServerDoubleStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)
@@ -230,7 +230,7 @@ func TestServerDoubleStop(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		server.Start(ctx)
+		_ = server.Start(ctx)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -251,7 +251,7 @@ func TestServerConnectionHandling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	socketPath := filepath.Join(tempDir, "test.sock")
 	broker := createTestBroker(t)

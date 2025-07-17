@@ -151,5 +151,9 @@ func FormatAuthenticationError(errorMsg string) string {
 // FormatSpinner returns a spinner character for the given step
 func FormatSpinner(step int) string {
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	return spinners[step%len(spinners)]
+	index := step % len(spinners)
+	if index < 0 {
+		index += len(spinners)
+	}
+	return spinners[index]
 }
