@@ -14,20 +14,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test framework for PAM and SSH components
 - System requirements documentation (REQUIREMENTS.md)
 - Support for json-c library integration
+- Admin CLI tool for system management and monitoring
+- Advanced risk-based policy engine with multi-factor assessment
+- Real-time health monitoring and diagnostics
+- Dynamic MFA requirements based on risk scoring
+- Adaptive session duration based on risk levels
 
 ### Changed
 - Enhanced build system with proper PAM module compilation
 - Improved CGO integration with system libraries
 - Updated Makefile for cross-platform builds
+- Enhanced policy engine with configurable risk weights
+- Improved security controls with behavioral analysis
 
 ### Fixed
 - CGO compilation issues with variadic functions
 - Build dependencies for macOS and Linux
 - Test framework timestamp precision issues
+- Risk assessment algorithm accuracy and performance
 
 ### Security
 - Secure PAM module implementation with proper logging
 - Enhanced SSH key management with expiration handling
+- Multi-factor risk assessment (geographic, temporal, device, behavioral, network)
+- Business hours and trusted network validation
+- Comprehensive audit trails for risk-based decisions
 
 ## [0.1.0-alpha.2] - 2025-01-17
 

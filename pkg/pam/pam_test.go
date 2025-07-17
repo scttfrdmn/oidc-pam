@@ -2,7 +2,6 @@ package pam
 
 import (
 	"testing"
-	"time"
 )
 
 func TestNewPAMModule(t *testing.T) {

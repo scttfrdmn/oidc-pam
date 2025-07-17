@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,13 +121,13 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 
 	// Save private key
 	privateKeyPath := filepath.Join(userDir, "id_rsa")
-	if err := ioutil.WriteFile(privateKeyPath, key.PrivateKey, 0600); err != nil {
+	if err := os.WriteFile(privateKeyPath, key.PrivateKey, 0600); err != nil {
 		return fmt.Errorf("failed to save private key: %w", err)
 	}
 
 	// Save public key
 	publicKeyPath := filepath.Join(userDir, "id_rsa.pub")
-	if err := ioutil.WriteFile(publicKeyPath, key.PublicKey, 0644); err != nil {
+	if err := os.WriteFile(publicKeyPath, key.PublicKey, 0644); err != nil {
 		return fmt.Errorf("failed to save public key: %w", err)
 	}
 
@@ -138,7 +137,7 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 		key.CreatedAt.Unix(),
 		key.ExpiresAt.Unix(),
 		key.Comment)
-	if err := ioutil.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
+	if err := os.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
 		return fmt.Errorf("failed to save key metadata: %w", err)
 	}
 
@@ -157,21 +156,21 @@ func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
 
 	// Load private key
 	privateKeyPath := filepath.Join(userDir, "id_rsa")
-	privateKeyBytes, err := ioutil.ReadFile(privateKeyPath)
+	privateKeyBytes, err := os.ReadFile(privateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load private key: %w", err)
 	}
 
 	// Load public key
 	publicKeyPath := filepath.Join(userDir, "id_rsa.pub")
-	publicKeyBytes, err := ioutil.ReadFile(publicKeyPath)
+	publicKeyBytes, err := os.ReadFile(publicKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load public key: %w", err)
 	}
 
 	// Load metadata
 	metadataPath := filepath.Join(userDir, "key_metadata")
-	metadataBytes, err := ioutil.ReadFile(metadataPath)
+	metadataBytes, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load key metadata: %w", err)
 	}
