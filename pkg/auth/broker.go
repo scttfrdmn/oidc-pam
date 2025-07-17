@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,53 @@ type AuthResponse struct {
 
 // NewBroker creates a new authentication broker
 func NewBroker(cfg *config.Config) (*Broker, error) {
+	// Validate configuration
+	if cfg == nil {
+		return nil, fmt.Errorf("configuration cannot be nil")
+	}
+	
+	// Validate server configuration
+	if cfg.Server.SocketPath == "" {
+		return nil, fmt.Errorf("socket path cannot be empty")
+	}
+	
+	// Validate OIDC configuration
+	if len(cfg.OIDC.Providers) == 0 {
+		return nil, fmt.Errorf("at least one OIDC provider must be configured")
+	}
+	
+	// Validate security configuration
+	if cfg.Security.TokenEncryptionKey == "" {
+		return nil, fmt.Errorf("token encryption key is required for security")
+	}
+	
+	if len(cfg.Security.TokenEncryptionKey) < 32 {
+		return nil, fmt.Errorf("token encryption key must be at least 32 bytes for security")
+	}
+	
+	// Validate OIDC provider security
+	for _, provider := range cfg.OIDC.Providers {
+		// Check for required openid scope
+		hasOpenIDScope := false
+		for _, scope := range provider.Scopes {
+			if scope == "openid" {
+				hasOpenIDScope = true
+				break
+			}
+		}
+		if !hasOpenIDScope {
+			return nil, fmt.Errorf("provider '%s' must include 'openid' scope", provider.Name)
+		}
+		
+		// Check for HTTPS requirement (except localhost for testing)
+		if provider.Issuer != "" && !strings.HasPrefix(provider.Issuer, "https://") && 
+		   !strings.HasPrefix(provider.Issuer, "http://localhost") &&
+		   !strings.HasPrefix(provider.Issuer, "http://127.0.0.1") &&
+		   !strings.HasPrefix(provider.Issuer, "mock://") {
+			return nil, fmt.Errorf("provider '%s' issuer must use HTTPS for security", provider.Name)
+		}
+	}
+	
 	// Create token manager
 	tokenManager, err := NewTokenManager(cfg)
 	if err != nil {

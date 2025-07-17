@@ -207,6 +207,8 @@ func createAuditOutput(config config.AuditOutput) (AuditOutput, error) {
 	switch config.Type {
 	case "file":
 		return NewFileAuditOutput(config)
+	case "stdout":
+		return NewStdoutAuditOutput(config)
 	case "syslog":
 		return NewSyslogAuditOutput(config)
 	case "http":
@@ -250,6 +252,31 @@ func (fao *FileAuditOutput) Write(event AuditEvent) error {
 
 func (fao *FileAuditOutput) Close() error {
 	return fao.file.Close()
+}
+
+// StdoutAuditOutput writes audit events to stdout
+type StdoutAuditOutput struct {
+	config config.AuditOutput
+}
+
+func NewStdoutAuditOutput(config config.AuditOutput) (*StdoutAuditOutput, error) {
+	return &StdoutAuditOutput{
+		config: config,
+	}, nil
+}
+
+func (sao *StdoutAuditOutput) Write(event AuditEvent) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal audit event: %w", err)
+	}
+	
+	fmt.Println(string(data))
+	return nil
+}
+
+func (sao *StdoutAuditOutput) Close() error {
+	return nil
 }
 
 // SyslogAuditOutput implementation

@@ -161,10 +161,13 @@ func createTestConfig(testDir string) *config.Config {
 		OIDC: config.OIDCConfig{
 			Providers: []config.OIDCProvider{
 				{
-					Name:     "test",
-					Issuer:   "https://test.example.com",
-					ClientID: "test-client-id",
-					Scopes:   []string{"openid", "profile", "email"},
+					Name:         "test",
+					Issuer:       "mock://test-provider",
+					ClientID:     "test-client-id",
+					Scopes:       []string{"openid", "profile", "email"},
+					DeviceEndpoint: "mock://device",
+					TokenEndpoint:  "mock://token", 
+					UserInfoEndpoint: "mock://userinfo",
 					UserMapping: config.UserMapping{
 						UsernameClaim: "email",
 						EmailClaim:    "email",

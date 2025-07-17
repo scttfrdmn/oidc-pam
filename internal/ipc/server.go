@@ -21,6 +21,7 @@ type Server struct {
 	listener   net.Listener
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
+	stopOnce   sync.Once
 }
 
 // Request represents a request from PAM module
@@ -108,29 +109,32 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop stops the IPC server
 func (s *Server) Stop() error {
-	log.Info().Msg("Stopping IPC server")
+	var stopErr error
+	s.stopOnce.Do(func() {
+		log.Info().Msg("Stopping IPC server")
 
-	// Signal stop
-	close(s.stopChan)
+		// Signal stop
+		close(s.stopChan)
 
-	// Close listener
-	if s.listener != nil {
-		s.listener.Close()
-	}
+		// Close listener
+		if s.listener != nil {
+			s.listener.Close()
+		}
 
-	// Wait for goroutines to finish
-	s.wg.Wait()
+		// Wait for goroutines to finish
+		s.wg.Wait()
 
-	// Remove socket file
-	if err := os.RemoveAll(s.socketPath); err != nil {
-		log.Warn().
-			Err(err).
-			Str("socket_path", s.socketPath).
-			Msg("Failed to remove socket file")
-	}
+		// Remove socket file
+		if err := os.RemoveAll(s.socketPath); err != nil {
+			log.Warn().
+				Err(err).
+				Str("socket_path", s.socketPath).
+				Msg("Failed to remove socket file")
+		}
 
-	log.Info().Msg("IPC server stopped")
-	return nil
+		log.Info().Msg("IPC server stopped")
+	})
+	return stopErr
 }
 
 // acceptConnections accepts and handles IPC connections
@@ -154,13 +158,18 @@ func (s *Server) acceptConnections(ctx context.Context) {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
-				if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-					continue
+				// For other errors, check if we should continue or exit
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.stopChan:
+					return
+				default:
+					log.Error().
+						Err(err).
+						Msg("Failed to accept connection")
+					return
 				}
-				log.Error().
-					Err(err).
-					Msg("Failed to accept connection")
-				return
 			}
 
 			// Handle connection in goroutine
