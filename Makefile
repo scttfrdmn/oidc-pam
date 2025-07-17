@@ -27,7 +27,7 @@ build-broker:
 build-pam:
 	@echo "Building PAM module..."
 	@mkdir -p $(BINARY_DIR)
-	go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./pkg/pam
+	go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./cmd/pam-module
 
 ## Build PAM helper binary
 build-helper:
@@ -136,11 +136,11 @@ release: clean
 	@echo "Creating release build..."
 	@mkdir -p $(BINARY_DIR)
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(BROKER_BINARY)-linux-amd64 ./cmd/broker
-	GOOS=linux GOARCH=amd64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-amd64 ./pkg/pam
+	GOOS=linux GOARCH=amd64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-amd64 ./cmd/pam-module
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY)-linux-amd64 ./cmd/pam-helper
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(ADMIN_BINARY)-linux-amd64 ./cmd/oidc-admin
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(BROKER_BINARY)-linux-arm64 ./cmd/broker
-	GOOS=linux GOARCH=arm64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-arm64 ./pkg/pam
+	GOOS=linux GOARCH=arm64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-arm64 ./cmd/pam-module
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY)-linux-arm64 ./cmd/pam-helper
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(ADMIN_BINARY)-linux-arm64 ./cmd/oidc-admin
 

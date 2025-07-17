@@ -8,41 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial project structure and documentation
-- MIT License with proper copyright
-- Contributing guidelines and Code of Conduct
-- GitHub templates for issues and pull requests
+- Complete PAM module implementation with CGO bridge
+- SSH key lifecycle management and authorized_keys integration
+- PAM helper binary for command-line authentication
+- Comprehensive test framework for PAM and SSH components
+- System requirements documentation (REQUIREMENTS.md)
+- Support for json-c library integration
 
 ### Changed
-- Nothing yet
-
-### Deprecated
-- Nothing yet
-
-### Removed
-- Nothing yet
+- Enhanced build system with proper PAM module compilation
+- Improved CGO integration with system libraries
+- Updated Makefile for cross-platform builds
 
 ### Fixed
-- Nothing yet
+- CGO compilation issues with variadic functions
+- Build dependencies for macOS and Linux
+- Test framework timestamp precision issues
 
 ### Security
-- Nothing yet
+- Secure PAM module implementation with proper logging
+- Enhanced SSH key management with expiration handling
+
+## [0.1.0-alpha.2] - 2025-01-17
+
+### Added
+- Complete authentication broker implementation
+- OIDC device flow with OAuth2 device authorization grant
+- Multi-provider OIDC support (Okta, Azure AD, Auth0, Google Workspace, etc.)
+- Session management with automatic expiration and cleanup
+- Token manager with encryption and lifecycle management
+- Risk-based policy engine with geographic and time-based controls
+- Comprehensive audit logging system with multiple outputs
+- QR code generation for mobile authentication
+- Unix socket IPC server for PAM module communication
+- Example configuration files and systemd service
+- Security utilities (encryption, audit logging)
+
+### Changed
+- Enhanced configuration system with cloud provider auto-discovery
+- Improved error handling and logging throughout
+- Better separation of concerns in codebase architecture
+
+### Security
+- AES-256 encryption for token storage
+- Comprehensive audit trails for compliance
+- Risk assessment and policy enforcement
+- Device trust validation
+- Network-based access controls
 
 ## [0.1.0-alpha] - 2025-01-17
 
 ### Added
-- Initial alpha release
-- Basic OIDC Device Flow implementation
-- Core PAM module architecture
-- SSH key lifecycle management foundation
-- Basic configuration system
-- Installation scripts for Ubuntu/Debian and RHEL/CentOS/Fedora
-- Documentation structure and initial guides
-
-### Security
-- Secure token storage with encryption
-- Audit logging framework
-- Basic access control policies
+- Initial project structure and documentation
+- MIT License with proper copyright
+- Contributing guidelines and GitHub templates
+- Go module structure with dependencies
+- Build system with Makefile
+- Basic project foundation
 
 ---
 

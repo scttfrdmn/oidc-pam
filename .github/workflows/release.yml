@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.21'
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.get_version.outputs.VERSION }}
+        release_name: Release ${{ steps.get_version.outputs.VERSION }}
+        body: |
+          ## Changes
+          
+          See [CHANGELOG.md](https://github.com/scttfrdmn/oidc-pam/blob/main/CHANGELOG.md) for detailed changes.
+          
+          ## Installation
+          
+          ### Quick Install
+          ```bash
+          curl -sSL https://github.com/scttfrdmn/oidc-pam/releases/download/${{ steps.get_version.outputs.VERSION }}/install.sh | sudo bash
+          ```
+          
+          ### Manual Install
+          1. Download the appropriate binary for your system
+          2. Extract and run the installation script
+          3. Follow the setup instructions in the README
+          
+          ## Requirements
+          
+          - Linux system with PAM support
+          - systemd for service management
+          - OIDC provider configuration
+          - See [REQUIREMENTS.md](https://github.com/scttfrdmn/oidc-pam/blob/main/REQUIREMENTS.md) for details
+          
+          ## Security
+          
+          - Binaries are signed and checksummed
+          - See [SECURITY.md](https://github.com/scttfrdmn/oidc-pam/blob/main/SECURITY.md) for security policy
+        draft: false
+        prerelease: false
+        
+  build-release:
+    name: Build Release
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libpam0g-dev \
+          libjson-c-dev \
+          pkg-config \
+          libsystemd-dev
+          
+    - name: Install cross-compilation tools
+      if: matrix.goarch == 'arm64'
+      run: |
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+    - name: Build binaries
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CC: ${{ matrix.goarch == 'arm64' && 'aarch64-linux-gnu-gcc' || 'gcc' }}
+      run: |
+        mkdir -p release
+        
+        # Build broker
+        go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" \
+          -trimpath -o release/oidc-auth-broker-${{ matrix.goos }}-${{ matrix.goarch }} \
+          ./cmd/broker
+          
+        # Build helper
+        go build -ldflags="-s -w -X main.version=${{ steps.get_version.outputs.VERSION }}" \
+          -trimpath -o release/oidc-pam-helper-${{ matrix.goos }}-${{ matrix.goarch }} \
+          ./cmd/pam-helper
+          
+        # Build PAM module
+        go build -buildmode=c-shared -ldflags="-s -w" \
+          -trimpath -o release/pam_oidc-${{ matrix.goos }}-${{ matrix.goarch }}.so \
+          ./cmd/pam-module
+          
+    - name: Create release package
+      run: |
+        cd release
+        
+        # Create package directory
+        mkdir -p oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}
+        
+        # Copy binaries
+        cp oidc-auth-broker-${{ matrix.goos }}-${{ matrix.goarch }} \
+           oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/oidc-auth-broker
+        cp oidc-pam-helper-${{ matrix.goos }}-${{ matrix.goarch }} \
+           oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/oidc-pam-helper
+        cp pam_oidc-${{ matrix.goos }}-${{ matrix.goarch }}.so \
+           oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/pam_oidc.so
+           
+        # Copy additional files
+        cp ../README.md oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        cp ../LICENSE oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        cp ../CHANGELOG.md oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        cp ../REQUIREMENTS.md oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        
+        # Copy scripts
+        cp -r ../scripts oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        
+        # Copy configuration examples
+        cp -r ../configs oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}/
+        
+        # Create archive
+        tar -czf oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz \
+          oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          
+    - name: Generate checksums
+      run: |
+        cd release
+        sha256sum oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz > \
+          oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+          
+    - name: Upload release archive
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./release/oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+        asset_name: oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+        asset_content_type: application/gzip
+        
+    - name: Upload checksums
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./release/oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+        asset_name: oidc-pam-${{ steps.get_version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+        asset_content_type: text/plain
+        
+  publish-install-script:
+    name: Publish Install Script
+    needs: create-release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+    - name: Create install script
+      run: |
+        # Create a version-specific install script
+        sed "s/VERSION=.*/VERSION=${{ steps.get_version.outputs.VERSION }}/" \
+          scripts/install.sh > install-${{ steps.get_version.outputs.VERSION }}.sh
+          
+    - name: Upload install script
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./install-${{ steps.get_version.outputs.VERSION }}.sh
+        asset_name: install.sh
+        asset_content_type: text/plain
+        
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout homebrew-tap
+      uses: actions/checkout@v4
+      with:
+        repository: scttfrdmn/homebrew-tap
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        path: homebrew-tap
+        
+    - name: Get version
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+    - name: Update formula
+      run: |
+        cd homebrew-tap
+        
+        # Update the formula with new version and URL
+        sed -i "s/version \".*\"/version \"${{ steps.get_version.outputs.VERSION }}\"/" Formula/oidc-pam.rb
+        sed -i "s|url \".*\"|url \"https://github.com/scttfrdmn/oidc-pam/releases/download/${{ steps.get_version.outputs.VERSION }}/oidc-pam-${{ steps.get_version.outputs.VERSION }}-linux-amd64.tar.gz\"|" Formula/oidc-pam.rb
+        
+        # Commit and push
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add Formula/oidc-pam.rb
+        git commit -m "Update oidc-pam to ${{ steps.get_version.outputs.VERSION }}"
+        git push
