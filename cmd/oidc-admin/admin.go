@@ -283,7 +283,7 @@ func isServiceRunning(socketPath string) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	_ = conn.Close()
 	return true
 }
 
@@ -292,7 +292,7 @@ func getBrokerStatusSimple(socketPath string) (*StatusResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request := map[string]interface{}{
 		"type": "status",
@@ -315,7 +315,7 @@ func getSessionsSimple(socketPath string) ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request := map[string]interface{}{
 		"type": "sessions_list",
@@ -338,7 +338,7 @@ func getKeysSimple(socketPath string) ([]SSHKeyInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request := map[string]interface{}{
 		"type": "keys_list",

@@ -129,29 +129,3 @@ func main() {
 	}
 }
 
-// Helper function to prompt user for input (for interactive mode)
-func promptUser(prompt string) (string, error) {
-	fmt.Print(prompt)
-	var input string
-	_, err := fmt.Scanln(&input)
-	return input, err
-}
-
-// Helper function to display instructions to user
-func displayInstructions(instructions string) {
-	fmt.Printf("\n%s\n", instructions)
-}
-
-// Helper function to check if running in interactive terminal
-func isInteractive() bool {
-	stat, _ := os.Stdin.Stat()
-	return (stat.Mode() & os.ModeCharDevice) != 0
-}
-
-// Helper function to get environment variable with default
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}

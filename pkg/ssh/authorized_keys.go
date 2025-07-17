@@ -37,7 +37,7 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 
 	// Read existing authorized_keys file
 	var existingKeys []string
-	if data, err := ioutil.ReadFile(authorizedKeysPath); err == nil {
+	if data, err := os.ReadFile(authorizedKeysPath); err == nil {
 		existingKeys = strings.Split(string(data), "\n")
 	}
 
@@ -86,7 +86,7 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
 
 	// Read existing authorized_keys file
-	data, err := ioutil.ReadFile(authorizedKeysPath)
+	data, err := os.ReadFile(authorizedKeysPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // File doesn't exist, nothing to remove
@@ -119,7 +119,7 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 
 	// Write filtered content back
 	newContent := strings.Join(filteredLines, "\n")
-	if err := ioutil.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
+	if err := os.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
 		return fmt.Errorf("failed to write authorized_keys file: %w", err)
 	}
 
@@ -185,7 +185,7 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 	if removedCount > 0 {
 		// Write filtered content back
 		newContent := strings.Join(filteredLines, "\n")
-		if err := ioutil.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
+		if err := os.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
 			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
@@ -205,7 +205,7 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
 
 	// Read existing authorized_keys file
-	data, err := ioutil.ReadFile(authorizedKeysPath)
+	data, err := os.ReadFile(authorizedKeysPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []string{}, nil
@@ -241,12 +241,12 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	}
 
 	// Copy the file
-	data, err := ioutil.ReadFile(authorizedKeysPath)
+	data, err := os.ReadFile(authorizedKeysPath)
 	if err != nil {
 		return fmt.Errorf("failed to read authorized_keys file: %w", err)
 	}
 
-	if err := ioutil.WriteFile(backupPath, data, 0600); err != nil {
+	if err := os.WriteFile(backupPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
 	}
 
@@ -271,12 +271,12 @@ func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
 	}
 
 	// Copy backup to authorized_keys
-	data, err := ioutil.ReadFile(backupPath)
+	data, err := os.ReadFile(backupPath)
 	if err != nil {
 		return fmt.Errorf("failed to read backup file: %w", err)
 	}
 
-	if err := ioutil.WriteFile(authorizedKeysPath, data, 0600); err != nil {
+	if err := os.WriteFile(authorizedKeysPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to restore authorized_keys: %w", err)
 	}
 
