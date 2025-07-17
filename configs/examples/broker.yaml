@@ -1,0 +1,168 @@
+# OIDC PAM Broker Configuration Example
+# This file shows configuration options for the OIDC authentication broker
+
+# Server configuration
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# OIDC Provider configuration
+oidc:
+  providers:
+    # Example: Okta configuration
+    - name: "okta-corporate"
+      issuer: "https://company.okta.com"
+      client_id: "0oa1b2c3d4e5f6g7h8i9"
+      scopes: ["openid", "email", "groups"]
+      
+      # User attribute mapping
+      user_mapping:
+        username_claim: "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        
+      # Research computing features
+      research_policies:
+        enable_project_groups: false
+        enable_institutional_validation: false
+        enable_allocation_checking: false
+        enable_data_use_agreements: false
+        
+      # Provider settings
+      priority: 1
+      user_type: "corporate"
+      enabled_for_login: true
+      verification_only: false
+
+    # Example: Azure AD configuration  
+    - name: "azure-corporate"
+      issuer: "https://login.microsoftonline.com/your-tenant-id/v2.0"
+      client_id: "12345678-1234-1234-1234-123456789abc"
+      scopes: ["openid", "email", "https://graph.microsoft.com/User.Read"]
+      
+      user_mapping:
+        username_claim: "preferred_username"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        
+      priority: 2
+      user_type: "corporate"
+      enabled_for_login: true
+
+# Authentication policies
+authentication:
+  token_lifetime: "8h"
+  refresh_threshold: "1h"
+  max_concurrent_sessions: 10
+  require_groups: ["linux-users"]
+  
+  # Network requirements
+  network_requirements:
+    require_tailscale: false
+    validate_device_trust: false
+    require_private_network: false
+    
+  # Resource-specific policies
+  policies:
+    production:
+      require_groups: ["production-access", "senior-engineers"]
+      require_device_trust: true
+      max_session_duration: "4h"
+      require_reauth_for_new_hosts: true
+      audit_level: "detailed"
+      
+    staging:
+      require_groups: ["developers", "qa-team"]
+      max_session_duration: "8h"
+      audit_level: "standard"
+      
+    development:
+      require_groups: ["developers", "contractors"]
+      max_session_duration: "12h"
+      allow_untrusted_devices: true
+      audit_level: "basic"
+
+  # Risk-based policies
+  risk_policies:
+    - condition: "risk_score >= 70"
+      action: "REQUIRE_ADDITIONAL_MFA"
+      recommendation: "High risk detected, additional authentication required"
+    - condition: "unusual_location AND after_hours"
+      action: "REQUIRE_APPROVAL"
+      recommendation: "Unusual access pattern detected"
+
+# Security configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  require_auth_time: false
+  max_token_age: "24h"
+  clock_skew_tolerance: "5m"
+  
+  # Token encryption (generate with: openssl rand -base64 32)
+  token_encryption_key: "your-32-byte-base64-encoded-key-here"
+  
+  # TLS verification
+  tls_verification:
+    pin_certificates: false
+    skip_tls_verify: false
+    
+  # Rate limiting
+  rate_limiting:
+    max_requests_per_minute: 60
+    max_concurrent_auths: 10
+
+# Cloud integration (optional)
+cloud:
+  provider: "aws"  # aws, azure, gcp, or leave empty to disable
+  auto_discovery: true
+  metadata_sources: ["aws", "azure", "gcp"]
+  
+  # AWS configuration
+  aws:
+    region: "us-west-2"
+    parameter_store:
+      prefix: "/company/oidc/"
+      parameters:
+        provider_url: "provider"
+        client_id: "client-id"
+        scopes: "scopes"
+
+# Audit configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  # Audit events to log
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "configuration_changes"
+    - "session_management"
+    
+  # Output destinations
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+      
+    - type: "syslog"
+      facility: "auth"
+      severity: "info"
+      
+  # Compliance frameworks
+  compliance_frameworks: ["SOC2", "PCI", "HIPAA"]
+  
+  # Additional metadata
+  include_tailscale_metadata: false
+  include_device_fingerprint: true
+  include_network_path: false
