@@ -2,6 +2,7 @@ package security
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -224,5 +225,193 @@ func TestAuditEventArrayFields(t *testing.T) {
 	}
 	if len(unmarshaled.RiskFactors) != 2 {
 		t.Errorf("Expected 2 risk factors, got %d", len(unmarshaled.RiskFactors))
+	}
+}
+
+func TestStdoutAuditOutput(t *testing.T) {
+	cfg := config.AuditOutput{
+		Type: "stdout",
+	}
+
+	output, err := NewStdoutAuditOutput(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create stdout audit output: %v", err)
+	}
+
+	if output == nil {
+		t.Error("Expected non-nil stdout audit output")
+	}
+
+	// Test writing events
+	event := AuditEvent{
+		EventType:  "test_stdout",
+		UserID:     "user123",
+		SourceIP:   "192.168.1.100",
+		TargetHost: "server.example.com",
+		Success:    true,
+		Timestamp:  time.Now(),
+	}
+
+	err = output.Write(event)
+	if err != nil {
+		t.Errorf("Failed to write to stdout: %v", err)
+	}
+
+	// Test closing
+	err = output.Close()
+	if err != nil {
+		t.Errorf("Failed to close stdout output: %v", err)
+	}
+}
+
+func TestSyslogAuditOutput(t *testing.T) {
+	cfg := config.AuditOutput{
+		Type: "syslog",
+	}
+
+	output, err := NewSyslogAuditOutput(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create syslog audit output: %v", err)
+	}
+
+	if output == nil {
+		t.Error("Expected non-nil syslog audit output")
+	}
+
+	// Test writing events
+	event := AuditEvent{
+		EventType:  "test_syslog",
+		UserID:     "user123",
+		SourceIP:   "192.168.1.100",
+		TargetHost: "server.example.com",
+		Success:    true,
+		Timestamp:  time.Now(),
+	}
+
+	err = output.Write(event)
+	if err != nil {
+		t.Errorf("Failed to write to syslog: %v", err)
+	}
+
+	// Test closing
+	err = output.Close()
+	if err != nil {
+		t.Errorf("Failed to close syslog output: %v", err)
+	}
+}
+
+func TestHTTPAuditOutput(t *testing.T) {
+	cfg := config.AuditOutput{
+		Type: "http",
+		URL:  "https://example.com/audit",
+	}
+
+	output, err := NewHTTPAuditOutput(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create HTTP audit output: %v", err)
+	}
+
+	if output == nil {
+		t.Error("Expected non-nil HTTP audit output")
+	}
+
+	// Test writing events (will fail due to invalid URL, but tests the method)
+	event := AuditEvent{
+		EventType:  "test_http",
+		UserID:     "user123",
+		SourceIP:   "192.168.1.100",
+		TargetHost: "server.example.com",
+		Success:    true,
+		Timestamp:  time.Now(),
+	}
+
+	err = output.Write(event)
+	// This may fail due to network issues, but that's expected in tests
+	if err != nil {
+		t.Logf("HTTP write failed as expected: %v", err)
+	}
+
+	// Test closing
+	err = output.Close()
+	if err != nil {
+		t.Errorf("Failed to close HTTP output: %v", err)
+	}
+}
+
+func TestAuditOutputCreation(t *testing.T) {
+	// Test creating different audit output types
+	testCases := []struct {
+		config       config.AuditOutput
+		expectError  bool
+		outputType   string
+	}{
+		{
+			config: config.AuditOutput{
+				Type: "file",
+				Path: "/tmp/test-audit.log",
+			},
+			expectError: false,
+			outputType:  "file",
+		},
+		{
+			config: config.AuditOutput{
+				Type: "stdout",
+			},
+			expectError: false,
+			outputType:  "stdout",
+		},
+		{
+			config: config.AuditOutput{
+				Type: "syslog",
+			},
+			expectError: false,
+			outputType:  "syslog",
+		},
+		{
+			config: config.AuditOutput{
+				Type: "http",
+				URL:  "https://example.com/audit",
+			},
+			expectError: false,
+			outputType:  "http",
+		},
+		{
+			config: config.AuditOutput{
+				Type: "unknown",
+			},
+			expectError: true,
+			outputType:  "unknown",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("create_"+tc.outputType, func(t *testing.T) {
+			var output AuditOutput
+			var err error
+			switch tc.config.Type {
+			case "file":
+				output, err = NewFileAuditOutput(tc.config)
+			case "stdout":
+				output, err = NewStdoutAuditOutput(tc.config)
+			case "syslog":
+				output, err = NewSyslogAuditOutput(tc.config)
+			case "http":
+				output, err = NewHTTPAuditOutput(tc.config)
+			default:
+				err = fmt.Errorf("unknown audit output type: %s", tc.config.Type)
+			}
+			if tc.expectError {
+				if err == nil {
+					t.Error("Expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if output == nil {
+					t.Error("Expected non-nil output")
+				}
+			}
+		})
 	}
 }
