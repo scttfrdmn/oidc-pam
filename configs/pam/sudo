@@ -1,0 +1,150 @@
+# PAM Configuration for SUDO with OIDC Authentication
+# This file should be placed at /etc/pam.d/sudo
+# 
+# This configuration enables OIDC authentication for sudo operations while
+# maintaining traditional authentication for emergency access.
+#
+# IMPORTANT: Test sudo configuration very carefully!
+# Keep a root session open and test with non-privileged users first.
+
+# Authentication stack
+auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml operation=sudo target_user=%u
+auth    requisite   pam_deny.so
+auth    required    pam_unix.so try_first_pass
+auth    optional    pam_group.so
+
+# Account management
+account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account required    pam_unix.so
+account required    pam_access.so
+account required    pam_time.so
+
+# Session management
+session required    pam_unix.so
+session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_systemd.so
+session optional    pam_env.so
+session optional    pam_limits.so
+
+# Password management (disabled for OIDC)
+password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
+
+# CONFIGURATION NOTES:
+# 1. The 'operation=sudo' parameter tells the OIDC module this is a sudo operation
+# 2. The 'target_user=%u' parameter passes the target username for authorization
+# 3. This allows for command-specific and user-specific authorization policies
+# 4. Consider the security implications of OIDC for privilege escalation
+
+# SUDO POLICY CONFIGURATION:
+# Configure sudo-specific policies in /etc/oidc-auth/broker.yaml:
+# 
+# authentication:
+#   policies:
+#     sudo_operations:
+#       require_groups: ["sudo-users", "admin-users"]
+#       require_additional_mfa: true
+#       max_session_duration: "30m"
+#       audit_level: "detailed"
+#       require_approval_for: ["root-commands", "system-commands"]
+#       session_recording: true
+
+# SUDOERS CONFIGURATION:
+# Configure /etc/sudoers to work with OIDC authentication:
+# 
+# # Default settings
+# Defaults    env_reset
+# Defaults    mail_badpass
+# Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Defaults    timestamp_timeout=30
+# Defaults    passwd_timeout=0
+# Defaults    logfile="/var/log/sudo.log"
+# 
+# # OIDC user groups
+# %oidc-admin         ALL=(ALL:ALL) ALL
+# %oidc-operators     ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/bin/service
+# %oidc-developers    ALL=(www-data) NOPASSWD: /usr/bin/php, /usr/bin/composer
+# %oidc-db-admins     ALL=(postgres) NOPASSWD: /usr/bin/psql, /usr/bin/pg_dump
+# 
+# # Emergency access
+# emergency-admin     ALL=(ALL:ALL) ALL
+# 
+# # Restrict certain commands
+# %oidc-users         ALL=(ALL) !/usr/bin/su, !/bin/bash, !/bin/sh
+
+# ADVANCED SUDO POLICIES:
+# For more granular control, configure command-specific policies:
+# 
+# # Time-based restrictions
+# Defaults:oidc-contractors   !lecture,timestamp_timeout=0
+# %oidc-contractors   ALL=(ALL) /usr/bin/systemctl status *
+# 
+# # Network-based restrictions
+# Defaults:oidc-remote-users  requiretty
+# %oidc-remote-users  ALL=(ALL) NOPASSWD: /usr/bin/uptime, /usr/bin/df
+# 
+# # Audit requirements
+# Defaults:oidc-audit-users   log_output, log_input
+# %oidc-audit-users   ALL=(ALL) ALL
+
+# TESTING:
+# 1. Test with a non-privileged user first: sudo -l
+# 2. Keep a root session open while testing
+# 3. Test various sudo operations with different users
+# 4. Verify emergency access methods work
+# 5. Test sudo -i and sudo -s for shell access
+
+# SECURITY CONSIDERATIONS:
+# 1. Sudo with OIDC requires careful consideration of privilege escalation
+# 2. Monitor all sudo operations in /var/log/sudo.log
+# 3. Implement strict group-based access controls in OIDC provider
+# 4. Consider requiring additional MFA for sensitive operations
+# 5. Set appropriate timeout values for sudo sessions
+
+# MONITORING AND ALERTING:
+# Set up comprehensive monitoring for sudo operations:
+# 1. Monitor /var/log/sudo.log for all sudo attempts
+# 2. Alert on failed sudo attempts
+# 3. Alert on root access via sudo
+# 4. Alert on sudo operations outside business hours
+# 5. Monitor for privilege escalation attempts
+# 6. Implement SIEM integration for security monitoring
+
+# EMERGENCY ACCESS:
+# If OIDC authentication fails, maintain emergency access via:
+# 1. Emergency admin account with Unix password
+# 2. Root account access via console
+# 3. SSH root access with public key authentication
+# 4. Single-user mode boot for system recovery
+# 5. Traditional Unix authentication as fallback
+
+# INTEGRATION WITH EXTERNAL SYSTEMS:
+# Consider integrating with external approval systems:
+# 
+# # Require approval for sensitive operations
+# %oidc-contractors   ALL=(ALL) NOPASSWD: /usr/bin/systemctl status *
+# %oidc-contractors   ALL=(ALL) /usr/bin/systemctl start *, /usr/bin/systemctl stop *
+# 
+# # The OIDC broker can integrate with:
+# # - ServiceNow for change management
+# # - Slack/Teams for approval workflows
+# # - PagerDuty for emergency access
+# # - JIRA for ticket-based access
+
+# COMPLIANCE CONSIDERATIONS:
+# For compliance with security standards:
+# 1. Log all sudo operations with full command details
+# 2. Implement time-based access controls
+# 3. Require justification for privileged operations
+# 4. Implement approval workflows for sensitive commands
+# 5. Regular audit of sudo access and usage
+# 6. Implement principle of least privilege
+# 7. Rotate emergency access credentials regularly
+
+# PERFORMANCE CONSIDERATIONS:
+# To optimize sudo performance with OIDC:
+# 1. Configure appropriate token caching
+# 2. Set reasonable timeout values
+# 3. Use group-based policies to reduce lookup overhead
+# 4. Consider caching OIDC authentication results
+# 5. Monitor authentication latency and optimize as needed

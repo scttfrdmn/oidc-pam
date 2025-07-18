@@ -1,0 +1,82 @@
+# PAM Configuration for SSH with OIDC Authentication
+# This file should be placed at /etc/pam.d/ssh (or /etc/pam.d/sshd on some systems)
+# 
+# This configuration enables OIDC authentication for SSH login while maintaining
+# fallback to traditional authentication methods for emergency access.
+#
+# IMPORTANT: Test this configuration thoroughly before deploying to production!
+# Always maintain a backup authentication method for emergency access.
+
+# Authentication stack
+auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    requisite   pam_deny.so
+auth    required    pam_unix.so try_first_pass nullok_secure
+
+# Account management
+account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account required    pam_unix.so
+account required    pam_access.so
+
+# Session management
+session required    pam_unix.so
+session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_systemd.so
+session optional    pam_lastlog.so
+
+# Password management (disabled for OIDC)
+password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
+
+# CONFIGURATION NOTES:
+# 1. The 'sufficient' control means if pam_oidc.so succeeds, no further auth modules are tried
+# 2. The 'requisite' pam_deny.so provides a security barrier
+# 3. The 'required' pam_unix.so provides fallback authentication
+# 4. Remove 'debug' from pam_oidc.so in production
+# 5. Ensure /etc/oidc-auth/broker.yaml is readable by the PAM module
+
+# SSH DAEMON CONFIGURATION:
+# Add these lines to /etc/ssh/sshd_config:
+# 
+# # Enable PAM authentication
+# UsePAM yes
+# 
+# # Disable password authentication (optional, for OIDC-only)
+# PasswordAuthentication no
+# 
+# # Enable challenge-response authentication for OIDC device flow
+# ChallengeResponseAuthentication yes
+# 
+# # Enable public key authentication as fallback
+# PubkeyAuthentication yes
+# 
+# # Disable other authentication methods
+# GSSAPIAuthentication no
+# KerberosAuthentication no
+# 
+# # Optional: Restrict to specific users/groups
+# AllowUsers oidc-user
+# AllowGroups oidc-users
+# 
+# # Optional: Force command for certain users
+# Match Group oidc-contractors
+#     ForceCommand /usr/local/bin/restricted-shell
+
+# TESTING:
+# 1. Test with a non-privileged user first
+# 2. Keep a root session open while testing
+# 3. Verify emergency access methods work
+# 4. Test both successful and failed authentication scenarios
+
+# SECURITY CONSIDERATIONS:
+# 1. This configuration allows fallback to Unix authentication
+# 2. For OIDC-only authentication, remove the pam_unix.so lines
+# 3. Consider using pam_access.so for additional access controls
+# 4. Monitor /var/log/auth.log for authentication events
+# 5. Implement proper group-based access controls in OIDC provider
+
+# EMERGENCY ACCESS:
+# If OIDC authentication fails, users can still authenticate via:
+# 1. Unix password authentication (if enabled)
+# 2. SSH public key authentication
+# 3. Console access (physical or virtual)
+# 4. Recovery user account with traditional authentication

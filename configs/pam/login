@@ -1,0 +1,90 @@
+# PAM Configuration for Console Login with OIDC Authentication
+# This file should be placed at /etc/pam.d/login
+# 
+# This configuration enables OIDC authentication for console login (tty) while
+# maintaining fallback authentication for emergency access.
+#
+# IMPORTANT: Test this configuration thoroughly on a non-production system first!
+# Always maintain console or SSH access for emergency recovery.
+
+# Authentication stack
+auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    requisite   pam_nologin.so
+auth    required    pam_unix.so try_first_pass nullok_secure
+auth    optional    pam_group.so
+
+# Account management
+account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account required    pam_unix.so
+account required    pam_access.so
+account required    pam_nologin.so
+account required    pam_time.so
+
+# Session management
+session required    pam_unix.so
+session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_systemd.so
+session optional    pam_lastlog.so
+session optional    pam_motd.so
+session optional    pam_mail.so standard
+
+# Password management (disabled for OIDC)
+password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
+
+# CONFIGURATION NOTES:
+# 1. Console login typically shows device flow instructions to the user
+# 2. The user must complete authentication on another device/browser
+# 3. pam_nologin.so prevents login if /etc/nologin exists
+# 4. pam_time.so can restrict login hours (configure in /etc/security/time.conf)
+# 5. pam_access.so provides additional access controls (configure in /etc/security/access.conf)
+
+# CONSOLE CONFIGURATION:
+# The getty service configuration may need adjustment:
+# 
+# /etc/systemd/system/getty@.service.d/override.conf:
+# [Service]
+# ExecStart=
+# ExecStart=-/sbin/agetty -o '-p -- \\u' --noclear %I $TERM
+# 
+# This allows custom login prompts to display device flow instructions.
+
+# TIME-BASED ACCESS CONTROL:
+# Configure /etc/security/time.conf for time-based restrictions:
+# 
+# # Allow OIDC users only during business hours
+# login;*;oidc-users;MoTuWeThFr0800-1800
+# 
+# # Allow admin users anytime
+# login;*;admin-users;Al0000-2400
+
+# ACCESS CONTROL:
+# Configure /etc/security/access.conf for additional restrictions:
+# 
+# # Allow OIDC users from specific networks
+# + : oidc-users : 192.168.1.0/24
+# + : oidc-users : 10.0.0.0/8
+# 
+# # Deny all other access
+# - : ALL : ALL EXCEPT LOCAL
+
+# TESTING:
+# 1. Test on a virtual console (Ctrl+Alt+F1-F6) first
+# 2. Keep SSH access available for recovery
+# 3. Test with different user types and groups
+# 4. Verify emergency access methods work
+
+# SECURITY CONSIDERATIONS:
+# 1. Console access is typically more trusted than remote access
+# 2. Consider disabling if only remote access is needed
+# 3. Monitor console login attempts in /var/log/auth.log
+# 4. Implement physical security for console access
+# 5. Consider using pam_limits.so for resource restrictions
+
+# EMERGENCY ACCESS:
+# If OIDC authentication fails, maintain emergency access via:
+# 1. Root account with traditional authentication
+# 2. Emergency user account with Unix password
+# 3. Single-user mode boot
+# 4. SSH access with public key authentication
+# 5. Console access with traditional authentication (if configured)

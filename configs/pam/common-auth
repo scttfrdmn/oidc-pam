@@ -1,0 +1,105 @@
+# PAM Common Authentication Configuration with OIDC
+# This file should be placed at /etc/pam.d/common-auth (Debian/Ubuntu)
+# or included in other PAM configurations (RedHat/CentOS)
+# 
+# This configuration provides a common authentication stack that can be
+# included by other PAM services to enable OIDC authentication.
+#
+# IMPORTANT: This affects all services that include common-auth!
+# Test thoroughly and maintain emergency access methods.
+
+# Primary authentication stack
+auth    [success=2 default=ignore]     pam_oidc.so config=/etc/oidc-auth/broker.yaml
+auth    [success=1 default=ignore]     pam_unix.so nullok_secure try_first_pass
+auth    requisite                      pam_deny.so
+auth    required                       pam_permit.so
+
+# CONFIGURATION NOTES:
+# 1. This uses the "success=N" syntax to control flow
+# 2. If pam_oidc.so succeeds, skip the next 2 modules (pam_unix.so and pam_deny.so)
+# 3. If pam_unix.so succeeds, skip the next 1 module (pam_deny.so)
+# 4. pam_deny.so acts as a security barrier if both fail
+# 5. pam_permit.so allows the authentication to succeed
+
+# ALTERNATIVE CONFIGURATION (OIDC-only):
+# For OIDC-only authentication without Unix fallback:
+# 
+# auth    required    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+# auth    requisite   pam_deny.so
+# auth    required    pam_permit.so
+
+# ALTERNATIVE CONFIGURATION (Unix-first):
+# For Unix authentication first, then OIDC fallback:
+# 
+# auth    [success=2 default=ignore]     pam_unix.so nullok_secure
+# auth    [success=1 default=ignore]     pam_oidc.so config=/etc/oidc-auth/broker.yaml
+# auth    requisite                      pam_deny.so
+# auth    required                       pam_permit.so
+
+# SERVICES THAT INCLUDE COMMON-AUTH:
+# This configuration affects all services that include common-auth:
+# - /etc/pam.d/login
+# - /etc/pam.d/ssh (or sshd)
+# - /etc/pam.d/gdm (or other display managers)
+# - /etc/pam.d/su
+# - /etc/pam.d/sudo
+# - /etc/pam.d/lightdm
+# - /etc/pam.d/cron
+# - Custom applications using PAM
+
+# TESTING:
+# 1. Test with a non-privileged user first
+# 2. Keep multiple access methods available during testing
+# 3. Test various services that use common-auth
+# 4. Verify emergency access methods work
+# 5. Test both successful and failed authentication scenarios
+
+# SECURITY CONSIDERATIONS:
+# 1. This configuration affects system-wide authentication
+# 2. Ensure OIDC provider is highly available
+# 3. Monitor authentication logs carefully
+# 4. Implement proper group-based access controls
+# 5. Consider service-specific overrides for critical services
+
+# EMERGENCY ACCESS:
+# If OIDC authentication fails, maintain emergency access via:
+# 1. Console access with traditional authentication
+# 2. SSH with public key authentication (if not using common-auth)
+# 3. Single-user mode boot
+# 4. Recovery user account with Unix password
+# 5. Physical console access
+
+# MONITORING:
+# Monitor these logs for authentication events:
+# - /var/log/auth.log (Debian/Ubuntu)
+# - /var/log/secure (RedHat/CentOS)
+# - /var/log/oidc-auth/audit.log
+# - Application-specific logs
+
+# DEBUGGING:
+# For debugging authentication issues:
+# 1. Add 'debug' parameter to pam_oidc.so
+# 2. Enable debug logging in broker.yaml
+# 3. Check PAM logs for detailed error messages
+# 4. Verify OIDC provider connectivity
+# 5. Test with pam_debug.so for detailed flow analysis
+
+# ROLLBACK PLAN:
+# If OIDC authentication causes issues:
+# 1. Boot from rescue media or single-user mode
+# 2. Restore backup of /etc/pam.d/common-auth
+# 3. Restart affected services
+# 4. Verify traditional authentication works
+# 5. Investigate and fix OIDC configuration issues
+
+# COMPATIBILITY:
+# This configuration is compatible with:
+# - Debian/Ubuntu systems using common-auth
+# - RedHat/CentOS systems (with appropriate includes)
+# - Most Linux distributions with PAM
+# - Applications that respect PAM configuration
+# 
+# May require adjustments for:
+# - Systems with non-standard PAM configurations
+# - Applications with custom PAM requirements
+# - Systems with mandatory access controls (SELinux, AppArmor)

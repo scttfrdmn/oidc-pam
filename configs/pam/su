@@ -1,0 +1,110 @@
+# PAM Configuration for SU (Switch User) with OIDC Authentication
+# This file should be placed at /etc/pam.d/su
+# 
+# This configuration enables OIDC authentication for user switching while
+# maintaining traditional authentication for emergency access.
+#
+# IMPORTANT: Be extremely careful with su configuration!
+# Test thoroughly and maintain root access for emergency recovery.
+
+# Authentication stack
+auth    sufficient  pam_rootok.so
+auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml target_user=%u
+auth    requisite   pam_deny.so
+auth    required    pam_unix.so try_first_pass nullok_secure
+auth    optional    pam_group.so
+
+# Account management
+account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account required    pam_unix.so
+account required    pam_access.so
+account required    pam_time.so
+
+# Session management
+session required    pam_unix.so
+session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_systemd.so
+session optional    pam_env.so
+session optional    pam_limits.so
+
+# Password management (disabled for OIDC)
+password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
+
+# CONFIGURATION NOTES:
+# 1. pam_rootok.so allows root to switch to any user without authentication
+# 2. The 'target_user=%u' parameter passes the target username to the OIDC module
+# 3. This allows for user-specific authorization policies
+# 4. Consider the security implications of allowing OIDC for privilege escalation
+
+# SU POLICY CONFIGURATION:
+# Configure additional policies in /etc/oidc-auth/broker.yaml:
+# 
+# authentication:
+#   policies:
+#     su_operations:
+#       require_groups: ["admin-users", "sudo-users"]
+#       require_additional_mfa: true
+#       max_session_duration: "1h"
+#       audit_level: "detailed"
+#       require_approval_for: ["root", "admin"]
+
+# WHEEL GROUP CONFIGURATION:
+# Configure /etc/security/access.conf for wheel group access:
+# 
+# # Only allow wheel group members to use su
+# + : wheel : ALL
+# - : ALL : ALL
+
+# SUDOERS INTEGRATION:
+# Consider using sudo instead of su for better audit trails:
+# 
+# # /etc/sudoers.d/oidc-users
+# %oidc-admin ALL=(ALL) ALL
+# %oidc-operators ALL=(ALL) NOPASSWD: /usr/bin/systemctl
+# %oidc-developers ALL=(www-data) NOPASSWD: /usr/bin/php
+
+# TESTING:
+# 1. Test as a non-privileged user first
+# 2. Keep a root session open while testing
+# 3. Test switching to different user types
+# 4. Verify emergency access methods work
+# 5. Test with and without target user specified
+
+# SECURITY CONSIDERATIONS:
+# 1. SU with OIDC requires careful consideration of privilege escalation
+# 2. Consider using sudo instead for better audit trails
+# 3. Monitor all su operations in /var/log/auth.log
+# 4. Implement strict group-based access controls
+# 5. Consider requiring additional MFA for sensitive operations
+
+# EMERGENCY ACCESS:
+# If OIDC authentication fails, maintain emergency access via:
+# 1. Root account can always su without authentication (pam_rootok.so)
+# 2. Traditional Unix authentication as fallback
+# 3. Emergency admin account with Unix password
+# 4. Single-user mode boot for system recovery
+# 5. SSH root access with public key authentication
+
+# ADVANCED CONFIGURATION:
+# For more restrictive su access, consider:
+# 
+# # Only allow specific users to use su
+# auth    required    pam_listfile.so item=user sense=allow file=/etc/su.allow
+# 
+# # Log all su attempts
+# auth    required    pam_warn.so
+# 
+# # Require membership in specific groups
+# auth    required    pam_succeed_if.so user ingroup admin-users
+# 
+# # Set resource limits for switched users
+# session required    pam_limits.so conf=/etc/security/limits.conf
+
+# MONITORING AND ALERTING:
+# Set up monitoring for su operations:
+# 1. Monitor /var/log/auth.log for su attempts
+# 2. Alert on failed su attempts
+# 3. Alert on root access via su
+# 4. Alert on su operations outside business hours
+# 5. Implement SIEM integration for security monitoring
