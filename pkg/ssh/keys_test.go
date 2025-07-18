@@ -95,7 +95,7 @@ func TestGenerateKey(t *testing.T) {
 func TestSaveAndLoadKey(t *testing.T) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "test-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	username := "testuser"
@@ -143,7 +143,7 @@ func TestSaveAndLoadKey(t *testing.T) {
 func TestDeleteKey(t *testing.T) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "test-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	username := "testuser"
@@ -215,7 +215,7 @@ func TestGetKeyPaths(t *testing.T) {
 func TestListKeys(t *testing.T) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "test-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	
@@ -270,7 +270,7 @@ func TestListKeys(t *testing.T) {
 func TestCleanupExpiredKeys(t *testing.T) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "test-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	km.SetExpiration(1 * time.Millisecond) // Very short expiration for testing
@@ -365,14 +365,14 @@ func BenchmarkGenerateKey(b *testing.B) {
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		km.GenerateKey(username)
+		_, _ = km.GenerateKey(username)
 	}
 }
 
 func BenchmarkSaveKey(b *testing.B) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "bench-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	username := "benchuser"
@@ -384,14 +384,14 @@ func BenchmarkSaveKey(b *testing.B) {
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		km.SaveKey(username, key)
+		_ = km.SaveKey(username, key)
 	}
 }
 
 func BenchmarkLoadKey(b *testing.B) {
 	// Create temporary directory
 	tempDir := filepath.Join(os.TempDir(), "bench-keys")
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 	
 	km := NewKeyManager(tempDir)
 	username := "benchuser"
@@ -407,6 +407,6 @@ func BenchmarkLoadKey(b *testing.B) {
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		km.LoadKey(username)
+		_, _ = km.LoadKey(username)
 	}
 }

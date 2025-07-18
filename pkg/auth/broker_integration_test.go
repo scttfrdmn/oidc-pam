@@ -49,6 +49,7 @@ func TestBrokerInternalMethods(t *testing.T) {
 	response := broker.createSuccessResponse(testSession)
 	if response == nil {
 		t.Error("Expected non-nil response for valid session")
+		return
 	}
 	if !response.Success {
 		t.Error("Expected successful response for valid session")
@@ -112,6 +113,7 @@ func TestBrokerSessionHelpers(t *testing.T) {
 	retrievedSession := broker.getSession("test-session-123")
 	if retrievedSession == nil {
 		t.Error("Expected non-nil session for existing session")
+		return
 	}
 	if retrievedSession.ID != "test-session-123" {
 		t.Errorf("Expected session ID 'test-session-123', got '%s'", retrievedSession.ID)
@@ -121,6 +123,7 @@ func TestBrokerSessionHelpers(t *testing.T) {
 	successResponse := broker.createSuccessResponse(testSession)
 	if successResponse == nil {
 		t.Error("Expected non-nil response for valid session")
+		return
 	}
 	if !successResponse.Success {
 		t.Error("Expected successful response for valid session")
@@ -195,6 +198,7 @@ func TestBrokerFieldInitialization(t *testing.T) {
 	session := broker.sessions["test-session-456"]
 	if session == nil {
 		t.Error("Expected non-nil session")
+		return
 	}
 	if session.UserID != "test-user-2" {
 		t.Errorf("Expected UserID 'test-user-2', got '%s'", session.UserID)
@@ -281,6 +285,7 @@ func TestBrokerProviderSelection(t *testing.T) {
 	provider := broker.selectProvider(authRequest, policyResult)
 	if provider == nil {
 		t.Error("Expected non-nil provider")
+		return
 	}
 	if provider.Name != "provider1" {
 		t.Errorf("Expected provider1, got %s", provider.Name)

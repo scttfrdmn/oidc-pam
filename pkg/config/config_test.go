@@ -14,7 +14,7 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	configPath := filepath.Join(tempDir, "test.yaml")
 	configContent := `
@@ -57,11 +57,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	// Clean environment first
-	os.Unsetenv("OIDC_PROVIDER_URL")
-	os.Unsetenv("OIDC_CLIENT_ID")
+	_ = os.Unsetenv("OIDC_PROVIDER_URL")
+	_ = os.Unsetenv("OIDC_CLIENT_ID")
 	
 	// Test that a valid minimal config loads
 	validConfigPath := filepath.Join(tempDir, "valid.yaml")
@@ -394,7 +394,7 @@ func TestConfigDefaultValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	configPath := filepath.Join(tempDir, "minimal.yaml")
 	minimalContent := `

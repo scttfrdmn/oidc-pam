@@ -149,7 +149,7 @@ func setupTestEnvironment(t *testing.T) string {
 }
 
 func cleanupTestEnvironment(testDir string) {
-	os.RemoveAll(testDir)
+	_ = os.RemoveAll(testDir)
 }
 
 func createTestConfig(testDir string) *config.Config {
@@ -220,7 +220,7 @@ func startTestBroker(t *testing.T, cfg *config.Config) *auth.Broker {
 }
 
 func stopTestBroker(broker *auth.Broker) {
-	broker.Stop()
+	_ = broker.Stop()
 }
 
 func waitForBrokerReady(t *testing.T, socketPath string) {
@@ -232,7 +232,7 @@ func waitForBrokerReady(t *testing.T, socketPath string) {
 			// Try to connect
 			conn, err := net.Dial("unix", socketPath)
 			if err == nil {
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 		}
@@ -246,7 +246,7 @@ func waitForBrokerReady(t *testing.T, socketPath string) {
 
 func testAuthentication(t *testing.T, socketPath string) {
 	conn := connectToBroker(t, socketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Test authentication request
 	request := map[string]interface{}{
@@ -281,7 +281,7 @@ func testAuthentication(t *testing.T, socketPath string) {
 
 func testSessionManagement(t *testing.T, socketPath string) {
 	conn := connectToBroker(t, socketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Create a session first
 	authRequest := map[string]interface{}{
@@ -325,7 +325,7 @@ func testSessionManagement(t *testing.T, socketPath string) {
 
 func testSSHKeyManagement(t *testing.T, socketPath string) {
 	conn := connectToBroker(t, socketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Test key generation
 	genRequest := map[string]interface{}{
@@ -374,7 +374,7 @@ func testSSHKeyManagement(t *testing.T, socketPath string) {
 
 func testRiskAssessment(t *testing.T, socketPath string) {
 	conn := connectToBroker(t, socketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Test risk assessment request
 	request := map[string]interface{}{
@@ -414,7 +414,7 @@ func testRiskAssessment(t *testing.T, socketPath string) {
 
 func testPolicyEnforcement(t *testing.T, socketPath string) {
 	conn := connectToBroker(t, socketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Test policy enforcement with high-risk scenario
 	request := map[string]interface{}{
@@ -458,8 +458,8 @@ func testPAMAuthentication(t *testing.T, cfg *config.Config) {
 	}
 
 	// Set environment for test
-	os.Setenv("OIDC_SOCKET_PATH", cfg.Server.SocketPath)
-	defer os.Unsetenv("OIDC_SOCKET_PATH")
+	_ = os.Setenv("OIDC_SOCKET_PATH", cfg.Server.SocketPath)
+	defer func() { _ = os.Unsetenv("OIDC_SOCKET_PATH") }()
 
 	// This would normally run the PAM helper, but we'll simulate the flow
 	// In a real integration test, you'd execute the helper and verify output
@@ -502,7 +502,7 @@ func testPAMSessionLifecycle(t *testing.T, cfg *config.Config) {
 func testAdminStatus(t *testing.T, cfg *config.Config) {
 	// Test admin CLI status command
 	conn := connectToBroker(t, cfg.Server.SocketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request := map[string]interface{}{
 		"type": "status",
@@ -534,7 +534,7 @@ func testAdminStatus(t *testing.T, cfg *config.Config) {
 func testAdminSessions(t *testing.T, cfg *config.Config) {
 	// Create a test session first
 	conn := connectToBroker(t, cfg.Server.SocketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Authenticate to create session
 	authRequest := map[string]interface{}{
@@ -544,9 +544,9 @@ func testAdminSessions(t *testing.T, cfg *config.Config) {
 		"target_host": "localhost",
 	}
 
-	json.NewEncoder(conn).Encode(authRequest)
+	_ = json.NewEncoder(conn).Encode(authRequest)
 	var authResponse map[string]interface{}
-	json.NewDecoder(conn).Decode(&authResponse)
+	_ = json.NewDecoder(conn).Decode(&authResponse)
 
 	// Test session listing via admin interface
 	listRequest := map[string]interface{}{
@@ -572,7 +572,7 @@ func testAdminSessions(t *testing.T, cfg *config.Config) {
 func testAdminKeys(t *testing.T, cfg *config.Config) {
 	// Test SSH key management via admin interface
 	conn := connectToBroker(t, cfg.Server.SocketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Create a test key
 	createRequest := map[string]interface{}{
@@ -582,9 +582,9 @@ func testAdminKeys(t *testing.T, cfg *config.Config) {
 		"key_size": 2048,
 	}
 
-	json.NewEncoder(conn).Encode(createRequest)
+	_ = json.NewEncoder(conn).Encode(createRequest)
 	var createResponse map[string]interface{}
-	json.NewDecoder(conn).Decode(&createResponse)
+	_ = json.NewDecoder(conn).Decode(&createResponse)
 
 	// List keys
 	listRequest := map[string]interface{}{
@@ -610,7 +610,7 @@ func testAdminKeys(t *testing.T, cfg *config.Config) {
 func testAdminHealth(t *testing.T, cfg *config.Config) {
 	// Test health check via admin interface
 	conn := connectToBroker(t, cfg.Server.SocketPath)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	request := map[string]interface{}{
 		"type": "health",
@@ -674,11 +674,11 @@ func BenchmarkAuthentication(b *testing.B) {
 				"target_host": "localhost",
 			}
 
-			json.NewEncoder(conn).Encode(request)
+			_ = json.NewEncoder(conn).Encode(request)
 			var response map[string]interface{}
-			json.NewDecoder(conn).Decode(&response)
+			_ = json.NewDecoder(conn).Decode(&response)
 			
-			conn.Close()
+			_ = conn.Close()
 		}
 	})
 }
@@ -693,7 +693,7 @@ func setupBenchmarkEnvironment(b *testing.B) string {
 
 	dirs := []string{"config", "logs", "keys", "sockets", "data"}
 	for _, dir := range dirs {
-		os.MkdirAll(filepath.Join(testDir, dir), 0755)
+		_ = os.MkdirAll(filepath.Join(testDir, dir), 0755)
 	}
 
 	return testDir
@@ -723,7 +723,7 @@ func waitForBrokerReadyForBench(b *testing.B, socketPath string) {
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(socketPath); err == nil {
 			if conn, err := net.Dial("unix", socketPath); err == nil {
-				conn.Close()
+				_ = conn.Close()
 				return
 			}
 		}

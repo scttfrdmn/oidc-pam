@@ -57,7 +57,7 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	if err != nil {
 		return fmt.Errorf("failed to open authorized_keys file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Add timestamp comment
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
@@ -145,7 +145,7 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 		}
 		return fmt.Errorf("failed to open authorized_keys file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var filteredLines []string
 	var removedCount int

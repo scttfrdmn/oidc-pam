@@ -17,7 +17,7 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "security.log")
 	
@@ -43,7 +43,7 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 	if err := logger.Start(ctx); err != nil {
 		t.Fatalf("Failed to start audit logger: %v", err)
 	}
-	defer logger.Stop()
+	defer func() { _ = logger.Stop() }()
 
 	// Test critical security events
 	securityEvents := []AuditEvent{
@@ -127,7 +127,7 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "integrity.log")
 	
@@ -153,7 +153,7 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 	if err := logger.Start(ctx); err != nil {
 		t.Fatalf("Failed to start audit logger: %v", err)
 	}
-	defer logger.Stop()
+	defer func() { _ = logger.Stop() }()
 
 	// Log a critical security event
 	criticalEvent := AuditEvent{
@@ -208,7 +208,7 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "compliance.log")
 	
@@ -235,7 +235,7 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 	if err := logger.Start(ctx); err != nil {
 		t.Fatalf("Failed to start audit logger: %v", err)
 	}
-	defer logger.Stop()
+	defer func() { _ = logger.Stop() }()
 
 	// Test events that must be logged for compliance
 	complianceEvents := []AuditEvent{
@@ -315,7 +315,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "threats.log")
 	
@@ -341,7 +341,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 	if err := logger.Start(ctx); err != nil {
 		t.Fatalf("Failed to start audit logger: %v", err)
 	}
-	defer logger.Stop()
+	defer func() { _ = logger.Stop() }()
 
 	// Simulate attack patterns that should be detectable in logs
 	attackPatterns := []AuditEvent{
