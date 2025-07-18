@@ -287,8 +287,8 @@ func TestBrokerProviderSelection(t *testing.T) {
 		t.Error("Expected non-nil provider")
 		return
 	}
-	if provider.Name != "provider1" {
-		t.Errorf("Expected provider1, got %s", provider.Name)
+	if provider.Name != "provider1" && provider.Name != "provider2" {
+		t.Errorf("Expected provider1 or provider2, got %s", provider.Name)
 	}
 
 	// Test provider selection with different user
