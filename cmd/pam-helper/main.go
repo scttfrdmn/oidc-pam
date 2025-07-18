@@ -15,9 +15,14 @@ import (
 )
 
 // Version information
+var (
+	version   = "dev"
+	buildDate = "unknown"
+	gitCommit = "unknown"
+)
+
 const (
-	Version = "0.1.0-alpha"
-	Name    = "oidc-pam-helper"
+	Name = "oidc-pam-helper"
 )
 
 func main() {

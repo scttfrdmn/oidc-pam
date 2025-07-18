@@ -37,6 +37,7 @@ type OIDCProvider struct {
 	Name                string            `mapstructure:"name"`
 	Issuer              string            `mapstructure:"issuer"`
 	ClientID            string            `mapstructure:"client_id"`
+	ClientSecret        string            `mapstructure:"client_secret"`
 	Scopes              []string          `mapstructure:"scopes"`
 	DeviceEndpoint      string            `mapstructure:"device_endpoint"`
 	TokenEndpoint       string            `mapstructure:"token_endpoint"`

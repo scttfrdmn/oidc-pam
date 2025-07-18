@@ -1,0 +1,358 @@
+# OIDC PAM Broker - Cloud-Native Configuration
+# Optimized for cloud deployments with container orchestration,
+# external secret management, and cloud-native logging/monitoring
+#
+# Use this for:
+# - Kubernetes deployments
+# - AWS ECS/Fargate
+# - Google Cloud Run
+# - Azure Container Instances
+# - Any containerized environment
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "${LOG_LEVEL:-info}"
+  audit_log: "/var/log/oidc-auth/audit.log"
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# OIDC Provider with environment variable support
+oidc:
+  providers:
+    - name: "primary"
+      # Use environment variables for sensitive configuration
+      issuer: "${OIDC_ISSUER_URL}"
+      client_id: "${OIDC_CLIENT_ID}"
+      client_secret: "${OIDC_CLIENT_SECRET}"
+      scopes: 
+        - "openid"
+        - "email"
+        - "profile"
+        - "groups"
+      
+      user_mapping:
+        username_claim: "${OIDC_USERNAME_CLAIM:-email}"
+        email_claim: "${OIDC_EMAIL_CLAIM:-email}"
+        name_claim: "${OIDC_NAME_CLAIM:-name}"
+        groups_claim: "${OIDC_GROUPS_CLAIM:-groups}"
+      
+      priority: 1
+      enabled_for_login: true
+      verification_only: false
+
+# Authentication with cloud-friendly defaults
+authentication:
+  token_lifetime: "${TOKEN_LIFETIME:-4h}"
+  refresh_threshold: "${REFRESH_THRESHOLD:-30m}"
+  max_concurrent_sessions: "${MAX_CONCURRENT_SESSIONS:-10}"
+  
+  # Groups from environment
+  require_groups: ["${REQUIRED_GROUPS:-users}"]
+  
+  # Cloud-optimized policies
+  policies:
+    production:
+      require_groups: ["${PROD_GROUPS:-production-access}"]
+      require_device_trust: "${PROD_REQUIRE_DEVICE_TRUST:-true}"
+      max_session_duration: "${PROD_MAX_SESSION:-2h}"
+      audit_level: "detailed"
+    
+    staging:
+      require_groups: ["${STAGING_GROUPS:-staging-access}"]
+      max_session_duration: "${STAGING_MAX_SESSION:-4h}"
+      audit_level: "standard"
+    
+    development:
+      require_groups: ["${DEV_GROUPS:-developers}"]
+      max_session_duration: "${DEV_MAX_SESSION:-8h}"
+      allow_untrusted_devices: "${DEV_ALLOW_UNTRUSTED:-true}"
+      audit_level: "basic"
+
+# Security with externalized secrets
+security:
+  audit_enabled: "${AUDIT_ENABLED:-true}"
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  max_token_age: "${MAX_TOKEN_AGE:-4h}"
+  clock_skew_tolerance: "${CLOCK_SKEW_TOLERANCE:-2m}"
+  
+  # Token encryption key from environment or secret manager
+  token_encryption_key: "${TOKEN_ENCRYPTION_KEY}"
+  
+  # TLS configuration
+  tls_verification:
+    pin_certificates: "${TLS_PIN_CERTIFICATES:-false}"
+    skip_tls_verify: "${TLS_SKIP_VERIFY:-false}"
+  
+  # Rate limiting
+  rate_limiting:
+    max_requests_per_minute: "${RATE_LIMIT_RPM:-60}"
+    max_concurrent_auths: "${RATE_LIMIT_CONCURRENT:-10}"
+
+# Cloud Provider Integration
+cloud:
+  provider: "${CLOUD_PROVIDER:-aws}"
+  auto_discovery: "${CLOUD_AUTO_DISCOVERY:-true}"
+  metadata_sources: ["${CLOUD_PROVIDER:-aws}"]
+  
+  # AWS Integration
+  aws:
+    region: "${AWS_REGION:-us-west-2}"
+    parameter_store:
+      prefix: "${AWS_PARAMETER_PREFIX:-/oidc-pam/}"
+      parameters:
+        provider_url: "${AWS_PARAM_PROVIDER_URL:-oidc-provider-url}"
+        client_id: "${AWS_PARAM_CLIENT_ID:-oidc-client-id}"
+        client_secret: "${AWS_PARAM_CLIENT_SECRET:-oidc-client-secret}"
+  
+  # Azure Integration
+  azure:
+    key_vault:
+      vault_name: "${AZURE_KEY_VAULT_NAME}"
+      secrets:
+        provider_url: "${AZURE_SECRET_PROVIDER_URL:-oidc-provider-url}"
+        client_id: "${AZURE_SECRET_CLIENT_ID:-oidc-client-id}"
+        client_secret: "${AZURE_SECRET_CLIENT_SECRET:-oidc-client-secret}"
+  
+  # GCP Integration
+  gcp:
+    project_id: "${GCP_PROJECT_ID}"
+    secret_manager:
+      secrets:
+        provider_url: "${GCP_SECRET_PROVIDER_URL:-oidc-provider-url}"
+        client_id: "${GCP_SECRET_CLIENT_ID:-oidc-client-id}"
+        client_secret: "${GCP_SECRET_CLIENT_SECRET:-oidc-client-secret}"
+
+# Cloud-Native Audit Configuration
+audit:
+  enabled: "${AUDIT_ENABLED:-true}"
+  format: "${AUDIT_FORMAT:-json}"
+  retention_period: "${AUDIT_RETENTION:-7_years}"
+  
+  # Essential events
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "session_management"
+    - "policy_violations"
+    - "system_events"
+    
+  # Cloud-native outputs
+  outputs:
+    # Local file (for sidecar log collection)
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+    
+    # Stdout for container log collection
+    - type: "stdout"
+      format: "json"
+    
+    # Cloud-specific outputs (uncomment as needed)
+    
+    # AWS CloudWatch Logs
+    # - type: "cloudwatch"
+    #   log_group: "${AWS_LOG_GROUP:-/oidc-pam/audit}"
+    #   log_stream: "${AWS_LOG_STREAM:-${HOSTNAME}}"
+    #   region: "${AWS_REGION:-us-west-2}"
+    
+    # Azure Monitor
+    # - type: "azure_monitor"
+    #   workspace_id: "${AZURE_WORKSPACE_ID}"
+    #   workspace_key: "${AZURE_WORKSPACE_KEY}"
+    
+    # Google Cloud Logging
+    # - type: "stackdriver"
+    #   project_id: "${GCP_PROJECT_ID}"
+    #   log_id: "${GCP_LOG_ID:-oidc-pam-audit}"
+    
+    # Elasticsearch/OpenSearch
+    # - type: "elasticsearch"
+    #   url: "${ELASTICSEARCH_URL}"
+    #   index: "${ELASTICSEARCH_INDEX:-oidc-pam-audit}"
+    #   headers:
+    #     Authorization: "Bearer ${ELASTICSEARCH_TOKEN}"
+    
+    # Splunk
+    # - type: "splunk"
+    #   url: "${SPLUNK_URL}"
+    #   token: "${SPLUNK_TOKEN}"
+    #   index: "${SPLUNK_INDEX:-oidc-pam}"
+    
+    # Webhook for custom integrations
+    # - type: "webhook"
+    #   url: "${WEBHOOK_URL}"
+    #   headers:
+    #     Authorization: "Bearer ${WEBHOOK_TOKEN}"
+    #     Content-Type: "application/json"
+  
+  # Compliance frameworks
+  compliance_frameworks: ["${COMPLIANCE_FRAMEWORKS:-SOC2,HIPAA,PCI-DSS}"]
+  
+  # Cloud metadata
+  include_tailscale_metadata: "${INCLUDE_TAILSCALE_METADATA:-false}"
+  include_device_fingerprint: "${INCLUDE_DEVICE_FINGERPRINT:-true}"
+  include_network_path: "${INCLUDE_NETWORK_PATH:-true}"
+
+# Cloud-optimized logging
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: "${LOG_FORMAT:-json}"
+  output: "${LOG_OUTPUT:-stdout}"
+  
+  # Component-specific logging
+  components:
+    auth: "${AUTH_LOG_LEVEL:-info}"
+    policy: "${POLICY_LOG_LEVEL:-info}"
+    ssh: "${SSH_LOG_LEVEL:-info}"
+    ipc: "${IPC_LOG_LEVEL:-info}"
+    audit: "${AUDIT_LOG_LEVEL:-info}"
+    security: "${SECURITY_LOG_LEVEL:-info}"
+
+# Container health checks
+health:
+  enabled: "${HEALTH_CHECKS_ENABLED:-true}"
+  port: "${HEALTH_CHECK_PORT:-8080}"
+  path: "${HEALTH_CHECK_PATH:-/health}"
+  interval: "${HEALTH_CHECK_INTERVAL:-30s}"
+  timeout: "${HEALTH_CHECK_TIMEOUT:-5s}"
+  retries: "${HEALTH_CHECK_RETRIES:-3}"
+
+# Metrics and monitoring
+metrics:
+  enabled: "${METRICS_ENABLED:-true}"
+  port: "${METRICS_PORT:-8081}"
+  path: "${METRICS_PATH:-/metrics}"
+  
+  # Prometheus integration
+  prometheus:
+    enabled: "${PROMETHEUS_ENABLED:-true}"
+    namespace: "${PROMETHEUS_NAMESPACE:-oidc_pam}"
+    subsystem: "${PROMETHEUS_SUBSYSTEM:-broker}"
+  
+  # Custom metrics
+  custom_metrics:
+    - name: "authentication_requests_total"
+      type: "counter"
+      help: "Total number of authentication requests"
+    - name: "active_sessions"
+      type: "gauge"
+      help: "Number of active sessions"
+    - name: "token_validation_duration"
+      type: "histogram"
+      help: "Time spent validating tokens"
+
+# ENVIRONMENT VARIABLES REFERENCE:
+# Required:
+#   OIDC_ISSUER_URL - Your OIDC provider's issuer URL
+#   OIDC_CLIENT_ID - OAuth2 client ID
+#   OIDC_CLIENT_SECRET - OAuth2 client secret
+#   TOKEN_ENCRYPTION_KEY - 32-byte base64 encoded encryption key
+#
+# Optional:
+#   LOG_LEVEL - Logging level (debug, info, warn, error)
+#   AUDIT_ENABLED - Enable audit logging (true/false)
+#   CLOUD_PROVIDER - Cloud provider (aws, azure, gcp)
+#   REQUIRED_GROUPS - Comma-separated list of required groups
+#   TOKEN_LIFETIME - Token lifetime (e.g., 4h, 30m)
+#   REFRESH_THRESHOLD - Token refresh threshold
+#   MAX_CONCURRENT_SESSIONS - Maximum concurrent sessions per user
+#
+# Cloud-specific:
+#   AWS_REGION - AWS region
+#   AWS_PARAMETER_PREFIX - AWS Parameter Store prefix
+#   AZURE_KEY_VAULT_NAME - Azure Key Vault name
+#   GCP_PROJECT_ID - Google Cloud project ID
+#
+# Monitoring:
+#   HEALTH_CHECKS_ENABLED - Enable health checks
+#   METRICS_ENABLED - Enable metrics collection
+#   PROMETHEUS_ENABLED - Enable Prometheus metrics
+
+# KUBERNETES DEPLOYMENT EXAMPLE:
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: oidc-pam-broker
+# spec:
+#   replicas: 3
+#   selector:
+#     matchLabels:
+#       app: oidc-pam-broker
+#   template:
+#     metadata:
+#       labels:
+#         app: oidc-pam-broker
+#     spec:
+#       containers:
+#       - name: oidc-pam-broker
+#         image: oidc-pam:latest
+#         env:
+#         - name: OIDC_ISSUER_URL
+#           value: "https://your-oidc-provider.com"
+#         - name: OIDC_CLIENT_ID
+#           valueFrom:
+#             secretKeyRef:
+#               name: oidc-pam-secrets
+#               key: client-id
+#         - name: OIDC_CLIENT_SECRET
+#           valueFrom:
+#             secretKeyRef:
+#               name: oidc-pam-secrets
+#               key: client-secret
+#         - name: TOKEN_ENCRYPTION_KEY
+#           valueFrom:
+#             secretKeyRef:
+#               name: oidc-pam-secrets
+#               key: encryption-key
+#         ports:
+#         - containerPort: 8080
+#           name: health
+#         - containerPort: 8081
+#           name: metrics
+#         livenessProbe:
+#           httpGet:
+#             path: /health
+#             port: 8080
+#           initialDelaySeconds: 30
+#           periodSeconds: 10
+#         readinessProbe:
+#           httpGet:
+#             path: /health
+#             port: 8080
+#           initialDelaySeconds: 5
+#           periodSeconds: 5
+#         resources:
+#           requests:
+#             cpu: 100m
+#             memory: 128Mi
+#           limits:
+#             cpu: 500m
+#             memory: 512Mi
+
+# DOCKER COMPOSE EXAMPLE:
+# version: '3.8'
+# services:
+#   oidc-pam-broker:
+#     image: oidc-pam:latest
+#     environment:
+#       - OIDC_ISSUER_URL=https://your-oidc-provider.com
+#       - OIDC_CLIENT_ID=your-client-id
+#       - OIDC_CLIENT_SECRET=your-client-secret
+#       - TOKEN_ENCRYPTION_KEY=your-encryption-key
+#       - LOG_LEVEL=info
+#       - AUDIT_ENABLED=true
+#     ports:
+#       - "8080:8080"
+#       - "8081:8081"
+#     volumes:
+#       - /var/run/oidc-auth:/var/run/oidc-auth
+#       - /var/log/oidc-auth:/var/log/oidc-auth
+#     restart: unless-stopped
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 3

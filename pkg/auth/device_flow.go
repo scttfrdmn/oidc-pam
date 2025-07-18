@@ -137,6 +137,11 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	data := url.Values{}
 	data.Set("client_id", p.Config.ClientID)
 	data.Set("scope", strings.Join(p.Config.Scopes, " "))
+	
+	// Include client secret if provided (for confidential clients)
+	if p.Config.ClientSecret != "" {
+		data.Set("client_secret", p.Config.ClientSecret)
+	}
 
 	// Make request to device authorization endpoint
 	resp, err := p.httpClient.PostForm(deviceEndpoint, data)
@@ -316,10 +321,35 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 	}
 
 	// Try to discover from provider metadata
-	// This is a simplified implementation - in reality, we would need to
-	// query the provider's .well-known/openid-configuration endpoint
-	// and look for the device_authorization_endpoint
-	return p.Config.Issuer + "/oauth2/device", nil
+	discoveryURL := p.Config.Issuer + "/.well-known/openid-configuration"
+	
+	resp, err := p.httpClient.Get(discoveryURL)
+	if err != nil {
+		// Fallback to common endpoint patterns
+		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		// Fallback to common endpoint patterns
+		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+	}
+
+	var discoveryResp struct {
+		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&discoveryResp); err != nil {
+		// Fallback to common endpoint patterns
+		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+	}
+
+	if discoveryResp.DeviceAuthorizationEndpoint != "" {
+		return discoveryResp.DeviceAuthorizationEndpoint, nil
+	}
+
+	// Fallback to common endpoint patterns
+	return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
 }
 
 func (p *OIDCProvider) generateTokenFingerprint(accessToken string) string {

@@ -1,0 +1,186 @@
+server:
+  socket_path: "/tmp/oidc-pam/broker.sock"
+  timeout: 30s
+  max_connections: 100
+
+oidc:
+  providers:
+    - name: "keycloak-test"
+      issuer: "http://keycloak:8080/realms/test-realm"
+      client_id: "oidc-pam-client"
+      client_secret: "test-secret"
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+        - "groups"
+        - "ssh-keys"
+      enabled_for_login: true
+      enabled_for_ssh: true
+      priority: 1
+      user_mapping:
+        username_claim: "preferred_username"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        ssh_key_claim: "ssh_public_key"
+      device_flow:
+        enabled: true
+        polling_interval: 2
+        timeout: 300
+      discovery:
+        enabled: true
+        cache_duration: 300
+        timeout: 10
+
+authentication:
+  token_lifetime: 3600s
+  refresh_threshold: 900s
+  max_concurrent_sessions: 50
+  session_cleanup_interval: 300s
+  require_mfa: false
+  allowed_login_types:
+    - "ssh"
+    - "console"
+    - "gui"
+
+security:
+  token_encryption_key: "test-integration-key-32-bytes-long"
+  require_https: false  # For testing only
+  cors:
+    allowed_origins:
+      - "http://localhost:*"
+      - "https://localhost:*"
+    allowed_methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+    allowed_headers:
+      - "Content-Type"
+      - "Authorization"
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+
+policy:
+  global:
+    enabled: true
+    default_allow: true
+    max_session_duration: 28800s
+    require_device_trust: false
+  
+  network:
+    enabled: true
+    allowed_networks:
+      - "127.0.0.0/8"
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    blocked_networks: []
+    require_vpn: false
+    tailscale_integration: false
+  
+  time_based:
+    enabled: true
+    business_hours:
+      enabled: false  # Disable for testing
+      start_hour: 8
+      end_hour: 18
+      timezone: "UTC"
+      days: ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    
+  risk_assessment:
+    enabled: true
+    max_risk_score: 100
+    thresholds:
+      low: 30
+      medium: 60
+      high: 80
+    factors:
+      new_device_weight: 20
+      unusual_location_weight: 25
+      after_hours_weight: 15
+      public_network_weight: 25
+      failed_attempts_weight: 35
+  
+  resource_access:
+    enabled: true
+    rules:
+      - name: "admin-servers"
+        resources:
+          - "admin-*"
+          - "*.admin.local"
+        required_groups:
+          - "admins"
+        required_mfa: true
+      - name: "production-servers"
+        resources:
+          - "prod-*"
+          - "*.prod.local"
+        required_groups:
+          - "users"
+        time_restrictions:
+          business_hours_only: false
+        max_session_duration: 14400s
+
+ssh:
+  key_management:
+    enabled: true
+    key_type: "rsa"
+    key_size: 2048
+    key_lifetime: 3600s
+    storage_path: "/tmp/oidc-pam/ssh-keys"
+    authorized_keys_path: "/tmp/oidc-pam/authorized_keys"
+    cleanup_interval: 300s
+    backup_keys: true
+  
+  certificate_authority:
+    enabled: false  # For testing
+    ca_public_key_path: "/etc/oidc-pam/ca.pub"
+    ca_private_key_path: "/etc/oidc-pam/ca.key"
+    certificate_lifetime: 3600s
+    principals_source: "groups"
+
+audit:
+  enabled: true
+  outputs:
+    - type: "file"
+      path: "/tmp/oidc-pam/audit.log"
+      format: "json"
+      rotation: "daily"
+    - type: "stdout"
+      format: "json"
+  
+  events:
+    - "authentication"
+    - "authorization"
+    - "session_management"
+    - "ssh_key_operations"
+    - "policy_violations"
+    - "system_events"
+    - "error_events"
+  
+  compliance:
+    frameworks:
+      - "sox"
+      - "hipaa"
+      - "pci-dss"
+    retention_days: 2555  # 7 years
+    integrity_checks: true
+    encryption: true
+
+logging:
+  level: "debug"
+  format: "json"
+  output: "stdout"
+  
+  # Component-specific logging
+  components:
+    auth: "debug"
+    policy: "debug"
+    ssh: "debug"
+    ipc: "debug"
+    audit: "info"
+    security: "debug"

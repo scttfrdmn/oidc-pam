@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_STRICT_HTTPS: false
+      KC_HTTP_ENABLED: true
+      KC_HEALTH_ENABLED: true
+      KC_METRICS_ENABLED: true
+      # Import test realm on startup
+      KC_IMPORT: /opt/keycloak/data/import/test-realm.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./test/keycloak/import:/opt/keycloak/data/import
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      start_period: 10s
+      interval: 30s
+      retries: 3
+      timeout: 5s
+    networks:
+      - oidc-test
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - oidc-test
+
+  # Test container for running integration tests
+  integration-test:
+    build:
+      context: .
+      dockerfile: test/Dockerfile.integration
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      - KEYCLOAK_URL=http://keycloak:8080
+      - KEYCLOAK_REALM=test-realm
+      - KEYCLOAK_CLIENT_ID=oidc-pam-client
+      - KEYCLOAK_CLIENT_SECRET=test-secret
+      - TEST_MODE=integration
+    volumes:
+      - ./test/integration:/app/test/integration
+      - ./test/certs:/app/test/certs
+    networks:
+      - oidc-test
+    command: ["./scripts/run-integration-tests.sh"]
+
+volumes:
+  postgres_data:
+
+networks:
+  oidc-test:
+    driver: bridge

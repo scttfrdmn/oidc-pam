@@ -1,0 +1,423 @@
+# OIDC PAM Broker - Enterprise Production Configuration
+# This configuration includes advanced security features, multiple providers,
+# and comprehensive audit logging suitable for enterprise environments
+#
+# Use this for:
+# - Large organizations with complex requirements
+# - Environments requiring SOC2/HIPAA/PCI compliance
+# - Multi-tenant or multi-environment setups
+# - High-security environments
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# Multiple OIDC Providers (Primary + Backup + Service Accounts)
+oidc:
+  providers:
+    # Primary corporate identity provider
+    - name: "corporate-primary"
+      issuer: "https://sso.company.com"
+      client_id: "oidc-pam-production"
+      client_secret: "secure-production-secret"
+      scopes: ["openid", "email", "profile", "groups", "roles"]
+      
+      user_mapping:
+        username_claim: "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        roles_claim: "roles"
+        department_claim: "department"
+        organization_claim: "organization"
+      
+      priority: 1
+      user_type: "employee"
+      enabled_for_login: true
+      verification_only: false
+    
+    # Backup provider for failover
+    - name: "corporate-backup"
+      issuer: "https://backup-sso.company.com"
+      client_id: "oidc-pam-backup"
+      client_secret: "secure-backup-secret"
+      scopes: ["openid", "email", "profile", "groups"]
+      
+      user_mapping:
+        username_claim: "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+      
+      priority: 2
+      user_type: "employee"
+      enabled_for_login: true
+      verification_only: false
+    
+    # Service account provider for automation
+    - name: "service-accounts"
+      issuer: "https://service-sso.company.com"
+      client_id: "oidc-pam-service"
+      client_secret: "secure-service-secret"
+      scopes: ["openid", "email", "profile", "service-level"]
+      
+      user_mapping:
+        username_claim: "service_account"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "service-groups"
+      
+      priority: 3
+      user_type: "service"
+      enabled_for_login: true
+      verification_only: false
+    
+    # External contractor provider
+    - name: "contractors"
+      issuer: "https://contractor-sso.company.com"
+      client_id: "oidc-pam-contractors"
+      client_secret: "secure-contractor-secret"
+      scopes: ["openid", "email", "profile", "contractor-groups"]
+      
+      user_mapping:
+        username_claim: "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "contractor-groups"
+      
+      priority: 4
+      user_type: "contractor"
+      enabled_for_login: true
+      verification_only: false
+
+# Enterprise Authentication Policies
+authentication:
+  token_lifetime: "4h"  # Shorter for high security
+  refresh_threshold: "30m"
+  max_concurrent_sessions: 5
+  
+  # Base requirements for all users
+  require_groups: ["company-employees"]
+  
+  # Environment-specific policies
+  policies:
+    # Production environment - maximum security
+    production:
+      require_groups: ["production-access", "senior-engineers"]
+      require_device_trust: true
+      max_session_duration: "2h"
+      require_reauth_for_new_hosts: true
+      require_institutional_affiliation: true
+      require_additional_mfa: true
+      no_data_export: true
+      session_recording: true
+      audit_level: "detailed"
+      require_approval_for: ["database-access", "admin-actions"]
+      ip_whitelist: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    
+    # Staging environment - high security
+    staging:
+      require_groups: ["staging-access", "developers", "qa-team"]
+      require_device_trust: true
+      max_session_duration: "4h"
+      require_reauth_for_new_hosts: false
+      require_additional_mfa: false
+      audit_level: "standard"
+      ip_whitelist: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    
+    # Development environment - balanced security
+    development:
+      require_groups: ["developers", "contractors"]
+      require_device_trust: false
+      max_session_duration: "8h"
+      allow_untrusted_devices: true
+      audit_level: "basic"
+    
+    # Service accounts - automated access
+    service:
+      require_groups: ["service-accounts"]
+      require_device_trust: true
+      max_session_duration: "1h"
+      require_reauth_for_new_hosts: true
+      audit_level: "detailed"
+      no_data_export: true
+    
+    # Emergency access - break-glass
+    emergency:
+      require_groups: ["emergency-access", "security-team"]
+      require_device_trust: false
+      max_session_duration: "30m"
+      require_additional_mfa: true
+      session_recording: true
+      audit_level: "detailed"
+      require_approval_for: ["all-actions"]
+
+  # Network security requirements
+  network_requirements:
+    require_tailscale: true
+    tailscale_api_key: "tskey-api-your-key-here"
+    validate_device_trust: true
+    require_private_network: true
+
+  # Time-based access controls
+  time_based_policies:
+    academic_calendar:
+      fall_semester: "2024-08-15 to 2024-12-15"
+      spring_semester: "2024-01-15 to 2024-05-15"
+      summer_session: "2024-05-20 to 2024-08-10"
+    
+    research_schedule:
+      maintenance_windows: ["Sunday 02:00-06:00", "Wednesday 01:00-03:00"]
+      holiday_restrictions: ["2024-12-25", "2024-01-01", "2024-07-04"]
+    
+    time_restrictions:
+      - providers: ["contractors"]
+        allowed_hours: "08:00-18:00"
+        timezone: "America/New_York"
+        exceptions: ["emergency-access"]
+    
+    geo_restrictions:
+      - providers: ["contractors"]
+        allowed_countries: ["US", "CA"]
+        blocked_countries: ["CN", "RU", "IR", "KP"]
+
+  # Advanced risk-based policies
+  risk_policies:
+    - condition: "risk_score >= 80"
+      action: "DENY"
+      recommendation: "Critical risk detected, access denied"
+    - condition: "risk_score >= 60"
+      action: "REQUIRE_ADDITIONAL_MFA"
+      recommendation: "High risk detected, additional authentication required"
+    - condition: "unusual_location AND after_hours"
+      action: "REQUIRE_APPROVAL"
+      recommendation: "Unusual access pattern detected"
+    - condition: "new_device AND production_access"
+      action: "REQUIRE_APPROVAL"
+      recommendation: "New device accessing production systems"
+    - condition: "contractor AND sensitive_data"
+      action: "REQUIRE_APPROVAL"
+      recommendation: "Contractor accessing sensitive resources"
+
+# Enhanced Security Configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  require_auth_time: true
+  max_token_age: "4h"
+  clock_skew_tolerance: "2m"
+  
+  # Strong encryption key (generate with: openssl rand -base64 32)
+  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  
+  # TLS verification
+  tls_verification:
+    pin_certificates: true
+    trusted_ca_bundle: "/etc/ssl/certs/company-ca-bundle.pem"
+    skip_tls_verify: false
+  
+  # Strict rate limiting
+  rate_limiting:
+    max_requests_per_minute: 30
+    max_concurrent_auths: 5
+
+# Cloud Integration (AWS example)
+cloud:
+  provider: "aws"
+  auto_discovery: true
+  metadata_sources: ["aws"]
+  
+  aws:
+    region: "us-west-2"
+    parameter_store:
+      prefix: "/company/oidc/production/"
+      parameters:
+        provider_url: "primary-provider-url"
+        client_id: "primary-client-id"
+        client_secret: "primary-client-secret"
+        backup_provider_url: "backup-provider-url"
+        backup_client_id: "backup-client-id"
+        backup_client_secret: "backup-client-secret"
+
+# Comprehensive Audit Configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  # All audit events for compliance
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "configuration_changes"
+    - "session_management"
+    - "policy_violations"
+    - "emergency_access"
+    - "admin_actions"
+    - "data_access"
+    - "system_events"
+    
+  # Multiple output destinations
+  outputs:
+    # Local file with rotation
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+      
+    # Syslog for centralized logging
+    - type: "syslog"
+      facility: "auth"
+      severity: "info"
+      
+    # Remote syslog for SIEM
+    - type: "remote_syslog"
+      url: "syslog://siem.company.com:514"
+      facility: "auth"
+      severity: "info"
+      
+    # Webhook for real-time alerts
+    - type: "webhook"
+      url: "https://alerts.company.com/webhook/oidc-auth"
+      headers:
+        Authorization: "Bearer your-webhook-token"
+        Content-Type: "application/json"
+  
+  # Enterprise compliance
+  compliance_frameworks: ["SOC2", "HIPAA", "PCI-DSS", "ISO27001", "NIST"]
+  
+  # Enhanced metadata
+  include_tailscale_metadata: true
+  include_device_fingerprint: true
+  include_network_path: true
+
+# SSH Key Management (if using SSH integration)
+ssh:
+  key_management:
+    enabled: true
+    key_type: "rsa"
+    key_size: 4096
+    key_lifetime: "4h"
+    storage_path: "/etc/oidc-auth/ssh-keys"
+    authorized_keys_path: "/etc/oidc-auth/authorized_keys"
+    cleanup_interval: "1h"
+    backup_keys: true
+  
+  certificate_authority:
+    enabled: true
+    ca_public_key_path: "/etc/oidc-auth/ca.pub"
+    ca_private_key_path: "/etc/oidc-auth/ca.key"
+    certificate_lifetime: "4h"
+    principals_source: "groups"
+
+# Policy Engine Configuration
+policy:
+  global:
+    enabled: true
+    default_allow: false  # Deny by default for security
+    max_session_duration: "4h"
+    require_device_trust: true
+  
+  network:
+    enabled: true
+    allowed_networks:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    blocked_networks:
+      - "0.0.0.0/0"  # Block all by default, whitelist specific networks
+    require_vpn: true
+    tailscale_integration: true
+  
+  risk_assessment:
+    enabled: true
+    max_risk_score: 60
+    thresholds:
+      low: 20
+      medium: 40
+      high: 60
+    factors:
+      new_device_weight: 30
+      unusual_location_weight: 35
+      after_hours_weight: 20
+      public_network_weight: 40
+      failed_attempts_weight: 45
+      contractor_weight: 25
+      service_account_weight: 15
+  
+  resource_access:
+    enabled: true
+    rules:
+      - name: "production-databases"
+        resources:
+          - "prod-db-*"
+          - "*.prod.db.company.com"
+        required_groups:
+          - "dba-team"
+          - "senior-engineers"
+        required_mfa: true
+        session_recording: true
+        time_restrictions:
+          business_hours_only: true
+        max_session_duration: "2h"
+      
+      - name: "production-servers"
+        resources:
+          - "prod-*"
+          - "*.prod.company.com"
+        required_groups:
+          - "production-access"
+          - "sre-team"
+        required_mfa: true
+        session_recording: true
+        max_session_duration: "4h"
+      
+      - name: "customer-data"
+        resources:
+          - "customer-*"
+          - "*.customer.company.com"
+        required_groups:
+          - "customer-data-access"
+        required_mfa: true
+        session_recording: true
+        no_data_export: true
+        require_approval: true
+        max_session_duration: "2h"
+
+# Logging Configuration
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+  
+  # Component-specific logging
+  components:
+    auth: "debug"
+    policy: "info"
+    ssh: "info"
+    ipc: "info"
+    audit: "info"
+    security: "debug"
+
+# ENTERPRISE DEPLOYMENT NOTES:
+# 1. Use a proper secrets management system (AWS Secrets Manager, HashiCorp Vault, etc.)
+# 2. Configure network security groups to restrict access
+# 3. Set up monitoring and alerting for all components
+# 4. Implement proper backup and disaster recovery procedures
+# 5. Regular security audits and penetration testing
+# 6. Keep all components updated with security patches
+# 7. Use proper SSL/TLS certificates from trusted CAs
+# 8. Configure log aggregation and SIEM integration
+# 9. Implement proper access controls for configuration files
+# 10. Document all procedures and maintain runbooks
+
+# FILE SECURITY:
+# chown root:root /etc/oidc-auth/broker.yaml
+# chmod 600 /etc/oidc-auth/broker.yaml
+# chown -R root:root /etc/oidc-auth/
+# chmod -R 600 /etc/oidc-auth/

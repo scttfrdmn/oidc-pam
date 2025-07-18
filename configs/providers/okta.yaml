@@ -1,0 +1,282 @@
+# OIDC PAM Broker - Okta Configuration
+# Complete configuration for Okta integration
+# Supports both Okta org and Okta Customer Identity Cloud (Auth0)
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+
+# Okta OIDC Provider Configuration
+oidc:
+  providers:
+    - name: "okta-primary"
+      # Okta issuer URL format: https://your-domain.okta.com/oauth2/default
+      # For custom authorization server: https://your-domain.okta.com/oauth2/your-auth-server-id
+      issuer: "https://your-domain.okta.com/oauth2/default"
+      client_id: "your-okta-client-id"
+      client_secret: "your-okta-client-secret"
+      
+      # Okta scopes
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+        - "groups"
+        - "offline_access"  # For refresh tokens
+      
+      # Okta user mapping
+      user_mapping:
+        username_claim: "preferred_username"  # or "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        roles_claim: "roles"
+        
+        # Okta specific claims
+        department_claim: "department"
+        organization_claim: "organization"
+        
+        # Custom mapping
+        username_template: "{{.preferred_username}}"
+        display_name_template: "{{.given_name}} {{.family_name}}"
+        
+        # Group handling
+        group_prefix: "okta-"
+        group_mappings:
+          "linux-users": "Linux Users"
+          "admin-users": "Administrators"
+          "developers": "Developers"
+      
+      priority: 1
+      user_type: "employee"
+      enabled_for_login: true
+      verification_only: false
+
+# Authentication policies for Okta
+authentication:
+  token_lifetime: "8h"
+  refresh_threshold: "1h"
+  max_concurrent_sessions: 10
+  require_groups: ["linux-users"]
+  
+  # Okta-specific policies
+  policies:
+    production:
+      require_groups: ["production-access", "okta-admin"]
+      require_device_trust: true
+      max_session_duration: "4h"
+      require_additional_mfa: true
+      audit_level: "detailed"
+      
+    development:
+      require_groups: ["developers", "okta-dev"]
+      max_session_duration: "8h"
+      audit_level: "basic"
+
+# Security configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  max_token_age: "24h"
+  clock_skew_tolerance: "5m"
+  
+  # Generate with: openssl rand -base64 32
+  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  
+  # TLS verification
+  tls_verification:
+    pin_certificates: false
+    skip_tls_verify: false
+  
+  rate_limiting:
+    max_requests_per_minute: 60
+    max_concurrent_auths: 10
+
+# Audit configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "session_management"
+    
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+
+# OKTA SETUP INSTRUCTIONS:
+#
+# 1. Create Application in Okta Admin Console:
+#    - Go to Applications > Applications
+#    - Click "Create App Integration"
+#    - Sign-in method: "OIDC - OpenID Connect"
+#    - Application type: "Native Application" or "Web Application"
+#    - Name: "OIDC PAM Client"
+#    - Grant type: Check "Authorization Code", "Device Authorization", "Refresh Token"
+#    - Sign-in redirect URIs: Add if needed
+#    - Sign-out redirect URIs: Add if needed
+#    - Controlled access: Choose appropriate assignment
+#
+# 2. Configure Application Settings:
+#    - Note the Client ID
+#    - Note the Client Secret (for confidential clients)
+#    - Configure token lifetime settings
+#    - Enable "Refresh Token" if needed
+#    - Enable "Device Authorization" for device flow
+#
+# 3. Configure Authorization Server:
+#    - Go to Security > API > Authorization Servers
+#    - Use "default" or create a custom authorization server
+#    - Configure access policies and rules
+#    - Set token lifetime and refresh token settings
+#
+# 4. Configure Claims:
+#    - Go to Security > API > Authorization Servers > Your Server > Claims
+#    - Add custom claims for groups, roles, department, etc.
+#    - Example group claim:
+#      - Name: groups
+#      - Include in token type: ID Token, Access Token
+#      - Value type: Groups
+#      - Filter: Matches regex .*
+#      - Include in: Any scope
+#
+# 5. Create Groups:
+#    - Go to Directory > Groups
+#    - Create groups: Linux Users, Administrators, Developers
+#    - Assign users to appropriate groups
+#
+# 6. Configure Group Rules (Optional):
+#    - Go to Directory > Groups > Rules
+#    - Create rules to automatically assign users to groups
+#    - Based on user attributes, login behavior, etc.
+#
+# 7. Configure Policies and Rules:
+#    - Go to Security > API > Authorization Servers > Your Server > Access Policies
+#    - Create policies for different user types
+#    - Configure rules within policies
+#
+# APPLICATION CONFIGURATION EXAMPLE:
+# {
+#   "name": "OIDC PAM Client",
+#   "label": "OIDC PAM Client",
+#   "status": "ACTIVE",
+#   "signOnMode": "OPENID_CONNECT",
+#   "settings": {
+#     "oauthClient": {
+#       "client_uri": null,
+#       "logo_uri": null,
+#       "redirect_uris": [
+#         "http://localhost:8080/callback"
+#       ],
+#       "post_logout_redirect_uris": [],
+#       "response_types": [
+#         "code"
+#       ],
+#       "grant_types": [
+#         "authorization_code",
+#         "refresh_token",
+#         "urn:ietf:params:oauth:grant-type:device_code"
+#       ],
+#       "application_type": "native",
+#       "consent_method": "TRUSTED",
+#       "issuer_mode": "DYNAMIC"
+#     }
+#   }
+# }
+#
+# CUSTOM CLAIMS CONFIGURATION:
+# Groups Claim:
+# {
+#   "name": "groups",
+#   "status": "ACTIVE",
+#   "claimType": "RESOURCE",
+#   "valueType": "GROUPS",
+#   "value": ".*",
+#   "conditions": {
+#     "scopes": []
+#   }
+# }
+#
+# Department Claim:
+# {
+#   "name": "department",
+#   "status": "ACTIVE",
+#   "claimType": "RESOURCE",
+#   "valueType": "EXPRESSION",
+#   "value": "user.department",
+#   "conditions": {
+#     "scopes": []
+#   }
+# }
+#
+# TESTING THE CONFIGURATION:
+# 1. Test OIDC discovery:
+#    curl https://your-domain.okta.com/oauth2/default/.well-known/openid-configuration
+#
+# 2. Test device flow:
+#    curl -X POST https://your-domain.okta.com/oauth2/default/v1/device/authorize \
+#      -d "client_id=your-client-id" \
+#      -d "scope=openid profile email groups"
+#
+# 3. Test token validation:
+#    curl -X POST https://your-domain.okta.com/oauth2/default/v1/token \
+#      -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+#      -d "device_code=YOUR_DEVICE_CODE" \
+#      -d "client_id=your-client-id"
+#
+# COMMON ISSUES AND SOLUTIONS:
+# 1. "Invalid client" - Check client ID and secret
+# 2. "Invalid scope" - Ensure scopes are configured in authorization server
+# 3. "User not assigned to application" - Assign users/groups to application
+# 4. "Groups claim not present" - Configure groups claim in authorization server
+# 5. "Device flow not enabled" - Enable device authorization grant type
+# 6. "Token expired" - Check token lifetime settings
+# 7. "Access denied" - Check access policies and rules
+#
+# ADVANCED CONFIGURATION:
+#
+# Multiple Authorization Servers:
+# oidc:
+#   providers:
+#     - name: "okta-employees"
+#       issuer: "https://your-domain.okta.com/oauth2/default"
+#       client_id: "employee-client-id"
+#       client_secret: "employee-client-secret"
+#       user_type: "employee"
+#       priority: 1
+#       
+#     - name: "okta-contractors"
+#       issuer: "https://your-domain.okta.com/oauth2/contractors"
+#       client_id: "contractor-client-id"
+#       client_secret: "contractor-client-secret"
+#       user_type: "contractor"
+#       priority: 2
+#
+# Custom Domain Configuration:
+# For custom domains, use:
+# issuer: "https://auth.company.com/oauth2/default"
+#
+# Okta Customer Identity Cloud (Auth0) Configuration:
+# For Auth0, use:
+# issuer: "https://your-domain.auth0.com/"
+# And configure scopes, claims, and rules accordingly
+#
+# ENTERPRISE FEATURES:
+# 1. Configure Okta Universal Directory
+# 2. Set up Okta Lifecycle Management
+# 3. Configure Okta Advanced Server Access
+# 4. Use Okta API Access Management
+# 5. Set up Okta Identity Governance
+# 6. Configure Okta ThreatInsight
+# 7. Use Okta Hooks for custom logic
+# 8. Set up Okta Workflows for automation
+# 9. Configure Okta FastPass for passwordless auth
+# 10. Use Okta Device Trust for device management

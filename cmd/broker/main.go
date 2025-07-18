@@ -16,8 +16,10 @@ import (
 	"github.com/scttfrdmn/oidc-pam/internal/ipc"
 )
 
-const (
-	version = "0.1.0-alpha"
+var (
+	version   = "dev"
+	buildDate = "unknown"
+	gitCommit = "unknown"
 )
 
 var (
@@ -31,6 +33,8 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("oidc-auth-broker version %s\n", version)
+		fmt.Printf("  Build date: %s\n", buildDate)
+		fmt.Printf("  Git commit: %s\n", gitCommit)
 		os.Exit(0)
 	}
 

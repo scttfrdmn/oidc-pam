@@ -1,0 +1,99 @@
+# OIDC PAM Broker - Minimal Production Configuration
+# This is the simplest production configuration with security defaults
+# 
+# Prerequisites:
+# 1. OIDC provider configured (Keycloak, Okta, Azure AD, etc.)
+# 2. Client credentials obtained
+# 3. Groups configured in OIDC provider
+# 4. SSL/TLS certificates installed (recommended)
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# OIDC Provider Configuration
+# REQUIRED: Configure at least one OIDC provider
+oidc:
+  providers:
+    - name: "primary"
+      # REQUIRED: Your OIDC provider's issuer URL
+      issuer: "https://your-oidc-provider.com"
+      
+      # REQUIRED: Client credentials from your OIDC provider
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
+      
+      # REQUIRED: Scopes to request
+      scopes: ["openid", "email", "profile", "groups"]
+      
+      # REQUIRED: Map OIDC claims to user attributes
+      user_mapping:
+        username_claim: "email"
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+      
+      # Provider settings
+      priority: 1
+      enabled_for_login: true
+      verification_only: false
+
+# Authentication Policies
+authentication:
+  token_lifetime: "8h"
+  refresh_threshold: "1h"
+  max_concurrent_sessions: 10
+  
+  # REQUIRED: Groups that are allowed to authenticate
+  require_groups: ["linux-users"]
+
+# Security Configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  max_token_age: "24h"
+  clock_skew_tolerance: "5m"
+  
+  # REQUIRED: Generate with: openssl rand -base64 32
+  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  
+  # Rate limiting
+  rate_limiting:
+    max_requests_per_minute: 60
+    max_concurrent_auths: 10
+
+# Audit Configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  # Essential audit events
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "session_management"
+    
+  # Output to file
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+
+# IMPORTANT SECURITY NOTES:
+# 1. Change the token_encryption_key to a secure random value
+# 2. Configure your OIDC provider settings correctly
+# 3. Set appropriate group membership requirements
+# 4. Review and test the configuration before production use
+# 5. Monitor audit logs regularly
+# 6. Keep the configuration file secure (readable only by root)
+
+# File permissions should be:
+# chown root:root /etc/oidc-auth/broker.yaml
+# chmod 600 /etc/oidc-auth/broker.yaml

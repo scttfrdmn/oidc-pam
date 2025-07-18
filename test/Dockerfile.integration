@@ -1,0 +1,53 @@
+FROM golang:1.21-alpine AS builder
+
+# Install dependencies
+RUN apk add --no-cache \
+    git \
+    build-base \
+    linux-pam-dev \
+    json-c-dev \
+    curl \
+    ca-certificates
+
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the integration test binary
+RUN CGO_ENABLED=1 go build -tags integration -o integration-test ./test/integration/main.go
+
+# Build the broker binary for testing
+RUN CGO_ENABLED=1 go build -o broker ./cmd/broker/main.go
+
+# Create runtime image
+FROM alpine:latest
+
+RUN apk add --no-cache \
+    ca-certificates \
+    curl \
+    jq \
+    linux-pam \
+    json-c
+
+WORKDIR /app
+
+# Copy binaries from builder
+COPY --from=builder /app/integration-test /app/broker ./
+COPY --from=builder /app/test/integration ./test/integration
+COPY --from=builder /app/scripts ./scripts
+
+# Make scripts executable
+RUN chmod +x ./scripts/*.sh
+
+# Create necessary directories
+RUN mkdir -p /tmp/oidc-pam /var/run/oidc-pam /etc/oidc-pam
+
+# Copy test configurations
+COPY test/config ./test/config
+
+CMD ["./integration-test"]

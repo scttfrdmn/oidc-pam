@@ -10,8 +10,13 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+var (
+	version   = "dev"
+	buildDate = "unknown"
+	gitCommit = "unknown"
+)
+
 const (
-	Version = "0.1.0-alpha"
 	AppName = "oidc-admin"
 )
 
@@ -34,7 +39,7 @@ It provides functionality for:
 - Managing SSH keys
 - Viewing audit logs
 - System diagnostics`,
-	Version: Version,
+	Version: fmt.Sprintf("%s (built %s, commit %s)", version, buildDate, gitCommit),
 }
 
 func main() {

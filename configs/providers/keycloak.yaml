@@ -1,0 +1,230 @@
+# OIDC PAM Broker - Keycloak Provider Configuration
+# Complete configuration for Keycloak integration
+# Tested with Keycloak 20.0+ and compatible with older versions
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+
+# Keycloak OIDC Provider Configuration
+oidc:
+  providers:
+    - name: "keycloak-primary"
+      # Keycloak issuer URL format: https://keycloak.example.com/realms/your-realm
+      issuer: "https://keycloak.example.com/realms/company"
+      client_id: "oidc-pam-client"
+      client_secret: "your-client-secret"
+      
+      # Standard OpenID Connect scopes
+      scopes:
+        - "openid"
+        - "email"
+        - "profile"
+        - "groups"
+        - "roles"
+      
+      # Custom endpoints (optional - usually auto-discovered)
+      custom_endpoints:
+        device_authorization: "https://keycloak.example.com/realms/company/protocol/openid-connect/auth/device"
+        token: "https://keycloak.example.com/realms/company/protocol/openid-connect/token"
+        userinfo: "https://keycloak.example.com/realms/company/protocol/openid-connect/userinfo"
+      
+      # Keycloak-specific user mapping
+      user_mapping:
+        username_claim: "preferred_username"  # Keycloak default
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        roles_claim: "realm_access.roles"
+        
+        # Optional: Custom attributes
+        department_claim: "department"
+        organization_claim: "organization"
+        
+        # Username template for complex scenarios
+        username_template: "{{.preferred_username}}"
+        display_name_template: "{{.given_name}} {{.family_name}}"
+        
+        # Group mapping and prefixes
+        group_prefix: "keycloak-"
+        group_mappings:
+          "linux-users": "system-users"
+          "admin-users": "administrators"
+          "developer-users": "developers"
+      
+      priority: 1
+      user_type: "employee"
+      enabled_for_login: true
+      verification_only: false
+
+# Authentication policies for Keycloak
+authentication:
+  token_lifetime: "8h"
+  refresh_threshold: "1h"
+  max_concurrent_sessions: 10
+  require_groups: ["linux-users"]
+  
+  # Keycloak-specific policies
+  policies:
+    production:
+      require_groups: ["production-access", "keycloak-admin"]
+      require_device_trust: true
+      max_session_duration: "4h"
+      audit_level: "detailed"
+      
+    development:
+      require_groups: ["developers", "keycloak-dev"]
+      max_session_duration: "8h"
+      audit_level: "basic"
+
+# Security configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  max_token_age: "24h"
+  clock_skew_tolerance: "5m"
+  
+  # Generate with: openssl rand -base64 32
+  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  
+  # TLS verification
+  tls_verification:
+    pin_certificates: false
+    skip_tls_verify: false  # Set to true only for development
+  
+  rate_limiting:
+    max_requests_per_minute: 60
+    max_concurrent_auths: 10
+
+# Audit configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "session_management"
+    
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+
+# KEYCLOAK SETUP INSTRUCTIONS:
+# 
+# 1. Create a new realm in Keycloak Admin Console
+# 2. Create a new client with the following settings:
+#    - Client ID: oidc-pam-client
+#    - Client Protocol: openid-connect
+#    - Access Type: confidential
+#    - Valid Redirect URIs: * (or specific URIs)
+#    - Web Origins: * (or specific origins)
+#    - Service Accounts Enabled: true
+#    - Authorization Enabled: false
+#    - Direct Access Grants Enabled: true
+#    - Standard Flow Enabled: true
+#    - Implicit Flow Enabled: false
+#    - Service Account Roles: Add realm-management roles if needed
+#
+# 3. Configure client scopes:
+#    - Add "groups" scope to the client
+#    - Add "roles" scope to the client
+#    - Configure group membership mapper
+#    - Configure audience mapper
+#
+# 4. Create groups and roles:
+#    - Create groups: linux-users, developers, admin-users, etc.
+#    - Assign users to appropriate groups
+#    - Create realm roles or client roles as needed
+#
+# 5. Configure user attributes:
+#    - Set up custom attributes like department, organization
+#    - Configure attribute mappers to include in tokens
+#
+# 6. Enable device flow (OAuth 2.0 Device Authorization Grant):
+#    - In client settings, enable "OAuth 2.0 Device Authorization Grant"
+#    - Set device flow settings as needed
+#
+# 7. Security settings:
+#    - Configure token lifespan settings
+#    - Set up proper SSL/TLS certificates
+#    - Configure CORS settings if needed
+#    - Set up rate limiting in Keycloak
+#
+# CLIENT CONFIGURATION EXAMPLE:
+# {
+#   "clientId": "oidc-pam-client",
+#   "name": "OIDC PAM Client",
+#   "description": "Client for OIDC PAM authentication",
+#   "protocol": "openid-connect",
+#   "publicClient": false,
+#   "bearerOnly": false,
+#   "standardFlowEnabled": true,
+#   "implicitFlowEnabled": false,
+#   "directAccessGrantsEnabled": true,
+#   "serviceAccountsEnabled": true,
+#   "authorizationServicesEnabled": false,
+#   "validRedirectUris": ["*"],
+#   "webOrigins": ["*"],
+#   "attributes": {
+#     "oauth2.device.authorization.grant.enabled": "true",
+#     "client.device.flow.timeout": "600",
+#     "client.device.flow.polling.interval": "5"
+#   },
+#   "protocolMappers": [
+#     {
+#       "name": "groups",
+#       "protocol": "openid-connect",
+#       "protocolMapper": "oidc-group-membership-mapper",
+#       "consentRequired": false,
+#       "config": {
+#         "full.path": "false",
+#         "id.token.claim": "true",
+#         "access.token.claim": "true",
+#         "claim.name": "groups",
+#         "userinfo.token.claim": "true"
+#       }
+#     },
+#     {
+#       "name": "audience",
+#       "protocol": "openid-connect",
+#       "protocolMapper": "oidc-audience-mapper",
+#       "consentRequired": false,
+#       "config": {
+#         "included.client.audience": "oidc-pam-client",
+#         "id.token.claim": "true",
+#         "access.token.claim": "true"
+#       }
+#     }
+#   ]
+# }
+#
+# TESTING THE CONFIGURATION:
+# 1. Test OIDC discovery:
+#    curl https://keycloak.example.com/realms/company/.well-known/openid-configuration
+#
+# 2. Test device flow:
+#    curl -X POST https://keycloak.example.com/realms/company/protocol/openid-connect/auth/device \
+#      -d "client_id=oidc-pam-client" \
+#      -d "client_secret=your-client-secret"
+#
+# 3. Test token validation:
+#    curl -X POST https://keycloak.example.com/realms/company/protocol/openid-connect/token \
+#      -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+#      -d "device_code=YOUR_DEVICE_CODE" \
+#      -d "client_id=oidc-pam-client" \
+#      -d "client_secret=your-client-secret"
+#
+# COMMON ISSUES AND SOLUTIONS:
+# 1. "Invalid client credentials" - Check client ID and secret
+# 2. "Invalid redirect URI" - Add proper redirect URIs in client settings
+# 3. "User not in group" - Verify group membership and group mappers
+# 4. "Token validation failed" - Check token lifespan and clock skew
+# 5. "Device flow not enabled" - Enable device flow in client settings
+# 6. "CORS errors" - Configure web origins in client settings

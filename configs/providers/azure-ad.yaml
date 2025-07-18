@@ -1,0 +1,258 @@
+# OIDC PAM Broker - Azure Active Directory Configuration
+# Complete configuration for Azure AD / Microsoft Entra ID integration
+# Supports both Azure AD and Azure AD B2C
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  audit_log: "/var/log/oidc-auth/audit.log"
+
+# Azure Active Directory OIDC Provider Configuration
+oidc:
+  providers:
+    - name: "azure-ad-primary"
+      # Azure AD issuer URL format: https://login.microsoftonline.com/{tenant-id}/v2.0
+      issuer: "https://login.microsoftonline.com/your-tenant-id/v2.0"
+      client_id: "your-azure-app-id"
+      client_secret: "your-azure-app-secret"
+      
+      # Azure AD scopes
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+        - "https://graph.microsoft.com/User.Read"
+        - "https://graph.microsoft.com/Group.Read.All"
+        - "https://graph.microsoft.com/Directory.Read.All"
+      
+      # Azure AD user mapping
+      user_mapping:
+        username_claim: "preferred_username"  # Usually email in Azure AD
+        email_claim: "email"
+        name_claim: "name"
+        groups_claim: "groups"
+        roles_claim: "roles"
+        
+        # Azure AD specific claims
+        department_claim: "department"
+        organization_claim: "companyName"
+        
+        # Custom mapping
+        username_template: "{{.preferred_username}}"
+        display_name_template: "{{.given_name}} {{.family_name}}"
+        
+        # Group handling
+        group_prefix: "azuread-"
+        group_mappings:
+          "linux-users": "Azure-Linux-Users"
+          "admin-users": "Azure-Administrators"
+          "developers": "Azure-Developers"
+      
+      priority: 1
+      user_type: "employee"
+      enabled_for_login: true
+      verification_only: false
+
+# Authentication policies for Azure AD
+authentication:
+  token_lifetime: "8h"
+  refresh_threshold: "1h"
+  max_concurrent_sessions: 10
+  require_groups: ["linux-users"]
+  
+  # Azure AD specific policies
+  policies:
+    production:
+      require_groups: ["production-access", "azuread-admin"]
+      require_device_trust: true
+      max_session_duration: "4h"
+      require_institutional_affiliation: true
+      audit_level: "detailed"
+      
+    development:
+      require_groups: ["developers", "azuread-dev"]
+      max_session_duration: "8h"
+      audit_level: "basic"
+
+# Security configuration
+security:
+  audit_enabled: true
+  secure_token_storage: true
+  require_pkce: true
+  verify_audience: true
+  max_token_age: "24h"
+  clock_skew_tolerance: "5m"
+  
+  # Generate with: openssl rand -base64 32
+  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  
+  # TLS verification
+  tls_verification:
+    pin_certificates: false
+    skip_tls_verify: false
+  
+  rate_limiting:
+    max_requests_per_minute: 60
+    max_concurrent_auths: 10
+
+# Audit configuration
+audit:
+  enabled: true
+  format: "json"
+  retention_period: "7_years"
+  
+  events:
+    - "authentication_attempts"
+    - "authorization_decisions"
+    - "token_validation"
+    - "session_management"
+    
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
+
+# AZURE AD SETUP INSTRUCTIONS:
+#
+# 1. Register Application in Azure Portal:
+#    - Go to Azure Active Directory > App registrations
+#    - Click "New registration"
+#    - Name: "OIDC PAM Client"
+#    - Supported account types: "Accounts in this organizational directory only"
+#    - Redirect URI: Add if needed (not required for device flow)
+#    - Click "Register"
+#
+# 2. Configure Application:
+#    - Note the Application (client) ID
+#    - Note the Directory (tenant) ID
+#    - Go to "Certificates & secrets"
+#    - Create a new client secret
+#    - Note the secret value (save immediately)
+#
+# 3. Configure API Permissions:
+#    - Go to "API permissions"
+#    - Add Microsoft Graph permissions:
+#      - User.Read (delegated)
+#      - Group.Read.All (delegated or application)
+#      - Directory.Read.All (delegated or application)
+#    - Grant admin consent for all permissions
+#
+# 4. Configure Authentication:
+#    - Go to "Authentication"
+#    - Enable "Allow public client flows" (for device flow)
+#    - Add platform configurations if needed
+#
+# 5. Configure Token Configuration:
+#    - Go to "Token configuration"
+#    - Add optional claims:
+#      - ID tokens: email, family_name, given_name
+#      - Access tokens: email, family_name, given_name
+#    - Add groups claim:
+#      - Groups assigned to the application
+#      - Security groups
+#      - Directory roles
+#
+# 6. Create Security Groups:
+#    - Go to Azure Active Directory > Groups
+#    - Create groups: Azure-Linux-Users, Azure-Administrators, Azure-Developers
+#    - Assign users to appropriate groups
+#
+# 7. Configure Conditional Access (Optional):
+#    - Go to Azure Active Directory > Security > Conditional Access
+#    - Create policies for device compliance, location, etc.
+#
+# APPLICATION MANIFEST EXAMPLE:
+# {
+#   "id": "your-app-id",
+#   "appId": "your-app-id",
+#   "displayName": "OIDC PAM Client",
+#   "signInAudience": "AzureADMyOrg",
+#   "requiredResourceAccess": [
+#     {
+#       "resourceAppId": "00000003-0000-0000-c000-000000000000",
+#       "resourceAccess": [
+#         {
+#           "id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+#           "type": "Scope"
+#         },
+#         {
+#           "id": "5f8c59db-677d-491f-a6b8-5f174b11ec1d",
+#           "type": "Scope"
+#         }
+#       ]
+#     }
+#   ],
+#   "groupMembershipClaims": "SecurityGroup",
+#   "optionalClaims": {
+#     "idToken": [
+#       {
+#         "name": "email",
+#         "source": null,
+#         "essential": false
+#       },
+#       {
+#         "name": "family_name",
+#         "source": null,
+#         "essential": false
+#       },
+#       {
+#         "name": "given_name",
+#         "source": null,
+#         "essential": false
+#       }
+#     ],
+#     "accessToken": [
+#       {
+#         "name": "email",
+#         "source": null,
+#         "essential": false
+#       }
+#     ]
+#   }
+# }
+#
+# TESTING THE CONFIGURATION:
+# 1. Test OIDC discovery:
+#    curl https://login.microsoftonline.com/your-tenant-id/v2.0/.well-known/openid-configuration
+#
+# 2. Test device flow:
+#    curl -X POST https://login.microsoftonline.com/your-tenant-id/oauth2/v2.0/devicecode \
+#      -d "client_id=your-app-id" \
+#      -d "scope=openid profile email https://graph.microsoft.com/User.Read"
+#
+# 3. Test token validation:
+#    curl -X POST https://login.microsoftonline.com/your-tenant-id/oauth2/v2.0/token \
+#      -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+#      -d "device_code=YOUR_DEVICE_CODE" \
+#      -d "client_id=your-app-id"
+#
+# COMMON ISSUES AND SOLUTIONS:
+# 1. "AADSTS50011: Invalid redirect URI" - Configure redirect URIs or use device flow
+# 2. "AADSTS65001: User or administrator has not consented" - Grant admin consent
+# 3. "AADSTS90002: Tenant not found" - Check tenant ID
+# 4. "AADSTS7000215: Invalid client secret" - Check client secret
+# 5. "Groups claim not present" - Configure group claims in token configuration
+# 6. "AADSTS50126: Invalid username or password" - Check user credentials
+# 7. "AADSTS50053: Account is locked" - Check account status in Azure AD
+#
+# AZURE AD B2C CONFIGURATION:
+# For Azure AD B2C, use the following issuer format:
+# issuer: "https://your-tenant.b2clogin.com/your-tenant.onmicrosoft.com/B2C_1_signupsignin/v2.0"
+#
+# B2C specific settings:
+# - Configure user flows (sign-up/sign-in policies)
+# - Set up custom attributes
+# - Configure application claims
+# - Set up identity providers (social logins)
+#
+# ENTERPRISE CONSIDERATIONS:
+# 1. Use Managed Identity for Azure-hosted applications
+# 2. Configure Conditional Access policies
+# 3. Enable Multi-Factor Authentication
+# 4. Set up Privileged Identity Management (PIM)
+# 5. Configure Azure AD Identity Protection
+# 6. Use Azure Key Vault for secrets management
+# 7. Set up Azure Monitor for logging and alerts
+# 8. Configure Azure AD audit logs
+# 9. Implement Zero Trust security model
+# 10. Use Azure AD Application Proxy for on-premises integration
