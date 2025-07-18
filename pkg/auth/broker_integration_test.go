@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -340,4 +341,202 @@ func TestBrokerSSHKeyMethods(t *testing.T) {
 	if err != nil {
 		t.Logf("SSH key revocation failed as expected: %v", err)
 	}
+}
+
+// Test broker Start/Stop methods (renamed to avoid conflict)
+func TestBrokerStartStopIntegration(t *testing.T) {
+	cfg := &config.Config{
+		OIDC: config.OIDCConfig{
+			Providers: []config.OIDCProvider{
+				{
+					Name:            "provider1",
+					Issuer:          "https://example.com",
+					ClientID:        "client1",
+					Scopes:          []string{"openid", "profile"},
+					EnabledForLogin: true,
+				},
+			},
+		},
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:         time.Hour,
+			RefreshThreshold:      time.Minute * 15,
+			MaxConcurrentSessions: 10,
+		},
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	}
+
+	broker, err := NewBroker(cfg)
+	if err != nil {
+		t.Logf("Failed to create broker (expected due to network dependencies): %v", err)
+		return
+	}
+
+	// Test Start method
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	
+	err = broker.Start(ctx)
+	// Start may fail due to network dependencies, but should not panic
+	if err != nil {
+		t.Logf("Start failed as expected due to network dependencies: %v", err)
+	}
+
+	// Test Stop method
+	err = broker.Stop()
+	if err != nil {
+		t.Logf("Stop returned error: %v", err)
+	}
+}
+
+// Test broker Authenticate method with different scenarios
+func TestBrokerAuthenticateScenarios(t *testing.T) {
+	cfg := &config.Config{
+		OIDC: config.OIDCConfig{
+			Providers: []config.OIDCProvider{
+				{
+					Name:            "provider1",
+					Issuer:          "https://example.com",
+					ClientID:        "client1",
+					Scopes:          []string{"openid", "profile"},
+					EnabledForLogin: true,
+				},
+			},
+		},
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:         time.Hour,
+			RefreshThreshold:      time.Minute * 15,
+			MaxConcurrentSessions: 10,
+		},
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	}
+
+	broker, err := NewBroker(cfg)
+	if err != nil {
+		t.Logf("Failed to create broker (expected due to network dependencies): %v", err)
+		return
+	}
+
+	// Test authentication with nil request
+	response, err := broker.Authenticate(nil)
+	if err != nil {
+		t.Logf("Authentication with nil request returned error: %v", err)
+	}
+	if response != nil && response.Success {
+		t.Error("Expected authentication to fail with nil request")
+	}
+
+	// Test authentication with empty user ID
+	authRequest := &AuthRequest{
+		UserID:     "",
+		LoginType:  "ssh",
+		TargetHost: "testhost",
+		Metadata: map[string]interface{}{
+			"service": "sshd",
+		},
+	}
+	response, err = broker.Authenticate(authRequest)
+	if err != nil {
+		t.Logf("Authentication with empty user ID returned error: %v", err)
+	}
+	if response != nil && response.Success {
+		t.Error("Expected authentication to fail with empty user ID")
+	}
+
+	// Test authentication with valid request
+	authRequest = &AuthRequest{
+		UserID:     "testuser",
+		LoginType:  "ssh",
+		TargetHost: "testhost",
+		Metadata: map[string]interface{}{
+			"service": "sshd",
+		},
+	}
+	response, err = broker.Authenticate(authRequest)
+	if err != nil {
+		t.Logf("Authentication returned error: %v", err)
+	}
+	// Should fail due to network dependencies, but should not panic
+	if response != nil && response.Success {
+		t.Log("Authentication succeeded (unexpected but not a failure)")
+	} else {
+		t.Log("Authentication failed as expected due to network dependencies")
+	}
+}
+
+// Test pollDeviceAuthorization method
+func TestBrokerPollDeviceAuthorization(t *testing.T) {
+	cfg := &config.Config{
+		OIDC: config.OIDCConfig{
+			Providers: []config.OIDCProvider{
+				{
+					Name:            "provider1",
+					Issuer:          "https://example.com",
+					ClientID:        "client1",
+					Scopes:          []string{"openid", "profile"},
+					EnabledForLogin: true,
+				},
+			},
+		},
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:         time.Hour,
+			RefreshThreshold:      time.Minute * 15,
+			MaxConcurrentSessions: 10,
+		},
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	}
+
+	broker, err := NewBroker(cfg)
+	if err != nil {
+		t.Logf("Failed to create broker (expected due to network dependencies): %v", err)
+		return
+	}
+
+	// Create a mock device flow
+	deviceFlow := &DeviceFlow{
+		DeviceCode:      "test-device-code",
+		UserCode:        "TEST123",
+		DeviceURL:       "https://example.com/verify",
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+		PollingInterval: 5,
+	}
+
+	// Test pollDeviceAuthorization with mock data
+	// This will likely fail due to network dependencies, but should not panic
+	provider := &OIDCProvider{
+		Name: "provider1",
+		Config: config.OIDCProvider{
+			Name:            "provider1",
+			Issuer:          "https://example.com",
+			ClientID:        "client1",
+			Scopes:          []string{"openid", "profile"},
+			EnabledForLogin: true,
+			Priority:        1,
+		},
+	}
+
+	// Create a mock session
+	mockSession := &Session{
+		ID:       "test-session-poll",
+		UserID:   "test-user",
+		Provider: "provider1",
+	}
+
+	// Test pollDeviceAuthorization with mock data
+	// This method runs in a goroutine and doesn't return values
+	// We'll just call it to test it doesn't panic
+	broker.wg.Add(1)
+	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow)
+	
+	// Wait briefly for the polling to start
+	time.Sleep(10 * time.Millisecond)
+	
+	// Clean up
+	broker.wg.Wait()
+	t.Log("pollDeviceAuthorization completed without panic")
 }

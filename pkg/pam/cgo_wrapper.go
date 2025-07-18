@@ -126,7 +126,7 @@ func GetLoginType(service, tty string) string {
 		return "gui"
 	default:
 		if tty != "" && tty != "unknown" {
-			if tty[:3] == "tty" {
+			if len(tty) >= 3 && tty[:3] == "tty" {
 				return "console"
 			}
 		}
