@@ -1,0 +1,201 @@
+# SSH Server Configuration for OIDC PAM Testing
+# This configuration enables OIDC authentication via PAM
+
+# Network settings
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+
+# Host key locations
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Ciphers and keying
+RekeyLimit default none
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Authentication settings
+LoginGraceTime 120
+PermitRootLogin no
+StrictModes yes
+MaxAuthTries 3
+MaxSessions 10
+
+# Enable PAM authentication for OIDC
+UsePAM yes
+ChallengeResponseAuthentication yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+
+# Disable public key authentication for testing
+# (In production, you might want both OIDC and key authentication)
+PubkeyAuthentication no
+AuthorizedKeysFile none
+
+# Kerberos options
+KerberosAuthentication no
+KerberosOrLocalPasswd no
+KerberosTicketCleanup yes
+KerberosGetAFSToken no
+
+# GSSAPI options
+GSSAPIAuthentication no
+GSSAPICleanupCredentials yes
+GSSAPIStrictAcceptorCheck yes
+GSSAPIKeyExchange no
+
+# Set this to 'yes' to enable PAM authentication, account processing,
+# and session processing. If this is enabled, PAM authentication will
+# be allowed through the ChallengeResponseAuthentication and
+# PasswordAuthentication. Depending on your PAM configuration,
+# PAM authentication via ChallengeResponseAuthentication may bypass
+# the setting of "PermitRootLogin without-password".
+# If you just want the PAM account and session checks to run without
+# PAM authentication, then enable this but set PasswordAuthentication
+# and ChallengeResponseAuthentication to 'no'.
+UsePAM yes
+
+# Allow client to pass locale environment variables
+AcceptEnv LANG LC_*
+
+# Override default of no subsystems
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# User and group restrictions
+AllowGroups ssh-users oidc-users oidc-admin oidc-developers oidc-contractors
+DenyGroups nogroup
+
+# User restrictions
+AllowUsers testuser admin developer contractor
+DenyUsers root nobody
+
+# Connection settings
+TCPKeepAlive yes
+ClientAliveInterval 60
+ClientAliveCountMax 3
+Compression delayed
+
+# Security settings
+Protocol 2
+PermitUserEnvironment no
+PermitTunnel no
+GatewayPorts no
+X11Forwarding no
+X11DisplayOffset 10
+X11UseLocalhost yes
+PermitTTY yes
+PrintMotd no
+PrintLastLog yes
+Banner /etc/ssh/banner.txt
+
+# Privilege separation
+UsePrivilegeSeparation sandbox
+
+# Disable unused features
+AllowAgentForwarding no
+AllowTcpForwarding no
+PermitOpen none
+
+# Session settings
+MaxStartups 10:30:60
+LoginGraceTime 60
+
+# Host-based authentication
+HostbasedAuthentication no
+IgnoreUserKnownHosts yes
+IgnoreRhosts yes
+
+# For this to work you will also need host keys in /etc/ssh/ssh_known_hosts
+RhostsRSAAuthentication no
+RSAAuthentication no
+
+# Change to yes to enable challenge-response passwords (beware issues with
+# some PAM modules and threads)
+ChallengeResponseAuthentication yes
+
+# Set this to 'no' to disable forwarding of X11 connections, by default
+# X11 connections are forwarded.
+X11Forwarding no
+
+# The default is to check both .ssh/authorized_keys and .ssh/authorized_keys2
+# but this is overridden so installations will only check .ssh/authorized_keys
+AuthorizedKeysFile none
+
+# Don't read the user's ~/.rhosts and ~/.shosts files
+IgnoreRhosts yes
+
+# similar for protocol version 2
+HostbasedAuthentication no
+
+# To enable empty passwords, change to yes (NOT RECOMMENDED)
+PermitEmptyPasswords no
+
+# Change to yes to enable challenge-response passwords (beware issues with
+# some PAM modules and threads)
+ChallengeResponseAuthentication yes
+
+# Kerberos options
+KerberosAuthentication no
+KerberosOrLocalPasswd no
+KerberosTicketCleanup yes
+KerberosGetAFSToken no
+
+# GSSAPI options
+GSSAPIAuthentication no
+GSSAPICleanupCredentials yes
+
+# Set this to 'yes' to enable PAM authentication, account processing,
+# and session processing. If this is enabled, PAM authentication will
+# be allowed through the ChallengeResponseAuthentication and
+# PasswordAuthentication. Depending on your PAM configuration,
+# PAM authentication via ChallengeResponseAuthentication may bypass
+# the setting of "PermitRootLogin without-password".
+# If you just want the PAM account and session checks to run without
+# PAM authentication, then enable this but set PasswordAuthentication
+# and ChallengeResponseAuthentication to 'no'.
+UsePAM yes
+
+# Match conditions for different user groups
+Match Group oidc-admin
+    AllowTcpForwarding yes
+    AllowAgentForwarding yes
+    X11Forwarding yes
+    PermitOpen any
+
+Match Group oidc-developers
+    AllowTcpForwarding local
+    AllowAgentForwarding yes
+    X11Forwarding yes
+    PermitOpen localhost:*
+
+Match Group oidc-contractors
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitOpen none
+    ForceCommand /usr/local/bin/contractor-shell
+
+Match Group oidc-service
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitOpen none
+    PermitTTY no
+    ForceCommand /usr/local/bin/service-shell
+
+# Additional security
+ClientAliveInterval 300
+ClientAliveCountMax 0
+LoginGraceTime 30
+
+# Disable tunneling
+PermitTunnel no
+GatewayPorts no
+
+# Logging
+SyslogFacility AUTHPRIV
+LogLevel VERBOSE

@@ -1,0 +1,214 @@
+version: '3.8'
+
+services:
+  ssh-server:
+    build:
+      context: .
+      dockerfile: docker/ssh-server/Dockerfile
+    container_name: oidc-pam-ssh-server
+    hostname: ssh-server
+    ports:
+      - "2222:22"
+    volumes:
+      - ./logs:/var/log/ssh-server
+      - ./config:/etc/oidc-auth
+      - ./ssh-keys:/etc/ssh/host-keys
+    environment:
+      - OIDC_BROKER_URL=http://oidc-broker:8080
+      - OIDC_LOG_LEVEL=info
+      - SSH_LOG_LEVEL=info
+      - ENABLE_DEBUG=false
+    depends_on:
+      - oidc-broker
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  oidc-broker:
+    build:
+      context: ../../
+      dockerfile: docker/broker/Dockerfile
+    container_name: oidc-pam-broker
+    hostname: oidc-broker
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # Metrics port
+    volumes:
+      - ./config:/etc/oidc-auth
+      - ./logs:/var/log/oidc-auth
+    environment:
+      - OIDC_CONFIG_FILE=/etc/oidc-auth/broker.yaml
+      - OIDC_LOG_LEVEL=info
+      - OIDC_METRICS_ENABLED=true
+    depends_on:
+      - keycloak
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: oidc-pam-keycloak
+    hostname: keycloak
+    command: start-dev
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_IMPORT=/opt/keycloak/data/import/test-realm.json
+      - KC_LOG_LEVEL=INFO
+      - KC_METRICS_ENABLED=true
+    ports:
+      - "8081:8080"
+      - "9091:9000"  # Metrics port
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import
+      - ./keycloak/themes:/opt/keycloak/themes
+      - ./logs:/var/log/keycloak
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: oidc-pam-prometheus
+    hostname: prometheus
+    ports:
+      - "9092:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+    depends_on:
+      - oidc-broker
+      - keycloak
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oidc-pam-grafana
+    hostname: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  log-aggregator:
+    image: fluentd:latest
+    container_name: oidc-pam-fluentd
+    hostname: log-aggregator
+    ports:
+      - "24224:24224"
+    volumes:
+      - ./logging/fluentd.conf:/fluentd/etc/fluent.conf
+      - ./logs:/var/log/collected
+    networks:
+      - oidc-test-network
+    restart: unless-stopped
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: docker/test-runner/Dockerfile
+    container_name: oidc-pam-test-runner
+    hostname: test-runner
+    volumes:
+      - ./tests:/tests
+      - ./results:/results
+      - ./logs:/logs
+    environment:
+      - SSH_HOST=ssh-server
+      - SSH_PORT=22
+      - OIDC_BROKER_URL=http://oidc-broker:8080
+      - KEYCLOAK_URL=http://keycloak:8080
+      - TEST_TIMEOUT=300
+    depends_on:
+      - ssh-server
+      - oidc-broker
+      - keycloak
+    networks:
+      - oidc-test-network
+    profiles:
+      - testing
+    command: ["sleep", "infinity"]
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  keycloak-data:
+
+networks:
+  oidc-test-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+
+# Health check and monitoring
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+# Logging configuration
+x-logging-defaults: &logging-defaults
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+    labels: "service,environment"
+
+# Apply logging to all services
+services:
+  ssh-server:
+    <<: *logging-defaults
+  oidc-broker:
+    <<: *logging-defaults
+  keycloak:
+    <<: *logging-defaults
+  prometheus:
+    <<: *logging-defaults
+  grafana:
+    <<: *logging-defaults
+  log-aggregator:
+    <<: *logging-defaults
+  test-runner:
+    <<: *logging-defaults
