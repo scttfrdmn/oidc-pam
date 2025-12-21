@@ -7,8 +7,13 @@ BROKER_BINARY := oidc-auth-broker
 HELPER_BINARY := oidc-pam-helper
 ADMIN_BINARY := oidc-admin
 
+# Version information
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
 # Go build flags
-GO_BUILD_FLAGS := -ldflags="-s -w" -trimpath
+GO_BUILD_FLAGS := -ldflags="-s -w -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE) -X main.gitCommit=$(GIT_COMMIT)" -trimpath
 GO_TEST_FLAGS := -race -coverprofile=coverage.out
 
 # Default target
@@ -27,13 +32,13 @@ build-broker:
 build-pam:
 	@echo "Building PAM module..."
 	@mkdir -p $(BINARY_DIR)
-	go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./cmd/pam-module
+	CGO_ENABLED=1 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./cmd/pam-module
 
 ## Build PAM helper binary
 build-helper:
 	@echo "Building PAM helper..."
 	@mkdir -p $(BINARY_DIR)
-	go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY) ./cmd/pam-helper
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY) ./cmd/pam-helper
 
 ## Build admin CLI tool
 build-admin:

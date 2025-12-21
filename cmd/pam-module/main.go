@@ -1,9 +1,7 @@
 package main
 
 /*
-#cgo CFLAGS: -I/usr/include/security -I/opt/homebrew/include
-#cgo LDFLAGS: -lpam -ljson-c -L/opt/homebrew/lib
-#include "../../pkg/pam/cgo_bridge.h"
+#include "cgo_bridge.h"
 */
 import "C"
 

@@ -1,0 +1,36 @@
+# CODEOWNERS file for OIDC PAM
+# These owners will be automatically requested for review when someone opens a pull request
+# that modifies code in the specified paths.
+
+# Default owner for everything in the repo
+* @scttfrdmn
+
+# Security-sensitive components require thorough review
+/pkg/pam/ @scttfrdmn
+/pkg/security/ @scttfrdmn
+/cmd/pam-module/ @scttfrdmn
+/cmd/pam-helper/ @scttfrdmn
+
+# Authentication and authorization core
+/pkg/auth/ @scttfrdmn
+/pkg/policy/ @scttfrdmn
+
+# SSH key management
+/pkg/ssh/ @scttfrdmn
+
+# Configuration files that affect security
+/configs/security/ @scttfrdmn
+/configs/pam/ @scttfrdmn
+
+# Build and deployment systems
+/.github/workflows/ @scttfrdmn
+/Makefile @scttfrdmn
+/scripts/ @scttfrdmn
+
+# Security policy and documentation
+/SECURITY.md @scttfrdmn
+/.github/dependabot.yml @scttfrdmn
+
+# Go module dependencies
+/go.mod @scttfrdmn
+/go.sum @scttfrdmn

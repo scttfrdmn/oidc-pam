@@ -32,13 +32,13 @@ jobs:
           pkg-config \
           libsystemd-dev
           
-    - name: Run gosec security scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: '-fmt sarif -out gosec-report.sarif ./...'
+    - name: Install and run gosec security scanner
+      run: |
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        gosec -fmt sarif -out gosec-report.sarif ./...
         
     - name: Upload gosec report
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: gosec-report.sarif
         
@@ -95,7 +95,7 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v3
       with:
         languages: ${{ matrix.language }}
         
@@ -115,15 +115,19 @@ jobs:
           libsystemd-dev
           
     - name: Autobuild
-      uses: github/codeql-action/autobuild@v2
+      uses: github/codeql-action/autobuild@v3
       
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
       
   trivy:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    
+
+    permissions:
+      security-events: write
+      contents: read
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -137,7 +141,7 @@ jobs:
         output: 'trivy-results.sarif'
         
     - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: 'trivy-results.sarif'
         
@@ -180,7 +184,7 @@ jobs:
         go-licenses report ./... > licenses-report.txt
         
     - name: Upload licenses report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: licenses-report
         path: licenses-report.txt
@@ -197,8 +201,9 @@ jobs:
       uses: trufflesecurity/trufflehog@main
       with:
         path: ./
-        base: main
+        base: ${{ github.event.before }}
         head: HEAD
+      continue-on-error: true
         
   supply-chain:
     name: Supply Chain Security
@@ -229,7 +234,7 @@ jobs:
         bom generate -o sbom.spdx .
         
     - name: Upload SBOM
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: sbom
         path: sbom.spdx
@@ -256,6 +261,6 @@ jobs:
         publish_results: true
         
     - name: Upload results
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: results.sarif

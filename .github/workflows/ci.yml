@@ -114,10 +114,10 @@ jobs:
           pkg-config \
           libsystemd-dev
           
-    - name: Run gosec security scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: './...'
+    - name: Install and run gosec security scanner
+      run: |
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        gosec ./...
         
   build-matrix:
     name: Build Matrix
@@ -244,7 +244,7 @@ jobs:
       run: make release
       
     - name: Upload release artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: release-binaries
         path: bin/

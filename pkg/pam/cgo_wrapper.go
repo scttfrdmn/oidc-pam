@@ -1,8 +1,6 @@
 package pam
 
 /*
-#cgo CFLAGS: -I/usr/include/security -I/opt/homebrew/include
-#cgo LDFLAGS: -lpam -ljson-c -L/opt/homebrew/lib
 #include "cgo_bridge.h"
 */
 import "C"

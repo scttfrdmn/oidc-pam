@@ -71,4 +71,4 @@ coverage.html
 
 # PAM module artifacts
 *.h
-*.c.o
+*.c.o.claude/

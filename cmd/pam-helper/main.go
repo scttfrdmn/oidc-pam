@@ -34,7 +34,7 @@ func main() {
 		rhost       = flag.String("rhost", "localhost", "Remote host")
 		tty         = flag.String("tty", "unknown", "TTY")
 		debug       = flag.Bool("debug", false, "Enable debug logging")
-		version     = flag.Bool("version", false, "Show version information")
+		showVersion = flag.Bool("version", false, "Show version information")
 		socketPath  = flag.String("socket", "/var/run/oidc-auth/broker.sock", "Path to broker socket")
 		timeout     = flag.Duration("timeout", 30*time.Second, "Authentication timeout")
 		_ = flag.Bool("interactive", false, "Interactive mode (prompt for user input)")
@@ -42,8 +42,8 @@ func main() {
 	flag.Parse()
 
 	// Show version information
-	if *version {
-		fmt.Printf("%s version %s\n", Name, Version)
+	if *showVersion {
+		fmt.Printf("%s version %s\n", Name, version)
 		os.Exit(0)
 	}
 
@@ -57,7 +57,7 @@ func main() {
 	}
 
 	log.Info().
-		Str("version", Version).
+		Str("version", version).
 		Str("config", *configFile).
 		Bool("debug", *debug).
 		Msg("Starting OIDC PAM Helper")
