@@ -4,7 +4,7 @@
 package main
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../pkg/pam -I/opt/homebrew/include -I/usr/include/security
-#cgo LDFLAGS: -lpam -ljson-c -L/opt/homebrew/lib
+#cgo CFLAGS: -I/opt/homebrew/include
+#cgo LDFLAGS: -ljson-c -L/opt/homebrew/lib
 */
 import "C"

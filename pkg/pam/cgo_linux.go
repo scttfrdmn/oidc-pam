@@ -3,8 +3,5 @@
 
 package pam
 
-/*
-#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security
-#cgo LDFLAGS: -lpam -ljson-c
-*/
+// No additional platform-specific flags needed for Linux
 import "C"

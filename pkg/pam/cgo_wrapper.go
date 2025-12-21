@@ -1,6 +1,8 @@
 package pam
 
 /*
+#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security
+#cgo LDFLAGS: -lpam -ljson-c
 #include "cgo_bridge.h"
 */
 import "C"
