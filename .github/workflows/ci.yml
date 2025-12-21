@@ -34,7 +34,7 @@ jobs:
           libsystemd-dev
           
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cache/go-build
