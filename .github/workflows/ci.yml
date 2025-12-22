@@ -48,12 +48,16 @@ jobs:
       
     - name: Verify dependencies
       run: go mod verify
-      
+
     - name: Build project
       run: make build
-      
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
+
     - name: Run tests
       run: make test
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
       
     - name: Upload coverage reports
       uses: codecov/codecov-action@v3
@@ -144,12 +148,16 @@ jobs:
           libjson-c-dev \
           pkg-config \
           libsystemd-dev
-          
+
     - name: Build project
       run: make build
-      
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
+
     - name: Run tests
       run: make test
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
       
   validate:
     name: Validate
@@ -195,12 +203,16 @@ jobs:
           libjson-c-dev \
           pkg-config \
           libsystemd-dev
-          
+
     - name: Build project
       run: make build
-      
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
+
     - name: Run integration tests
       run: make test-integration
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
       
   docker:
     name: Docker Build
@@ -239,10 +251,12 @@ jobs:
           libjson-c-dev \
           pkg-config \
           libsystemd-dev
-          
+
     - name: Create release build
       run: make release
-      
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
+
     - name: Upload release artifacts
       uses: actions/upload-artifact@v4
       with:

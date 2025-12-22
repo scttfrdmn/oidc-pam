@@ -116,7 +116,9 @@ jobs:
           
     - name: Autobuild
       uses: github/codeql-action/autobuild@v3
-      
+      env:
+        CGO_CFLAGS: "-I${{ github.workspace }}/pkg/pam"
+
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
       
