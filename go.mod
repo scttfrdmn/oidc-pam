@@ -1,6 +1,6 @@
 module github.com/scttfrdmn/oidc-pam
 
-go 1.21
+go 1.24.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.7.0
@@ -8,9 +8,8 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.16.0
-	golang.org/x/crypto v0.14.0
+	golang.org/x/crypto v0.47.0
 	golang.org/x/oauth2 v0.13.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -30,9 +29,10 @@ require (
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
-	golang.org/x/sys v0.13.0 // indirect
-	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	golang.org/x/text v0.33.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
