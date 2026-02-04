@@ -4,7 +4,7 @@
 package main
 
 /*
-*/
+ */
 import "C"
 
 // No additional platform-specific flags needed for Linux

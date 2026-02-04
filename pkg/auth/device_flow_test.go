@@ -87,17 +87,17 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 		t.Error("Expected non-empty token fingerprint")
 	}
 
-		// Test multiple fingerprint generation for consistency
-		fingerprint2 := provider.generateTokenFingerprint("test-token")
-		if fingerprint != fingerprint2 {
-			t.Error("Token fingerprints should be consistent for same token")
-		}
+	// Test multiple fingerprint generation for consistency
+	fingerprint2 := provider.generateTokenFingerprint("test-token")
+	if fingerprint != fingerprint2 {
+		t.Error("Token fingerprints should be consistent for same token")
+	}
 
-		// Test different tokens produce different fingerprints
-		fingerprint3 := provider.generateTokenFingerprint("different-token")
-		if fingerprint == fingerprint3 {
-			t.Error("Different tokens should produce different fingerprints")
-		}
+	// Test different tokens produce different fingerprints
+	fingerprint3 := provider.generateTokenFingerprint("different-token")
+	if fingerprint == fingerprint3 {
+		t.Error("Different tokens should produce different fingerprints")
+	}
 
 	// Skip network-dependent endpoint test
 	t.Log("Skipping device authorization endpoint test (requires network)")
@@ -128,24 +128,24 @@ func TestUserInfoExtraction(t *testing.T) {
 		"email":  "test@example.com",
 		"name":   "Test User",
 		"groups": []interface{}{"users", "admin"},
-			"sub":    "user-123",
-		}
+		"sub":    "user-123",
+	}
 
-		userInfo, err := provider.extractUserInfoFromClaims(claims)
-		if err != nil {
-			t.Logf("Error extracting user info: %v", err)
-		}
-		if userInfo == nil {
-			t.Error("Expected non-nil user info")
-			return
-		}
+	userInfo, err := provider.extractUserInfoFromClaims(claims)
+	if err != nil {
+		t.Logf("Error extracting user info: %v", err)
+	}
+	if userInfo == nil {
+		t.Error("Expected non-nil user info")
+		return
+	}
 
-		if userInfo.Email != "test@example.com" {
-			t.Errorf("Expected email 'test@example.com', got '%s'", userInfo.Email)
-		}
-		if userInfo.Name != "Test User" {
-			t.Errorf("Expected name 'Test User', got '%s'", userInfo.Name)
-		}
+	if userInfo.Email != "test@example.com" {
+		t.Errorf("Expected email 'test@example.com', got '%s'", userInfo.Email)
+	}
+	if userInfo.Name != "Test User" {
+		t.Errorf("Expected name 'Test User', got '%s'", userInfo.Name)
+	}
 	if len(userInfo.Groups) != 2 {
 		t.Errorf("Expected 2 groups, got %d", len(userInfo.Groups))
 	}

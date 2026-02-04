@@ -62,7 +62,7 @@ jobs:
       - name: Install PAM development libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpam0g-dev
+          sudo apt-get install -y libpam0g-dev libjson-c-dev
 
       - name: Build broker
         run: make build-broker
