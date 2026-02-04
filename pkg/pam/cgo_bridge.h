@@ -12,12 +12,17 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-// PAM module name for logging
+// PAM module name and version
 #define PAM_MODULE_NAME "pam_oidc"
+#define PAM_MODULE_VERSION "0.1.0"
 
 // Maximum buffer sizes
+#define MAX_BUFFER_SIZE 8192
 #define MAX_RESPONSE_SIZE 8192
 #define MAX_SOCKET_PATH 108
+
+// Default socket path for OIDC broker
+#define SOCKET_PATH "/var/run/oidc-auth-broker.sock"
 
 // Function prototypes
 void log_pam_message(int priority, const char *format, ...);
