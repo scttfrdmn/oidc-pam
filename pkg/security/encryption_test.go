@@ -86,7 +86,7 @@ func TestEncryptDecryptBytes(t *testing.T) {
 	testCases := [][]byte{
 		[]byte("hello world"),
 		[]byte("binary data"),
-		[]byte{0x00, 0x01, 0x02, 0xFF},
+		{0x00, 0x01, 0x02, 0xFF},
 		nil,
 		[]byte(""),
 		make([]byte, 1000), // zeros

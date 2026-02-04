@@ -31,7 +31,8 @@ jobs:
       - name: Run go vet
         run: |
           # Vet all non-PAM packages (PAM packages require CGO and PAM headers)
-          go vet ./pkg/auth ./pkg/config ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin ./cmd/pam-helper
+          # Note: cmd/pam-helper imports pkg/pam so it's also excluded
+          go vet ./pkg/auth ./pkg/config ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin
 
       - name: Run tests
         run: |
