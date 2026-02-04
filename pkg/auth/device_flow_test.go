@@ -47,7 +47,7 @@ func TestDeviceFlowMethods(t *testing.T) {
 
 	// Skip device flow tests due to network dependencies
 	// These tests would require proper OIDC provider setup with network access
-	t.Log("Provider created successfully, but skipping network-dependent tests")
+	t.Logf("Provider %s created successfully, but skipping network-dependent tests", provider.Name)
 
 	// Test that we can create AuthRequest struct
 	authRequest := &AuthRequest{
