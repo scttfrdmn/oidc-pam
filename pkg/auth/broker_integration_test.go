@@ -11,7 +11,7 @@ import (
 
 func TestBrokerInternalMethods(t *testing.T) {
 	// Test internal broker methods that don't require OIDC provider connectivity
-	
+
 	// Create broker with minimal config
 	broker := &Broker{
 		config: &config.Config{
@@ -21,13 +21,13 @@ func TestBrokerInternalMethods(t *testing.T) {
 		},
 		sessions: make(map[string]*Session),
 	}
-	
+
 	// Test session helper with non-existent session
 	session := broker.getSession("non-existent")
 	if session != nil {
 		t.Error("Expected nil session for non-existent session")
 	}
-	
+
 	// Test createSuccessResponse with valid session
 	testSession := &Session{
 		ID:               "test-session-internal",
@@ -46,7 +46,7 @@ func TestBrokerInternalMethods(t *testing.T) {
 		IsActive:         true,
 		RiskScore:        10,
 	}
-	
+
 	response := broker.createSuccessResponse(testSession)
 	if response == nil {
 		t.Error("Expected non-nil response for valid session")
@@ -62,7 +62,7 @@ func TestBrokerInternalMethods(t *testing.T) {
 
 func TestBrokerSessionHelpers(t *testing.T) {
 	// Test session helper methods without requiring OIDC connectivity
-	
+
 	// Create broker with valid config but don't initialize OIDC providers
 	broker := &Broker{
 		config: &config.Config{
@@ -86,9 +86,9 @@ func TestBrokerSessionHelpers(t *testing.T) {
 		t.Error("Expected nil session for non-existent session")
 	}
 
-	// Note: createSuccessResponse expects non-nil session, so we'll test it 
+	// Note: createSuccessResponse expects non-nil session, so we'll test it
 	// with valid session in the integration tests
-	
+
 	// Test session management by adding a session manually
 	testSession := &Session{
 		ID:               "test-session-123",
@@ -107,9 +107,9 @@ func TestBrokerSessionHelpers(t *testing.T) {
 		IsActive:         true,
 		RiskScore:        5,
 	}
-	
+
 	broker.sessions["test-session-123"] = testSession
-	
+
 	// Test getSession with existing session
 	retrievedSession := broker.getSession("test-session-123")
 	if retrievedSession == nil {
@@ -136,7 +136,7 @@ func TestBrokerSessionHelpers(t *testing.T) {
 
 func TestBrokerFieldInitialization(t *testing.T) {
 	// Test that broker fields are properly initialized
-	
+
 	// Create broker with valid config and minimal required fields
 	broker := &Broker{
 		config: &config.Config{
@@ -168,12 +168,12 @@ func TestBrokerFieldInitialization(t *testing.T) {
 	if broker.providers == nil {
 		t.Error("Expected non-nil providers map")
 	}
-	
+
 	// Test session map operations
 	if len(broker.sessions) != 0 {
 		t.Error("Expected empty sessions map")
 	}
-	
+
 	// Add a test session and verify it's accessible
 	testSession := &Session{
 		ID:               "test-session-456",
@@ -192,9 +192,9 @@ func TestBrokerFieldInitialization(t *testing.T) {
 		IsActive:         true,
 		RiskScore:        15,
 	}
-	
+
 	broker.sessions["test-session-456"] = testSession
-	
+
 	// Test direct session access
 	session := broker.sessions["test-session-456"]
 	if session == nil {
@@ -208,7 +208,7 @@ func TestBrokerFieldInitialization(t *testing.T) {
 
 func TestBrokerProviderSelection(t *testing.T) {
 	// Test provider selection logic without requiring OIDC connectivity
-	
+
 	// Create broker with multiple providers but don't initialize OIDC
 	broker := &Broker{
 		config: &config.Config{
@@ -223,7 +223,7 @@ func TestBrokerProviderSelection(t *testing.T) {
 						Priority:        1,
 					},
 					{
-						Name:            "provider2", 
+						Name:            "provider2",
 						Issuer:          "https://provider2.com",
 						ClientID:        "client2",
 						Scopes:          []string{"openid", "profile", "email"},
@@ -270,7 +270,7 @@ func TestBrokerProviderSelection(t *testing.T) {
 		SessionID:  "test-session",
 		Timestamp:  time.Now(),
 	}
-	
+
 	// Create a basic policy result
 	policyResult := &PolicyResult{
 		Allowed:        true,
@@ -282,7 +282,7 @@ func TestBrokerProviderSelection(t *testing.T) {
 		RiskFactors:    nil,
 		Metadata:       nil,
 	}
-	
+
 	provider := broker.selectProvider(authRequest, policyResult)
 	if provider == nil {
 		t.Error("Expected non-nil provider")
@@ -302,7 +302,7 @@ func TestBrokerProviderSelection(t *testing.T) {
 
 func TestBrokerSSHKeyMethods(t *testing.T) {
 	// Test SSH key methods without requiring full broker initialization
-	
+
 	// Create broker with minimal config
 	broker := &Broker{
 		config: &config.Config{
@@ -330,7 +330,7 @@ func TestBrokerSSHKeyMethods(t *testing.T) {
 		IsActive:         true,
 		RiskScore:        20,
 	}
-	
+
 	_, err := broker.generateSSHKey(mockSession)
 	if err != nil {
 		t.Logf("SSH key generation failed as expected: %v", err)
@@ -376,7 +376,7 @@ func TestBrokerStartStopIntegration(t *testing.T) {
 	// Test Start method
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	
+
 	err = broker.Start(ctx)
 	// Start may fail due to network dependencies, but should not panic
 	if err != nil {
@@ -532,10 +532,10 @@ func TestBrokerPollDeviceAuthorization(t *testing.T) {
 	// We'll just call it to test it doesn't panic
 	broker.wg.Add(1)
 	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow)
-	
+
 	// Wait briefly for the polling to start
 	time.Sleep(10 * time.Millisecond)
-	
+
 	// Clean up
 	broker.wg.Wait()
 	t.Log("pollDeviceAuthorization completed without panic")

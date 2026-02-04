@@ -37,7 +37,7 @@ func main() {
 		showVersion = flag.Bool("version", false, "Show version information")
 		socketPath  = flag.String("socket", "/var/run/oidc-auth/broker.sock", "Path to broker socket")
 		timeout     = flag.Duration("timeout", 30*time.Second, "Authentication timeout")
-		_ = flag.Bool("interactive", false, "Interactive mode (prompt for user input)")
+		_           = flag.Bool("interactive", false, "Interactive mode (prompt for user input)")
 	)
 	flag.Parse()
 
@@ -133,4 +133,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-

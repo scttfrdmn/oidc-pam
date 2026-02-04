@@ -234,7 +234,7 @@ func TestServerDoubleStop(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	
+
 	// First stop
 	if err := server.Stop(); err != nil {
 		t.Errorf("First stop returned error: %v", err)
@@ -309,7 +309,7 @@ func TestServerHandleRequest(t *testing.T) {
 		Type:   "invalid_type",
 		UserID: "test-user",
 	}
-	
+
 	response := server.handleRequest(invalidRequest)
 	if response.Success {
 		t.Error("Expected failure for invalid request type")
@@ -344,7 +344,7 @@ func TestServerHandleAuthenticate(t *testing.T) {
 		DeviceID:   "test-device",
 		SessionID:  "test-session",
 	}
-	
+
 	// This should panic with nil broker, which is expected behavior
 	// We'll test this with proper error handling
 	defer func() {
@@ -352,7 +352,7 @@ func TestServerHandleAuthenticate(t *testing.T) {
 			t.Error("Expected panic with nil broker")
 		}
 	}()
-	
+
 	_ = server.handleAuthenticate(authRequest)
 }
 
@@ -375,14 +375,14 @@ func TestServerHandleCheckSession(t *testing.T) {
 		Type:      "check_session",
 		SessionID: "test-session",
 	}
-	
+
 	// This should panic with nil broker, which is expected behavior
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic with nil broker")
 		}
 	}()
-	
+
 	_ = server.handleCheckSession(sessionRequest)
 }
 
@@ -405,14 +405,14 @@ func TestServerHandleRefreshSession(t *testing.T) {
 		Type:      "refresh_session",
 		SessionID: "test-session",
 	}
-	
+
 	// This should panic with nil broker, which is expected behavior
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic with nil broker")
 		}
 	}()
-	
+
 	_ = server.handleRefreshSession(refreshRequest)
 }
 
@@ -435,14 +435,14 @@ func TestServerHandleRevokeSession(t *testing.T) {
 		Type:      "revoke_session",
 		SessionID: "test-session",
 	}
-	
+
 	// This should panic with nil broker, which is expected behavior
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("Expected panic with nil broker")
 		}
 	}()
-	
+
 	_ = server.handleRevokeSession(revokeRequest)
 }
 

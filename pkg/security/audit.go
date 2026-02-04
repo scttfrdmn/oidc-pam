@@ -14,44 +14,44 @@ import (
 
 // AuditLogger handles audit event logging
 type AuditLogger struct {
-	config   config.AuditConfig
-	outputs  []AuditOutput
+	config    config.AuditConfig
+	outputs   []AuditOutput
 	eventChan chan AuditEvent
-	stopChan chan struct{}
-	wg       sync.WaitGroup
+	stopChan  chan struct{}
+	wg        sync.WaitGroup
 }
 
 // AuditEvent represents a security audit event
 type AuditEvent struct {
-	Timestamp    time.Time              `json:"timestamp"`
-	EventID      string                 `json:"event_id"`
-	EventType    string                 `json:"event_type"`
-	UserID       string                 `json:"user_id"`
-	Email        string                 `json:"email"`
-	Groups       []string               `json:"groups"`
-	SourceIP     string                 `json:"source_ip"`
-	UserAgent    string                 `json:"user_agent"`
-	TargetHost   string                 `json:"target_host"`
-	TargetResource string               `json:"target_resource"`
-	SessionID    string                 `json:"session_id"`
-	Provider     string                 `json:"provider"`
-	AuthMethod   string                 `json:"auth_method"`
-	MFAMethods   []string               `json:"mfa_methods"`
-	Success      bool                   `json:"success"`
-	ErrorMessage string                 `json:"error_message"`
-	ErrorCode    string                 `json:"error_code"`
-	RiskScore    int                    `json:"risk_score"`
-	RiskFactors  []string               `json:"risk_factors"`
-	DeviceID     string                 `json:"device_id"`
-	DeviceName   string                 `json:"device_name"`
-	DeviceTrusted bool                  `json:"device_trusted"`
-	NetworkPath  []string               `json:"network_path"`
-	TokenFingerprint string             `json:"token_fingerprint"`
-	SSHKeyFingerprint string            `json:"ssh_key_fingerprint"`
-	PolicyViolations []string            `json:"policy_violations"`
-	ComplianceFrameworks []string        `json:"compliance_frameworks"`
-	DataClassification string            `json:"data_classification"`
-	Metadata     map[string]interface{} `json:"metadata"`
+	Timestamp            time.Time              `json:"timestamp"`
+	EventID              string                 `json:"event_id"`
+	EventType            string                 `json:"event_type"`
+	UserID               string                 `json:"user_id"`
+	Email                string                 `json:"email"`
+	Groups               []string               `json:"groups"`
+	SourceIP             string                 `json:"source_ip"`
+	UserAgent            string                 `json:"user_agent"`
+	TargetHost           string                 `json:"target_host"`
+	TargetResource       string                 `json:"target_resource"`
+	SessionID            string                 `json:"session_id"`
+	Provider             string                 `json:"provider"`
+	AuthMethod           string                 `json:"auth_method"`
+	MFAMethods           []string               `json:"mfa_methods"`
+	Success              bool                   `json:"success"`
+	ErrorMessage         string                 `json:"error_message"`
+	ErrorCode            string                 `json:"error_code"`
+	RiskScore            int                    `json:"risk_score"`
+	RiskFactors          []string               `json:"risk_factors"`
+	DeviceID             string                 `json:"device_id"`
+	DeviceName           string                 `json:"device_name"`
+	DeviceTrusted        bool                   `json:"device_trusted"`
+	NetworkPath          []string               `json:"network_path"`
+	TokenFingerprint     string                 `json:"token_fingerprint"`
+	SSHKeyFingerprint    string                 `json:"ssh_key_fingerprint"`
+	PolicyViolations     []string               `json:"policy_violations"`
+	ComplianceFrameworks []string               `json:"compliance_frameworks"`
+	DataClassification   string                 `json:"data_classification"`
+	Metadata             map[string]interface{} `json:"metadata"`
 }
 
 // AuditOutput represents an audit output destination
@@ -270,7 +270,7 @@ func (sao *StdoutAuditOutput) Write(event AuditEvent) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal audit event: %w", err)
 	}
-	
+
 	fmt.Println(string(data))
 	return nil
 }

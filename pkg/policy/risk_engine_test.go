@@ -43,15 +43,15 @@ func TestAssessRisk_LowRisk(t *testing.T) {
 	engine := NewRiskEngine(config)
 
 	ctx := &AuthContext{
-		UserID:     "testuser",
-		RemoteAddr: "192.168.1.100",
-		UserAgent:  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-		LoginType:  "ssh",
-		Provider:   "test",
-		Country:    "US",
-		City:       "San Francisco",
+		UserID:            "testuser",
+		RemoteAddr:        "192.168.1.100",
+		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		LoginType:         "ssh",
+		Provider:          "test",
+		Country:           "US",
+		City:              "San Francisco",
 		DeviceFingerprint: "known-device",
-		LastLogin:  time.Now().Add(-1 * time.Hour),
+		LastLogin:         time.Now().Add(-1 * time.Hour),
 		LoginHistory: []LoginAttempt{
 			{
 				Timestamp:  time.Now().Add(-24 * time.Hour),
@@ -86,15 +86,15 @@ func TestAssessRisk_HighRisk(t *testing.T) {
 	engine := NewRiskEngine(config)
 
 	ctx := &AuthContext{
-		UserID:     "testuser",
-		RemoteAddr: "1.2.3.4", // Untrusted network
-		UserAgent:  "curl/7.68.0", // Automated tool
-		LoginType:  "ssh",
-		Provider:   "test",
-		Country:    "XX", // Untrusted country
-		City:       "Unknown",
+		UserID:            "testuser",
+		RemoteAddr:        "1.2.3.4",     // Untrusted network
+		UserAgent:         "curl/7.68.0", // Automated tool
+		LoginType:         "ssh",
+		Provider:          "test",
+		Country:           "XX", // Untrusted country
+		City:              "Unknown",
 		DeviceFingerprint: "unknown-device",
-		LastLogin:  time.Now().Add(-30 * 24 * time.Hour), // Long time ago
+		LastLogin:         time.Now().Add(-30 * 24 * time.Hour), // Long time ago
 		LoginHistory: []LoginAttempt{
 			{
 				Timestamp:  time.Now().Add(-1 * time.Minute),
@@ -139,7 +139,7 @@ func TestAssessRisk_HighRisk(t *testing.T) {
 			foundUntrustedCountry = true
 		}
 	}
-	
+
 	if !foundUntrustedNetwork {
 		t.Error("Expected untrusted network risk factor")
 	}
@@ -196,7 +196,7 @@ func TestAssessTemporalRisk(t *testing.T) {
 	}
 
 	factor := engine.assessTemporalRisk(ctx)
-	
+
 	// Business hours check depends on current time, so we mainly test the function runs
 	if factor.Type != "temporal" {
 		t.Errorf("Expected temporal risk factor, got %s", factor.Type)
@@ -209,7 +209,7 @@ func TestAssessDeviceRisk(t *testing.T) {
 
 	// Test known device
 	ctx := &AuthContext{
-		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		UserAgent:         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 		DeviceFingerprint: "known-device",
 		LoginHistory: []LoginAttempt{
 			{

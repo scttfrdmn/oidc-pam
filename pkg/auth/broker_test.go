@@ -17,12 +17,12 @@ func TestNewBroker(t *testing.T) {
 		OIDC: config.OIDCConfig{
 			Providers: []config.OIDCProvider{
 				{
-					Name:         "test",
-					Issuer:       "mock://test-provider",
-					ClientID:     "test-client-id",
-					Scopes:       []string{"openid", "profile", "email"},
-					DeviceEndpoint: "mock://device",
-					TokenEndpoint:  "mock://token",
+					Name:             "test",
+					Issuer:           "mock://test-provider",
+					ClientID:         "test-client-id",
+					Scopes:           []string{"openid", "profile", "email"},
+					DeviceEndpoint:   "mock://device",
+					TokenEndpoint:    "mock://token",
 					UserInfoEndpoint: "mock://userinfo",
 					UserMapping: config.UserMapping{
 						UsernameClaim: "email",

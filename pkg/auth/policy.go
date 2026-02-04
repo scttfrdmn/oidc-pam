@@ -17,14 +17,14 @@ type PolicyEngine struct {
 
 // PolicyResult represents the result of policy evaluation
 type PolicyResult struct {
-	Allowed       bool
-	Reason        string
-	RequiredMFA   bool
+	Allowed        bool
+	Reason         string
+	RequiredMFA    bool
 	RequiredGroups []string
-	MaxDuration   time.Duration
-	RiskScore     int
-	RiskFactors   []string
-	Metadata      map[string]interface{}
+	MaxDuration    time.Duration
+	RiskScore      int
+	RiskFactors    []string
+	Metadata       map[string]interface{}
 }
 
 // NewPolicyEngine creates a new policy engine
@@ -39,7 +39,7 @@ func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest) (*PolicyResult, error)
 	if req == nil {
 		return nil, fmt.Errorf("authentication request cannot be nil")
 	}
-	
+
 	log.Debug().
 		Str("user_id", req.UserID).
 		Str("source_ip", req.SourceIP).
@@ -152,7 +152,7 @@ func (pe *PolicyEngine) applyTimeBasedPolicies(req *AuthRequest, result *PolicyR
 	for _, restriction := range pe.config.Authentication.TimeBasedPolicies.GeoRestrictions {
 		if pe.matchesGeoRestriction(req, restriction) {
 			country := pe.getCountryFromIP(req.SourceIP)
-			
+
 			// Check blocked countries
 			for _, blocked := range restriction.BlockedCountries {
 				if country == blocked {
@@ -161,7 +161,7 @@ func (pe *PolicyEngine) applyTimeBasedPolicies(req *AuthRequest, result *PolicyR
 					return nil
 				}
 			}
-			
+
 			// Check allowed countries
 			if len(restriction.AllowedCountries) > 0 {
 				allowed := false
@@ -263,7 +263,7 @@ func (pe *PolicyEngine) isTailscaleIP(ip string) bool {
 		IP:   net.ParseIP("100.64.0.0"),
 		Mask: net.CIDRMask(10, 32),
 	}
-	
+
 	parsedIP := net.ParseIP(ip)
 	return parsedIP != nil && tailscaleNet.Contains(parsedIP)
 }
@@ -429,7 +429,7 @@ func (pe *PolicyEngine) matchesIPPattern(ip, pattern string) bool {
 		parsedIP := net.ParseIP(ip)
 		return parsedIP != nil && network.Contains(parsedIP)
 	}
-	
+
 	// Exact match
 	return ip == pattern
 }

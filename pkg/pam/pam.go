@@ -33,44 +33,44 @@ func (p *PAMModule) AuthenticateUser(username, service, rhost, tty string) error
 	cRhost := C.CString(rhost)
 	cTTY := C.CString(tty)
 	cSocketPath := C.CString(p.socketPath)
-	
+
 	// Ensure C strings are freed
 	defer C.free(unsafe.Pointer(cUsername))
 	defer C.free(unsafe.Pointer(cService))
 	defer C.free(unsafe.Pointer(cRhost))
 	defer C.free(unsafe.Pointer(cTTY))
 	defer C.free(unsafe.Pointer(cSocketPath))
-	
+
 	// Connect to broker
 	sock := C.connect_to_broker(cSocketPath)
 	if sock == -1 {
 		return fmt.Errorf("failed to connect to authentication broker")
 	}
 	defer C.close(sock)
-	
+
 	// Send authentication request
 	if C.send_auth_request(sock, cUsername, cService, cRhost, cTTY) != 0 {
 		return fmt.Errorf("failed to send authentication request")
 	}
-	
+
 	// Receive response
 	var response [4096]C.char
 	if C.receive_auth_response(sock, &response[0], 4096) != 0 {
 		return fmt.Errorf("failed to receive authentication response")
 	}
-	
+
 	// For now, we'll implement a simple success/failure check
 	// In a real implementation, we'd parse the JSON response
 	responseStr := C.GoString(&response[0])
 	if responseStr == "" {
 		return fmt.Errorf("empty response from broker")
 	}
-	
+
 	// Simple check for success - in practice, we'd parse JSON
 	if responseStr == "{\"success\":true}" {
 		return nil
 	}
-	
+
 	return fmt.Errorf("authentication failed")
 }
 
@@ -78,7 +78,7 @@ func (p *PAMModule) AuthenticateUser(username, service, rhost, tty string) error
 func (p *PAMModule) LogMessage(priority int, message string) {
 	cMessage := C.CString(message)
 	defer C.free(unsafe.Pointer(cMessage))
-	
+
 	C.log_pam_message_string(C.int(priority), cMessage)
 }
 

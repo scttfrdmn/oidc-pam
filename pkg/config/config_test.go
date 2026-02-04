@@ -62,7 +62,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	// Clean environment first
 	_ = os.Unsetenv("OIDC_PROVIDER_URL")
 	_ = os.Unsetenv("OIDC_CLIENT_ID")
-	
+
 	// Test that a valid minimal config loads
 	validConfigPath := filepath.Join(tempDir, "valid.yaml")
 	validContent := `

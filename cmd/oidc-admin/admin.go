@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
 )
 
 // Types for communication with broker
 type StatusResponse struct {
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	Uptime    string `json:"uptime"`
+	Status    string    `json:"status"`
+	Version   string    `json:"version"`
+	Uptime    string    `json:"uptime"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
@@ -211,14 +211,14 @@ func listActiveSessions() error {
 
 	fmt.Printf("Total sessions: %d\n\n", len(sessions))
 	fmt.Printf("%-20s %-15s %-10s %-20s\n", "User", "Provider", "Type", "Created")
-	fmt.Printf("%-20s %-15s %-10s %-20s\n", 
-		strings.Repeat("-", 20), 
-		strings.Repeat("-", 15), 
-		strings.Repeat("-", 10), 
+	fmt.Printf("%-20s %-15s %-10s %-20s\n",
+		strings.Repeat("-", 20),
+		strings.Repeat("-", 15),
+		strings.Repeat("-", 10),
 		strings.Repeat("-", 20))
 
 	for _, session := range sessions {
-		fmt.Printf("%-20s %-15s %-10s %-20s\n", 
+		fmt.Printf("%-20s %-15s %-10s %-20s\n",
 			truncateString(session.UserID, 20),
 			truncateString(session.Provider, 15),
 			truncateString(session.LoginType, 10),
@@ -254,15 +254,15 @@ func listSSHKeys() error {
 
 	fmt.Printf("Total keys: %d\n\n", len(keys))
 	fmt.Printf("%-20s %-10s %-8s %-8s %-20s\n", "Username", "Type", "Size", "Status", "Created")
-	fmt.Printf("%-20s %-10s %-8s %-8s %-20s\n", 
-		strings.Repeat("-", 20), 
-		strings.Repeat("-", 10), 
-		strings.Repeat("-", 8), 
-		strings.Repeat("-", 8), 
+	fmt.Printf("%-20s %-10s %-8s %-8s %-20s\n",
+		strings.Repeat("-", 20),
+		strings.Repeat("-", 10),
+		strings.Repeat("-", 8),
+		strings.Repeat("-", 8),
 		strings.Repeat("-", 20))
 
 	for _, key := range keys {
-		fmt.Printf("%-20s %-10s %-8d %-8s %-20s\n", 
+		fmt.Printf("%-20s %-10s %-8d %-8s %-20s\n",
 			truncateString(key.Username, 20),
 			truncateString(key.KeyType, 10),
 			key.KeySize,

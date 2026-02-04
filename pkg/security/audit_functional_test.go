@@ -20,7 +20,7 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "security.log")
-	
+
 	cfg := config.AuditConfig{
 		Enabled: true,
 		Format:  "json",
@@ -58,22 +58,22 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 			RiskFactors:  []string{"brute_force", "untrusted_network"},
 		},
 		{
-			EventType:         "privilege_escalation",
-			UserID:           "user@example.com",
-			SourceIP:         "192.168.1.100",
-			Success:          false,
-			ErrorMessage:     "Unauthorized admin access attempt",
-			RiskScore:        85,
-			RiskFactors:      []string{"privilege_escalation"},
+			EventType:    "privilege_escalation",
+			UserID:       "user@example.com",
+			SourceIP:     "192.168.1.100",
+			Success:      false,
+			ErrorMessage: "Unauthorized admin access attempt",
+			RiskScore:    85,
+			RiskFactors:  []string{"privilege_escalation"},
 		},
 		{
-			EventType:         "suspicious_login",
-			UserID:           "user@example.com",
-			SourceIP:         "5.6.7.8",
-			Success:          true,
-			RiskScore:        75,
-			RiskFactors:      []string{"unusual_location", "new_device"},
-			DeviceTrusted:    false,
+			EventType:     "suspicious_login",
+			UserID:        "user@example.com",
+			SourceIP:      "5.6.7.8",
+			Success:       true,
+			RiskScore:     75,
+			RiskFactors:   []string{"unusual_location", "new_device"},
+			DeviceTrusted: false,
 		},
 	}
 
@@ -96,7 +96,7 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 	// Verify critical security indicators are logged
 	requiredSecurityInfo := []string{
 		"authentication_failure",
-		"privilege_escalation", 
+		"privilege_escalation",
 		"suspicious_login",
 		"attacker@malicious.com",
 		"brute_force",
@@ -130,7 +130,7 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "integrity.log")
-	
+
 	cfg := config.AuditConfig{
 		Enabled: true,
 		Format:  "json",
@@ -157,13 +157,13 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 
 	// Log a critical security event
 	criticalEvent := AuditEvent{
-		EventType:         "admin_login",
-		UserID:           "admin@company.com",
-		SourceIP:         "10.0.0.1",
-		Success:          true,
-		TargetHost:       "production-server",
-		AuthMethod:       "certificate",
-		Timestamp:        time.Now(),
+		EventType:  "admin_login",
+		UserID:     "admin@company.com",
+		SourceIP:   "10.0.0.1",
+		Success:    true,
+		TargetHost: "production-server",
+		AuthMethod: "certificate",
+		Timestamp:  time.Now(),
 	}
 
 	logger.LogAuthEvent(criticalEvent)
@@ -179,7 +179,7 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 	logContent := string(originalContent)
 	criticalFields := []string{
 		"admin_login",
-		"admin@company.com", 
+		"admin@company.com",
 		"10.0.0.1",
 		"production-server",
 		"certificate",
@@ -211,7 +211,7 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "compliance.log")
-	
+
 	cfg := config.AuditConfig{
 		Enabled: true,
 		Format:  "json",
@@ -240,26 +240,26 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 	// Test events that must be logged for compliance
 	complianceEvents := []AuditEvent{
 		{
-			EventType:         "data_access",
-			UserID:           "doctor@hospital.com",
-			TargetResource:   "patient_records",
-			Success:          true,
-			AuthMethod:       "mfa",
-			MFAMethods:       []string{"totp", "biometric"},
+			EventType:      "data_access",
+			UserID:         "doctor@hospital.com",
+			TargetResource: "patient_records",
+			Success:        true,
+			AuthMethod:     "mfa",
+			MFAMethods:     []string{"totp", "biometric"},
 		},
 		{
-			EventType:         "financial_data_access",
-			UserID:           "accountant@company.com", 
-			TargetResource:   "financial_reports",
-			Success:          true,
-			Groups:           []string{"finance", "sox_auditors"},
+			EventType:      "financial_data_access",
+			UserID:         "accountant@company.com",
+			TargetResource: "financial_reports",
+			Success:        true,
+			Groups:         []string{"finance", "sox_auditors"},
 		},
 		{
-			EventType:         "payment_processing",
-			UserID:           "processor@payment.com",
-			TargetResource:   "credit_card_data",
-			Success:          true,
-			AuthMethod:       "certificate",
+			EventType:      "payment_processing",
+			UserID:         "processor@payment.com",
+			TargetResource: "credit_card_data",
+			Success:        true,
+			AuthMethod:     "certificate",
 		},
 	}
 
@@ -318,7 +318,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	logFile := filepath.Join(tempDir, "threats.log")
-	
+
 	cfg := config.AuditConfig{
 		Enabled: true,
 		Format:  "json",
@@ -355,7 +355,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 			Timestamp:    time.Now().Add(-10 * time.Second),
 		},
 		{
-			EventType:    "authentication_failure", 
+			EventType:    "authentication_failure",
 			UserID:       "admin",
 			SourceIP:     "192.168.1.100",
 			Success:      false,
@@ -364,7 +364,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 		},
 		{
 			EventType:    "authentication_failure",
-			UserID:       "admin", 
+			UserID:       "admin",
 			SourceIP:     "192.168.1.100",
 			Success:      false,
 			ErrorMessage: "Invalid password",
@@ -372,13 +372,13 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 		},
 		// Successful login after brute force
 		{
-			EventType:     "authentication_success",
-			UserID:       "admin",
-			SourceIP:     "192.168.1.100", 
-			Success:      true,
-			RiskScore:    90,
-			RiskFactors:  []string{"recent_failures", "brute_force_pattern"},
-			Timestamp:    time.Now(),
+			EventType:   "authentication_success",
+			UserID:      "admin",
+			SourceIP:    "192.168.1.100",
+			Success:     true,
+			RiskScore:   90,
+			RiskFactors: []string{"recent_failures", "brute_force_pattern"},
+			Timestamp:   time.Now(),
 		},
 	}
 
@@ -399,7 +399,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 	// Verify attack pattern indicators are logged
 	threatIndicators := []string{
 		"authentication_failure",
-		"Invalid password", 
+		"Invalid password",
 		"192.168.1.100",
 		"recent_failures",
 		"brute_force_pattern",

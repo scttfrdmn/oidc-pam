@@ -34,12 +34,12 @@ type AuthResponse struct {
 func ConnectToBroker(socketPath string) (int, error) {
 	cSocketPath := C.CString(socketPath)
 	defer C.free(unsafe.Pointer(cSocketPath))
-	
+
 	sock := C.connect_to_broker(cSocketPath)
 	if sock == -1 {
 		return -1, fmt.Errorf("failed to connect to broker at %s", socketPath)
 	}
-	
+
 	return int(sock), nil
 }
 
@@ -49,39 +49,39 @@ func SendAuthRequest(sock int, username, service, rhost, tty string) error {
 	cService := C.CString(service)
 	cRhost := C.CString(rhost)
 	cTTY := C.CString(tty)
-	
+
 	defer C.free(unsafe.Pointer(cUsername))
 	defer C.free(unsafe.Pointer(cService))
 	defer C.free(unsafe.Pointer(cRhost))
 	defer C.free(unsafe.Pointer(cTTY))
-	
+
 	result := C.send_auth_request(C.int(sock), cUsername, cService, cRhost, cTTY)
 	if result != 0 {
 		return fmt.Errorf("failed to send authentication request")
 	}
-	
+
 	return nil
 }
 
 // ReceiveAuthResponse receives an authentication response from the broker
 func ReceiveAuthResponse(sock int) (*AuthResponse, error) {
 	var response [4096]C.char
-	
+
 	result := C.receive_auth_response(C.int(sock), &response[0], 4096)
 	if result != 0 {
 		return nil, fmt.Errorf("failed to receive authentication response")
 	}
-	
+
 	responseStr := C.GoString(&response[0])
 	if responseStr == "" {
 		return nil, fmt.Errorf("empty response from broker")
 	}
-	
+
 	var authResponse AuthResponse
 	if err := json.Unmarshal([]byte(responseStr), &authResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse authentication response: %w", err)
 	}
-	
+
 	return &authResponse, nil
 }
 
@@ -89,7 +89,7 @@ func ReceiveAuthResponse(sock int) (*AuthResponse, error) {
 func LogPAMMessage(priority int, message string) {
 	cMessage := C.CString(message)
 	defer C.free(unsafe.Pointer(cMessage))
-	
+
 	C.log_pam_message_string(C.int(priority), cMessage)
 }
 
@@ -103,17 +103,17 @@ func IsSocketPathValid(socketPath string) bool {
 	if socketPath == "" {
 		return false
 	}
-	
+
 	// Check if path starts with /
 	if socketPath[0] != '/' {
 		return false
 	}
-	
+
 	// Check maximum path length
 	if len(socketPath) > 107 { // Maximum Unix domain socket path length
 		return false
 	}
-	
+
 	return true
 }
 
@@ -137,13 +137,13 @@ func GetLoginType(service, tty string) string {
 // BuildAuthRequest builds an authentication request
 func BuildAuthRequest(username, service, rhost, tty string) *AuthRequest {
 	loginType := GetLoginType(service, tty)
-	
+
 	metadata := map[string]string{
 		"service": service,
 		"tty":     tty,
 		"pid":     fmt.Sprintf("%d", C.getpid()),
 	}
-	
+
 	return &AuthRequest{
 		Type:       "authenticate",
 		UserID:     username,

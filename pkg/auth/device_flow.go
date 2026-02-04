@@ -38,24 +38,24 @@ type DeviceAuthResponse struct {
 
 // TokenResponse represents the response from token endpoint
 type TokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-	Scope        string `json:"scope"`
-	IDToken      string `json:"id_token"`
-	Error        string `json:"error"`
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	ExpiresIn        int    `json:"expires_in"`
+	RefreshToken     string `json:"refresh_token"`
+	Scope            string `json:"scope"`
+	IDToken          string `json:"id_token"`
+	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
 }
 
 // OIDCProvider represents an OIDC provider with device flow support
 type OIDCProvider struct {
-	Name      string
-	Config    OIDCProviderConfig
-	Provider  *oidc.Provider
-	Verifier  *oidc.IDTokenVerifier
+	Name         string
+	Config       OIDCProviderConfig
+	Provider     *oidc.Provider
+	Verifier     *oidc.IDTokenVerifier
 	OAuth2Config *oauth2.Config
-	httpClient *http.Client
+	httpClient   *http.Client
 }
 
 // OIDCProviderConfig is an alias for the config type
@@ -90,7 +90,7 @@ type Token struct {
 // NewOIDCProvider creates a new OIDC provider
 func NewOIDCProvider(config OIDCProviderConfig) (*OIDCProvider, error) {
 	ctx := context.Background()
-	
+
 	// Create OIDC provider
 	provider, err := oidc.NewProvider(ctx, config.Issuer)
 	if err != nil {
@@ -104,10 +104,10 @@ func NewOIDCProvider(config OIDCProviderConfig) (*OIDCProvider, error) {
 
 	// Create OAuth2 config
 	oauth2Config := &oauth2.Config{
-		ClientID:     config.ClientID,
-		Endpoint:     provider.Endpoint(),
-		Scopes:       config.Scopes,
-		RedirectURL:  "", // Not used for device flow
+		ClientID:    config.ClientID,
+		Endpoint:    provider.Endpoint(),
+		Scopes:      config.Scopes,
+		RedirectURL: "", // Not used for device flow
 	}
 
 	// Create HTTP client with appropriate timeout
@@ -137,7 +137,7 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	data := url.Values{}
 	data.Set("client_id", p.Config.ClientID)
 	data.Set("scope", strings.Join(p.Config.Scopes, " "))
-	
+
 	// Include client secret if provided (for confidential clients)
 	if p.Config.ClientSecret != "" {
 		data.Set("client_secret", p.Config.ClientSecret)
@@ -227,7 +227,7 @@ func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify ID token: %w", err)
 		}
-		
+
 		if err := idToken.Claims(&claims); err != nil {
 			return nil, fmt.Errorf("failed to parse ID token claims: %w", err)
 		}
@@ -322,7 +322,7 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 
 	// Try to discover from provider metadata
 	discoveryURL := p.Config.Issuer + "/.well-known/openid-configuration"
-	
+
 	resp, err := p.httpClient.Get(discoveryURL)
 	if err != nil {
 		// Fallback to common endpoint patterns
@@ -338,7 +338,7 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 	var discoveryResp struct {
 		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&discoveryResp); err != nil {
 		// Fallback to common endpoint patterns
 		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
@@ -363,7 +363,7 @@ func (p *OIDCProvider) generateTokenFingerprint(accessToken string) string {
 
 func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) (*UserInfo, error) {
 	mapping := p.Config.UserMapping
-	
+
 	userInfo := &UserInfo{
 		Claims: claims,
 	}
@@ -400,14 +400,14 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 							continue // Skip groups that don't match prefix
 						}
 					}
-					
+
 					// Apply group mapping if configured
 					if mapping.GroupMappings != nil {
 						if mapped, ok := mapping.GroupMappings[groupStr]; ok {
 							groupStr = mapped
 						}
 					}
-					
+
 					userInfo.Groups = append(userInfo.Groups, groupStr)
 				}
 			}

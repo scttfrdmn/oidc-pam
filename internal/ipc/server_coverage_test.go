@@ -22,7 +22,7 @@ func TestServerHandleRequestTypes(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	
+
 	// Create a broker (will be nil, but that's expected for these tests)
 	server, err := NewServer(socketPath, nil)
 	if err != nil {
@@ -34,7 +34,7 @@ func TestServerHandleRequestTypes(t *testing.T) {
 		Type:   "invalid_request_type",
 		UserID: "test-user",
 	}
-	
+
 	response := server.handleRequest(invalidRequest)
 	if response.Success {
 		t.Error("Expected invalid request type to fail")

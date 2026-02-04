@@ -161,12 +161,12 @@ func createTestConfig(testDir string) *config.Config {
 		OIDC: config.OIDCConfig{
 			Providers: []config.OIDCProvider{
 				{
-					Name:         "test",
-					Issuer:       "mock://test-provider",
-					ClientID:     "test-client-id",
-					Scopes:       []string{"openid", "profile", "email"},
-					DeviceEndpoint: "mock://device",
-					TokenEndpoint:  "mock://token", 
+					Name:             "test",
+					Issuer:           "mock://test-provider",
+					ClientID:         "test-client-id",
+					Scopes:           []string{"openid", "profile", "email"},
+					DeviceEndpoint:   "mock://device",
+					TokenEndpoint:    "mock://token",
 					UserInfoEndpoint: "mock://userinfo",
 					UserMapping: config.UserMapping{
 						UsernameClaim: "email",
@@ -423,9 +423,9 @@ func testPolicyEnforcement(t *testing.T, socketPath string) {
 		"login_type":  "ssh",
 		"target_host": "localhost",
 		"metadata": map[string]interface{}{
-			"remote_addr": "1.2.3.4", // Untrusted IP
+			"remote_addr": "1.2.3.4",     // Untrusted IP
 			"user_agent":  "curl/7.68.0", // Automated tool
-			"country":     "XX", // Untrusted country
+			"country":     "XX",          // Untrusted country
 		},
 	}
 
@@ -666,7 +666,7 @@ func BenchmarkAuthentication(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			conn := connectToBrokerBench(b, cfg.Server.SocketPath)
-			
+
 			request := map[string]interface{}{
 				"type":        "authenticate",
 				"user_id":     fmt.Sprintf("user%d", time.Now().UnixNano()),
@@ -677,7 +677,7 @@ func BenchmarkAuthentication(b *testing.B) {
 			_ = json.NewEncoder(conn).Encode(request)
 			var response map[string]interface{}
 			_ = json.NewDecoder(conn).Decode(&response)
-			
+
 			_ = conn.Close()
 		}
 	})
@@ -743,4 +743,3 @@ func connectToBrokerBench(b *testing.B, socketPath string) net.Conn {
 
 	return conn
 }
-

@@ -159,8 +159,8 @@ func TestPolicyEngine_TimeBasedEvaluation(t *testing.T) {
 	now := time.Now()
 	testTimes := []time.Time{
 		now,
-		now.Add(-time.Hour),    // Past
-		now.Add(time.Hour),     // Future
+		now.Add(-time.Hour),      // Past
+		now.Add(time.Hour),       // Future
 		now.Add(-24 * time.Hour), // Yesterday
 	}
 

@@ -11,9 +11,9 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/scttfrdmn/oidc-pam/internal/ipc"
 	"github.com/scttfrdmn/oidc-pam/pkg/auth"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
-	"github.com/scttfrdmn/oidc-pam/internal/ipc"
 )
 
 var (
@@ -23,8 +23,8 @@ var (
 )
 
 var (
-	configPath = flag.String("config", "/etc/oidc-auth/broker.yaml", "Path to configuration file")
-	logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	configPath  = flag.String("config", "/etc/oidc-auth/broker.yaml", "Path to configuration file")
+	logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
 	showVersion = flag.Bool("version", false, "Show version information")
 )
 
@@ -119,7 +119,7 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		
+
 		// Stop IPC server
 		if err := ipcServer.Stop(); err != nil {
 			log.Error().
@@ -148,7 +148,7 @@ func main() {
 func setupLogging(level string) {
 	// Configure zerolog
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	
+
 	// Set log level
 	logLevel, err := zerolog.ParseLevel(level)
 	if err != nil {

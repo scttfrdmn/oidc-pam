@@ -10,10 +10,10 @@ import (
 // TestBrokerSecurityValidation tests that the broker properly validates security requirements
 func TestBrokerSecurityValidation(t *testing.T) {
 	tests := []struct {
-		name           string
-		config         *config.Config
-		expectedError  string
-		securityIssue  string
+		name          string
+		config        *config.Config
+		expectedError string
+		securityIssue string
 	}{
 		{
 			name: "missing_encryption_key",
@@ -115,7 +115,7 @@ func TestBrokerSecurityValidation(t *testing.T) {
 			if err == nil {
 				t.Errorf("Expected security validation to fail for: %s", tt.securityIssue)
 			} else if tt.expectedError != "" && !contains(err.Error(), tt.expectedError) {
-				t.Errorf("Expected error containing '%s' for security issue '%s', got: %v", 
+				t.Errorf("Expected error containing '%s' for security issue '%s', got: %v",
 					tt.expectedError, tt.securityIssue, err)
 			}
 		})
@@ -145,7 +145,7 @@ func TestBrokerSessionSecurity(t *testing.T) {
 	// Test that sessions expire properly
 	sessionStart := time.Now()
 	sessionExpiry := sessionStart.Add(cfg.Authentication.TokenLifetime)
-	
+
 	if time.Now().After(sessionExpiry.Add(10 * time.Millisecond)) {
 		// Session should have expired by now for security
 		t.Log("Session expiry mechanism working correctly")
@@ -179,7 +179,7 @@ func TestBrokerSecureSocketPermissions(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !isSecurePath && !contains(cfg.Server.SocketPath, "/tmp") {
 		t.Log("Socket path should be in secure system directory")
 	}
@@ -195,7 +195,7 @@ func TestBrokerAuditingSecurity(t *testing.T) {
 			Enabled: true,
 			Events: []string{
 				"authentication_attempts",
-				"authorization_decisions", 
+				"authorization_decisions",
 				"token_validation",
 				"session_creation",
 				"session_termination",
@@ -218,7 +218,7 @@ func TestBrokerAuditingSecurity(t *testing.T) {
 	requiredEvents := []string{
 		"authentication_attempts",
 		"authorization_decisions",
-		"token_validation", 
+		"token_validation",
 		"security_violations",
 	}
 
@@ -240,12 +240,12 @@ func TestBrokerAuditingSecurity(t *testing.T) {
 func TestBrokerTokenSecurity(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
-			TokenEncryptionKey:  "test-encryption-key-32-bytes-long!",
-			SecureTokenStorage:  true,
-			VerifyAudience:      true,
-			RequireAuthTime:     true,
-			MaxTokenAge:         24 * time.Hour,
-			ClockSkewTolerance:  5 * time.Minute,
+			TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+			SecureTokenStorage: true,
+			VerifyAudience:     true,
+			RequireAuthTime:    true,
+			MaxTokenAge:        24 * time.Hour,
+			ClockSkewTolerance: 5 * time.Minute,
 		},
 	}
 
@@ -264,7 +264,7 @@ func TestBrokerTokenSecurity(t *testing.T) {
 		t.Error("Token audience verification must be enabled for security")
 	}
 
-	// Test auth time requirement  
+	// Test auth time requirement
 	if !cfg.Security.RequireAuthTime {
 		t.Error("Auth time verification should be enabled for security")
 	}
@@ -312,9 +312,9 @@ func TestBrokerRateLimitingSecurity(t *testing.T) {
 
 // Helper function to check if string contains substring
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		   (s == substr || 
-		    len(s) > len(substr) && containsMiddle(s, substr))
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			len(s) > len(substr) && containsMiddle(s, substr))
 }
 
 func containsMiddle(s, substr string) bool {

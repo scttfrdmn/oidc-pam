@@ -17,15 +17,15 @@ type RiskEngine struct {
 
 // RiskConfig holds configuration for risk assessment
 type RiskConfig struct {
-	MaxRiskScore      float64            `yaml:"max_risk_score"`
-	GeoRiskEnabled    bool               `yaml:"geo_risk_enabled"`
-	TimeRiskEnabled   bool               `yaml:"time_risk_enabled"`
-	DeviceRiskEnabled bool               `yaml:"device_risk_enabled"`
-	BehaviorRiskEnabled bool             `yaml:"behavior_risk_enabled"`
-	TrustedNetworks   []string           `yaml:"trusted_networks"`
-	TrustedCountries  []string           `yaml:"trusted_countries"`
-	BusinessHours     BusinessHours      `yaml:"business_hours"`
-	RiskWeights       RiskWeights        `yaml:"risk_weights"`
+	MaxRiskScore        float64       `yaml:"max_risk_score"`
+	GeoRiskEnabled      bool          `yaml:"geo_risk_enabled"`
+	TimeRiskEnabled     bool          `yaml:"time_risk_enabled"`
+	DeviceRiskEnabled   bool          `yaml:"device_risk_enabled"`
+	BehaviorRiskEnabled bool          `yaml:"behavior_risk_enabled"`
+	TrustedNetworks     []string      `yaml:"trusted_networks"`
+	TrustedCountries    []string      `yaml:"trusted_countries"`
+	BusinessHours       BusinessHours `yaml:"business_hours"`
+	RiskWeights         RiskWeights   `yaml:"risk_weights"`
 }
 
 // BusinessHours defines allowed business hours
@@ -48,40 +48,40 @@ type RiskWeights struct {
 
 // RiskAssessment represents a risk assessment result
 type RiskAssessment struct {
-	TotalScore       float64             `json:"total_score"`
-	MaxScore         float64             `json:"max_score"`
-	RiskLevel        string              `json:"risk_level"`
-	Factors          []RiskFactor        `json:"factors"`
-	Recommendations  []string            `json:"recommendations"`
-	Decision         string              `json:"decision"`
-	RequiredMFA      bool                `json:"required_mfa"`
-	SessionDuration  time.Duration       `json:"session_duration"`
-	AssessmentTime   time.Time           `json:"assessment_time"`
+	TotalScore      float64       `json:"total_score"`
+	MaxScore        float64       `json:"max_score"`
+	RiskLevel       string        `json:"risk_level"`
+	Factors         []RiskFactor  `json:"factors"`
+	Recommendations []string      `json:"recommendations"`
+	Decision        string        `json:"decision"`
+	RequiredMFA     bool          `json:"required_mfa"`
+	SessionDuration time.Duration `json:"session_duration"`
+	AssessmentTime  time.Time     `json:"assessment_time"`
 }
 
 // RiskFactor represents an individual risk factor
 type RiskFactor struct {
-	Type        string  `json:"type"`
-	Score       float64 `json:"score"`
-	Weight      float64 `json:"weight"`
+	Type          string  `json:"type"`
+	Score         float64 `json:"score"`
+	Weight        float64 `json:"weight"`
 	WeightedScore float64 `json:"weighted_score"`
-	Description string  `json:"description"`
-	Severity    string  `json:"severity"`
+	Description   string  `json:"description"`
+	Severity      string  `json:"severity"`
 }
 
 // AuthContext contains information needed for risk assessment
 type AuthContext struct {
-	UserID         string            `json:"user_id"`
-	RemoteAddr     string            `json:"remote_addr"`
-	UserAgent      string            `json:"user_agent"`
-	LoginType      string            `json:"login_type"`
-	Provider       string            `json:"provider"`
-	Country        string            `json:"country"`
-	City           string            `json:"city"`
-	DeviceFingerprint string         `json:"device_fingerprint"`
-	LastLogin      time.Time         `json:"last_login"`
-	LoginHistory   []LoginAttempt    `json:"login_history"`
-	Metadata       map[string]string `json:"metadata"`
+	UserID            string            `json:"user_id"`
+	RemoteAddr        string            `json:"remote_addr"`
+	UserAgent         string            `json:"user_agent"`
+	LoginType         string            `json:"login_type"`
+	Provider          string            `json:"provider"`
+	Country           string            `json:"country"`
+	City              string            `json:"city"`
+	DeviceFingerprint string            `json:"device_fingerprint"`
+	LastLogin         time.Time         `json:"last_login"`
+	LoginHistory      []LoginAttempt    `json:"login_history"`
+	Metadata          map[string]string `json:"metadata"`
 }
 
 // LoginAttempt represents a historical login attempt
@@ -135,10 +135,10 @@ func (re *RiskEngine) AssessRisk(ctx *AuthContext) (*RiskAssessment, error) {
 		Msg("Starting risk assessment")
 
 	assessment := &RiskAssessment{
-		MaxScore:       re.config.MaxRiskScore,
-		Factors:        []RiskFactor{},
+		MaxScore:        re.config.MaxRiskScore,
+		Factors:         []RiskFactor{},
 		Recommendations: []string{},
-		AssessmentTime: time.Now(),
+		AssessmentTime:  time.Now(),
 	}
 
 	// Assess different risk factors
@@ -243,7 +243,7 @@ func (re *RiskEngine) assessTemporalRisk(ctx *AuthContext) RiskFactor {
 	description := "Time-based access assessment"
 
 	now := time.Now()
-	
+
 	// Check business hours
 	if re.config.BusinessHours.Enabled {
 		if !re.isBusinessHours(now) {
@@ -256,7 +256,7 @@ func (re *RiskEngine) assessTemporalRisk(ctx *AuthContext) RiskFactor {
 	if len(ctx.LoginHistory) > 0 {
 		avgHour := re.calculateAverageLoginHour(ctx.LoginHistory)
 		currentHour := float64(now.Hour())
-		
+
 		timeDiff := math.Abs(currentHour - avgHour)
 		if timeDiff > 6 { // More than 6 hours difference
 			score += 15.0
@@ -446,7 +446,7 @@ func (re *RiskEngine) requiresMFA(assessment *RiskAssessment) bool {
 
 func (re *RiskEngine) calculateSessionDuration(assessment *RiskAssessment) time.Duration {
 	baseDuration := 8 * time.Hour
-	
+
 	if assessment.TotalScore >= 50 {
 		return 1 * time.Hour
 	} else if assessment.TotalScore >= 30 {

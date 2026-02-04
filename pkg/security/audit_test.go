@@ -60,14 +60,14 @@ func TestNewAuditLogger(t *testing.T) {
 
 func TestAuditEvent(t *testing.T) {
 	event := &AuditEvent{
-		EventType:    "authentication",
-		UserID:       "testuser",
-		Timestamp:    time.Now(),
-		SourceIP:     "192.168.1.100",
-		UserAgent:    "test-client",
-		Success:      true,
-		Provider:     "test",
-		AuthMethod:   "oidc",
+		EventType:  "authentication",
+		UserID:     "testuser",
+		Timestamp:  time.Now(),
+		SourceIP:   "192.168.1.100",
+		UserAgent:  "test-client",
+		Success:    true,
+		Provider:   "test",
+		AuthMethod: "oidc",
 	}
 
 	// Test JSON marshaling
@@ -100,24 +100,24 @@ func TestAuditEvent(t *testing.T) {
 func TestAuditEventFields(t *testing.T) {
 	event := &AuditEvent{
 		EventType:         "authentication",
-		UserID:           "testuser",
-		Email:            "test@example.com", 
-		Groups:           []string{"admin", "users"},
-		SourceIP:         "192.168.1.100",
-		UserAgent:        "test-client",
-		TargetHost:       "server.example.com",
-		SessionID:        "session-123",
-		Provider:         "test-provider",
-		AuthMethod:       "oidc",
-		MFAMethods:       []string{"totp"},
-		Success:          true,
-		RiskScore:        25,
-		RiskFactors:      []string{"untrusted_network"},
-		DeviceID:         "device-123",
-		DeviceName:       "Test Device",
-		DeviceTrusted:    false,
-		NetworkPath:      []string{"router1", "router2"},
-		TokenFingerprint: "abc123",
+		UserID:            "testuser",
+		Email:             "test@example.com",
+		Groups:            []string{"admin", "users"},
+		SourceIP:          "192.168.1.100",
+		UserAgent:         "test-client",
+		TargetHost:        "server.example.com",
+		SessionID:         "session-123",
+		Provider:          "test-provider",
+		AuthMethod:        "oidc",
+		MFAMethods:        []string{"totp"},
+		Success:           true,
+		RiskScore:         25,
+		RiskFactors:       []string{"untrusted_network"},
+		DeviceID:          "device-123",
+		DeviceName:        "Test Device",
+		DeviceTrusted:     false,
+		NetworkPath:       []string{"router1", "router2"},
+		TokenFingerprint:  "abc123",
 		SSHKeyFingerprint: "ssh-rsa-456",
 	}
 
@@ -341,9 +341,9 @@ func TestHTTPAuditOutput(t *testing.T) {
 func TestAuditOutputCreation(t *testing.T) {
 	// Test creating different audit output types
 	testCases := []struct {
-		config       config.AuditOutput
-		expectError  bool
-		outputType   string
+		config      config.AuditOutput
+		expectError bool
+		outputType  string
 	}{
 		{
 			config: config.AuditOutput{

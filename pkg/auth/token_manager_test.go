@@ -11,7 +11,7 @@ import (
 
 func TestTokenManagerCreation(t *testing.T) {
 	// Test token manager creation
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -30,7 +30,7 @@ func TestTokenManagerCreation(t *testing.T) {
 
 func TestTokenManagerStartStop(t *testing.T) {
 	// Test token manager start/stop functionality
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -60,7 +60,7 @@ func TestTokenManagerStartStop(t *testing.T) {
 
 func TestTokenManagerBasicOperations(t *testing.T) {
 	// Test basic token manager operations
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -113,7 +113,7 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 
 func TestTokenManagerRevocation(t *testing.T) {
 	// Test token revocation functionality
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -146,7 +146,7 @@ func TestTokenManagerRevocation(t *testing.T) {
 
 func TestTokenManagerRefresh(t *testing.T) {
 	// Test token refresh functionality
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -170,7 +170,7 @@ func TestTokenManagerRefresh(t *testing.T) {
 
 func TestTokenManagerInternalMethods(t *testing.T) {
 	// Test internal token manager methods
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -201,7 +201,7 @@ func TestTokenManagerInternalMethods(t *testing.T) {
 
 func TestTokenManagerCleanup(t *testing.T) {
 	// Test token cleanup functionality
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -216,24 +216,24 @@ func TestTokenManagerCleanup(t *testing.T) {
 	// Test cleanup methods
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
 	defer cancel()
-	
-	// These methods are usually called by the manager in goroutines, 
+
+	// These methods are usually called by the manager in goroutines,
 	// so we just test they don't panic
 	// Note: cleanupExpiredTokens expects to be called within a waitgroup context
 	tm.wg.Add(1)
 	go tm.cleanupExpiredTokens(ctx)
 	tm.performCleanup()
-	
+
 	// Wait for cleanup to complete
 	tm.wg.Wait()
-	
+
 	// These methods should not panic even if called on empty token manager
 	t.Log("Cleanup methods executed successfully")
 }
 
 func TestTokenManagerConcurrency(t *testing.T) {
 	// Test token manager concurrent operations
-	
+
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
@@ -251,21 +251,21 @@ func TestTokenManagerConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			
+
 			// Generate unique token ID
 			tokenID := tm.generateTokenID()
 			if tokenID == "" {
 				t.Errorf("Generated empty token ID in goroutine %d", i)
 				return
 			}
-			
+
 			// Test concurrent operations
 			_, _ = tm.GetToken(tokenID)
 			_, _ = tm.ValidateToken(tokenID)
 			_ = tm.RevokeToken(tokenID)
 		}(i)
 	}
-	
+
 	wg.Wait()
 	t.Log("Concurrent operations completed successfully")
 }

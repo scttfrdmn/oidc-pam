@@ -26,15 +26,15 @@ type Server struct {
 
 // Request represents a request from PAM module
 type Request struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"user_id"`
-	SourceIP  string                 `json:"source_ip"`
-	UserAgent string                 `json:"user_agent"`
-	TargetHost string                `json:"target_host"`
-	LoginType string                 `json:"login_type"`
-	DeviceID  string                 `json:"device_id"`
-	SessionID string                 `json:"session_id"`
-	Metadata  map[string]interface{} `json:"metadata"`
+	Type       string                 `json:"type"`
+	UserID     string                 `json:"user_id"`
+	SourceIP   string                 `json:"source_ip"`
+	UserAgent  string                 `json:"user_agent"`
+	TargetHost string                 `json:"target_host"`
+	LoginType  string                 `json:"login_type"`
+	DeviceID   string                 `json:"device_id"`
+	SessionID  string                 `json:"session_id"`
+	Metadata   map[string]interface{} `json:"metadata"`
 }
 
 // Response represents a response to PAM module

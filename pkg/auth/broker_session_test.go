@@ -11,7 +11,7 @@ import (
 
 func TestBrokerSessionMethods(t *testing.T) {
 	// Test session management methods like CheckSession, RefreshSession, RevokeSession
-	
+
 	// Create broker with minimal initialization
 	broker := &Broker{
 		config: &config.Config{
@@ -77,7 +77,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 
 	// Test setSession
 	broker.setSession(testSession)
-	
+
 	// Test CheckSession with existing session
 	session, err = broker.CheckSession("test-session-methods")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 
 	// Test removeSession
 	broker.removeSession("test-session-methods")
-	
+
 	// Verify session was removed
 	session, err = broker.CheckSession("test-session-methods")
 	if err != nil {
@@ -106,7 +106,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 
 func TestBrokerSessionCleanup(t *testing.T) {
 	// Test session cleanup functionality
-	
+
 	// Create broker with minimal initialization
 	broker := &Broker{
 		config: &config.Config{
@@ -180,7 +180,7 @@ func TestBrokerSessionCleanup(t *testing.T) {
 	// Run cleanup in a goroutine - we need to add to waitgroup first
 	broker.wg.Add(1)
 	go broker.sessionCleanup(ctx)
-	
+
 	// Wait for cleanup to run and then wait for the goroutine to finish
 	time.Sleep(time.Millisecond * 100)
 	broker.wg.Wait()
@@ -197,7 +197,7 @@ func TestBrokerSessionCleanup(t *testing.T) {
 
 func TestBrokerStartStop(t *testing.T) {
 	// Test basic Start/Stop functionality without actual network operations
-	
+
 	// Create a properly configured broker
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -229,7 +229,7 @@ func TestBrokerStartStop(t *testing.T) {
 	if err != nil {
 		// Expected to fail due to network calls, but test the basic structure
 		t.Logf("Expected broker creation to fail due to network calls: %v", err)
-		
+
 		// Create a minimal broker for testing Start/Stop logic
 		// Note: We can't create a full broker without network access, so we'll skip the Stop test
 		t.Log("Skipping Stop test due to broker creation failure (expected without network access)")

@@ -29,7 +29,9 @@ jobs:
         run: go mod verify
 
       - name: Run go vet
-        run: go vet ./...
+        run: |
+          # Vet all non-PAM packages (PAM packages require CGO and PAM headers)
+          go vet ./pkg/auth ./pkg/config ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin ./cmd/pam-helper
 
       - name: Run tests
         run: |
@@ -89,9 +91,10 @@ jobs:
 
       - name: golangci-lint
         run: |
-          # Download and run golangci-lint
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0
-          $(go env GOPATH)/bin/golangci-lint run --timeout=5m
+          # Download and run golangci-lint (v1.62+ supports Go 1.24)
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.62.2
+          # Skip PAM packages that require CGO and PAM headers
+          $(go env GOPATH)/bin/golangci-lint run --timeout=5m --skip-dirs=pkg/pam,cmd/pam-module
 
   validate:
     name: Validate

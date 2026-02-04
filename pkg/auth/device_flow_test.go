@@ -9,7 +9,7 @@ import (
 
 func TestOIDCProviderCreation(t *testing.T) {
 	// Test OIDC provider creation without network calls
-	
+
 	cfg := config.OIDCProvider{
 		Name:            "test-provider",
 		Issuer:          "https://example.com",
@@ -22,7 +22,7 @@ func TestOIDCProviderCreation(t *testing.T) {
 	provider, err := NewOIDCProvider(cfg)
 	if err != nil {
 		t.Logf("Expected provider creation to fail due to network calls: %v", err)
-		
+
 		// Test that the error is related to network connectivity, not code structure
 		if provider != nil {
 			t.Error("Expected nil provider on error")
@@ -32,7 +32,7 @@ func TestOIDCProviderCreation(t *testing.T) {
 
 func TestDeviceFlowMethods(t *testing.T) {
 	// Test device flow methods without requiring actual OIDC provider
-	
+
 	// Create a minimal provider struct for testing
 	provider := &OIDCProvider{
 		Name: "test-provider",
@@ -52,7 +52,7 @@ func TestDeviceFlowMethods(t *testing.T) {
 	} else {
 		t.Log("Provider creation failed (expected without network access)")
 	}
-	
+
 	// Test that we can create AuthRequest struct
 	authRequest := &AuthRequest{
 		UserID:     "test-user",
@@ -64,7 +64,7 @@ func TestDeviceFlowMethods(t *testing.T) {
 		SessionID:  "test-session",
 		Timestamp:  time.Now(),
 	}
-	
+
 	if authRequest.UserID != "test-user" {
 		t.Error("AuthRequest creation failed")
 	}
@@ -72,7 +72,7 @@ func TestDeviceFlowMethods(t *testing.T) {
 
 func TestDeviceFlowHelperMethods(t *testing.T) {
 	// Test helper methods for device flow
-	
+
 	provider := &OIDCProvider{
 		Name: "test-provider",
 		Config: config.OIDCProvider{
@@ -103,7 +103,7 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 		if fingerprint == fingerprint3 {
 			t.Error("Different tokens should produce different fingerprints")
 		}
-		
+
 		// Skip network-dependent endpoint test
 		t.Log("Skipping device authorization endpoint test (requires network)")
 	} else {
@@ -113,7 +113,7 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 
 func TestUserInfoExtraction(t *testing.T) {
 	// Test user info extraction from claims
-	
+
 	provider := &OIDCProvider{
 		Name: "test-provider",
 		Config: config.OIDCProvider{
@@ -165,10 +165,10 @@ func TestUserInfoExtraction(t *testing.T) {
 
 func TestTokenOperations(t *testing.T) {
 	// Test token-related operations
-	
+
 	// Skip token operations that require network access
 	t.Log("Skipping token operations tests (require network access)")
-	
+
 	// Test Token struct creation
 	testToken := &Token{
 		AccessToken: "test-access-token",
@@ -177,7 +177,7 @@ func TestTokenOperations(t *testing.T) {
 		Fingerprint: "test-fingerprint",
 		Claims:      make(map[string]interface{}),
 	}
-	
+
 	if testToken.AccessToken != "test-access-token" {
 		t.Error("Token creation failed")
 	}
@@ -185,7 +185,7 @@ func TestTokenOperations(t *testing.T) {
 
 func TestDeviceFlowStructures(t *testing.T) {
 	// Test device flow data structures
-	
+
 	deviceFlow := &DeviceFlow{
 		DeviceCode:      "test-device-code",
 		UserCode:        "TEST123",
@@ -216,7 +216,7 @@ func TestDeviceFlowStructures(t *testing.T) {
 
 func TestTokenStructures(t *testing.T) {
 	// Test token data structures
-	
+
 	token := &Token{
 		AccessToken:  "test-access-token",
 		RefreshToken: "test-refresh-token",
@@ -275,7 +275,7 @@ func TestDeviceFlowNetworkMethods(t *testing.T) {
 			LoginType:  "ssh",
 			TargetHost: "test-host",
 		}
-		
+
 		deviceFlow, err := provider.StartDeviceFlow(mockRequest)
 		if err != nil {
 			t.Logf("StartDeviceFlow failed as expected: %v", err)

@@ -9,13 +9,13 @@ import (
 func TestNewPAMModule(t *testing.T) {
 	socketPath := "/tmp/test.sock"
 	debug := true
-	
+
 	module := NewPAMModule(socketPath, debug)
-	
+
 	if module.GetSocketPath() != socketPath {
 		t.Errorf("Expected socket path %s, got %s", socketPath, module.GetSocketPath())
 	}
-	
+
 	if !module.IsDebugEnabled() {
 		t.Error("Expected debug to be enabled")
 	}
@@ -23,13 +23,13 @@ func TestNewPAMModule(t *testing.T) {
 
 func TestSetDebug(t *testing.T) {
 	module := NewPAMModule("/tmp/test.sock", false)
-	
+
 	if module.IsDebugEnabled() {
 		t.Error("Expected debug to be disabled initially")
 	}
-	
+
 	module.SetDebug(true)
-	
+
 	if !module.IsDebugEnabled() {
 		t.Error("Expected debug to be enabled after SetDebug(true)")
 	}
@@ -46,7 +46,7 @@ func TestIsSocketPathValid(t *testing.T) {
 		{"/valid/path", true},
 		{"/very/long/path/that/exceeds/the/maximum/unix/domain/socket/path/length/limit/which/should/be/rejected/because/it/is/too/long/for/the/system/to/handle/properly", false},
 	}
-	
+
 	for _, test := range tests {
 		if IsSocketPathValid(test.path) != test.valid {
 			t.Errorf("Expected IsSocketPathValid(%s) to return %v", test.path, test.valid)
@@ -67,11 +67,11 @@ func TestGetLoginType(t *testing.T) {
 		{"login", "pts/0", "unknown"},
 		{"unknown", "unknown", "unknown"},
 	}
-	
+
 	for _, test := range tests {
 		result := GetLoginType(test.service, test.tty)
 		if result != test.expected {
-			t.Errorf("Expected GetLoginType(%s, %s) to return %s, got %s", 
+			t.Errorf("Expected GetLoginType(%s, %s) to return %s, got %s",
 				test.service, test.tty, test.expected, result)
 		}
 	}
@@ -82,29 +82,29 @@ func TestBuildAuthRequest(t *testing.T) {
 	service := "sshd"
 	rhost := "192.168.1.100"
 	tty := "pts/0"
-	
+
 	req := BuildAuthRequest(username, service, rhost, tty)
-	
+
 	if req.Type != "authenticate" {
 		t.Errorf("Expected type 'authenticate', got %s", req.Type)
 	}
-	
+
 	if req.UserID != username {
 		t.Errorf("Expected user_id %s, got %s", username, req.UserID)
 	}
-	
+
 	if req.LoginType != "ssh" {
 		t.Errorf("Expected login_type 'ssh', got %s", req.LoginType)
 	}
-	
+
 	if req.TargetHost != rhost {
 		t.Errorf("Expected target_host %s, got %s", rhost, req.TargetHost)
 	}
-	
+
 	if req.Metadata["service"] != service {
 		t.Errorf("Expected service %s in metadata, got %s", service, req.Metadata["service"])
 	}
-	
+
 	if req.Metadata["tty"] != tty {
 		t.Errorf("Expected tty %s in metadata, got %s", tty, req.Metadata["tty"])
 	}
@@ -121,16 +121,16 @@ func TestSerializeAuthRequest(t *testing.T) {
 			"tty":     "pts/0",
 		},
 	}
-	
+
 	data, err := SerializeAuthRequest(req)
 	if err != nil {
 		t.Fatalf("Failed to serialize auth request: %v", err)
 	}
-	
+
 	if len(data) == 0 {
 		t.Error("Expected serialized data to be non-empty")
 	}
-	
+
 	// Check if it contains expected fields
 	dataStr := string(data)
 	expectedFields := []string{
@@ -141,7 +141,7 @@ func TestSerializeAuthRequest(t *testing.T) {
 		"sshd",
 		"pts/0",
 	}
-	
+
 	for _, field := range expectedFields {
 		if !contains(dataStr, field) {
 			t.Errorf("Expected serialized data to contain %s", field)
@@ -156,19 +156,19 @@ func TestAuthResponse(t *testing.T) {
 		Instructions:   "Login successful",
 		SessionID:      "session123",
 	}
-	
+
 	if !response.Success {
 		t.Error("Expected success to be true")
 	}
-	
+
 	if response.RequiresDevice {
 		t.Error("Expected requires_device to be false")
 	}
-	
+
 	if response.Instructions != "Login successful" {
 		t.Errorf("Expected instructions 'Login successful', got %s", response.Instructions)
 	}
-	
+
 	if response.SessionID != "session123" {
 		t.Errorf("Expected session_id 'session123', got %s", response.SessionID)
 	}
@@ -176,9 +176,9 @@ func TestAuthResponse(t *testing.T) {
 
 // Helper function to check if string contains substring
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr || 
-		   len(s) >= len(substr) && s[:len(substr)] == substr ||
-		   len(s) > len(substr) && containsMiddle(s, substr)
+	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr ||
+		len(s) >= len(substr) && s[:len(substr)] == substr ||
+		len(s) > len(substr) && containsMiddle(s, substr)
 }
 
 func containsMiddle(s, substr string) bool {
@@ -196,7 +196,7 @@ func BenchmarkBuildAuthRequest(b *testing.B) {
 	service := "sshd"
 	rhost := "192.168.1.100"
 	tty := "pts/0"
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		BuildAuthRequest(username, service, rhost, tty)
@@ -214,7 +214,7 @@ func BenchmarkSerializeAuthRequest(b *testing.B) {
 			"tty":     "pts/0",
 		},
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = SerializeAuthRequest(req)
@@ -224,7 +224,7 @@ func BenchmarkSerializeAuthRequest(b *testing.B) {
 func BenchmarkGetLoginType(b *testing.B) {
 	service := "sshd"
 	tty := "pts/0"
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		GetLoginType(service, tty)
@@ -236,13 +236,13 @@ func BenchmarkGetLoginType(b *testing.B) {
 func TestPAMModuleSocketConnections(t *testing.T) {
 	// Test invalid socket path scenarios
 	module := NewPAMModule("", true)
-	
+
 	// Test authentication with invalid socket path
 	err := module.AuthenticateUser("testuser", "sshd", "127.0.0.1", "pts/0")
 	if err == nil {
 		t.Error("Expected error for empty socket path")
 	}
-	
+
 	// Test with non-existent socket path
 	module = NewPAMModule("/non/existent/socket.sock", true)
 	err = module.AuthenticateUser("testuser", "sshd", "127.0.0.1", "pts/0")
@@ -253,15 +253,15 @@ func TestPAMModuleSocketConnections(t *testing.T) {
 
 func TestPAMModuleLogging(t *testing.T) {
 	module := NewPAMModule("/tmp/test.sock", true)
-	
+
 	// Test logging functionality (should not panic)
 	module.LogMessage(1, "Test log message")
 	module.LogMessage(2, "Test warning message")
 	module.LogMessage(3, "Test error message")
-	
+
 	// Test with empty message
 	module.LogMessage(1, "")
-	
+
 	// Test with long message
 	longMessage := strings.Repeat("Long message content ", 100)
 	module.LogMessage(1, longMessage)
@@ -275,7 +275,7 @@ func TestConnectToBrokerErrors(t *testing.T) {
 		"/tmp/not_a_socket",
 		"relative/path.sock",
 	}
-	
+
 	for _, path := range testPaths {
 		sock, err := ConnectToBroker(path)
 		if err == nil {
@@ -296,7 +296,7 @@ func TestSocketOperations(t *testing.T) {
 func TestSendAuthRequestErrors(t *testing.T) {
 	// Test with invalid socket descriptors
 	invalidSockets := []int{-1, 0, 999999}
-	
+
 	for _, sock := range invalidSockets {
 		err := SendAuthRequest(sock, "testuser", "sshd", "127.0.0.1", "pts/0")
 		if err == nil {
@@ -308,7 +308,7 @@ func TestSendAuthRequestErrors(t *testing.T) {
 func TestReceiveAuthResponseErrors(t *testing.T) {
 	// Test with invalid socket descriptors
 	invalidSockets := []int{-1, 0, 999999}
-	
+
 	for _, sock := range invalidSockets {
 		response, err := ReceiveAuthResponse(sock)
 		if err == nil {
@@ -323,15 +323,15 @@ func TestReceiveAuthResponseErrors(t *testing.T) {
 func TestLogPAMMessagePriorities(t *testing.T) {
 	// Test different priority levels
 	priorities := []int{0, 1, 2, 3, 4, 5, 6, 7}
-	
+
 	for _, priority := range priorities {
 		// Should not panic
 		LogPAMMessage(priority, "Test message with priority level")
 	}
-	
+
 	// Test with negative priority
 	LogPAMMessage(-1, "Test message with negative priority")
-	
+
 	// Test with high priority
 	LogPAMMessage(100, "Test message with high priority")
 }
@@ -351,19 +351,19 @@ func TestAuthRequestSerialization(t *testing.T) {
 			"client_port": "56789",
 		},
 	}
-	
+
 	data, err := SerializeAuthRequest(req)
 	if err != nil {
 		t.Fatalf("Failed to serialize complex auth request: %v", err)
 	}
-	
+
 	// Verify it can be deserialized
 	var deserializedReq AuthRequest
 	err = json.Unmarshal(data, &deserializedReq)
 	if err != nil {
 		t.Fatalf("Failed to deserialize auth request: %v", err)
 	}
-	
+
 	// Verify all fields are preserved
 	if deserializedReq.Type != req.Type {
 		t.Errorf("Type mismatch: expected %s, got %s", req.Type, deserializedReq.Type)
@@ -419,20 +419,20 @@ func TestAuthResponseStructure(t *testing.T) {
 			SessionID:      "",
 		},
 	}
-	
+
 	for i, response := range responses {
 		// Test JSON serialization/deserialization
 		data, err := json.Marshal(response)
 		if err != nil {
 			t.Fatalf("Failed to serialize response %d: %v", i, err)
 		}
-		
+
 		var deserializedResponse AuthResponse
 		err = json.Unmarshal(data, &deserializedResponse)
 		if err != nil {
 			t.Fatalf("Failed to deserialize response %d: %v", i, err)
 		}
-		
+
 		// Verify fields match
 		if deserializedResponse.Success != response.Success {
 			t.Errorf("Response %d: Success mismatch", i)
@@ -460,35 +460,35 @@ func TestGetLoginTypeEdgeCases(t *testing.T) {
 		expected string
 	}{
 		// Service variations
-		{"SSHD", "pts/0", "unknown"},      // Case sensitivity
-		{"SSH", "pts/0", "unknown"},       // Different SSH variant
-		{"openssh", "pts/0", "unknown"},   // Different SSH variant
-		{"gdm3", "tty1", "console"},       // GDM variant (tty1 -> console)
-		{"sddm", "tty1", "gui"},           // SDDM (additional GUI)
-		
+		{"SSHD", "pts/0", "unknown"},    // Case sensitivity
+		{"SSH", "pts/0", "unknown"},     // Different SSH variant
+		{"openssh", "pts/0", "unknown"}, // Different SSH variant
+		{"gdm3", "tty1", "console"},     // GDM variant (tty1 -> console)
+		{"sddm", "tty1", "gui"},         // SDDM (additional GUI)
+
 		// TTY variations
-		{"login", "tty", "console"},       // Incomplete TTY but starts with tty
-		{"login", "tty1", "console"},      // Console TTY
-		{"login", "tty12", "console"},     // Multi-digit TTY
-		{"login", "ttys0", "console"},     // Serial TTY
-		{"login", "console", "unknown"},   // Console but not tty format
-		
+		{"login", "tty", "console"},     // Incomplete TTY but starts with tty
+		{"login", "tty1", "console"},    // Console TTY
+		{"login", "tty12", "console"},   // Multi-digit TTY
+		{"login", "ttys0", "console"},   // Serial TTY
+		{"login", "console", "unknown"}, // Console but not tty format
+
 		// Edge cases
-		{"", "", "unknown"},               // Empty inputs
+		{"", "", "unknown"}, // Empty inputs
 		{"unknown-service", "pts/0", "unknown"},
 		{"login", "unknown-tty", "unknown"},
-		{"service", "ty1", "unknown"},     // Malformed TTY
-		
+		{"service", "ty1", "unknown"}, // Malformed TTY
+
 		// Boundary conditions
-		{"a", "b", "unknown"},             // Single character inputs
+		{"a", "b", "unknown"},                          // Single character inputs
 		{strings.Repeat("a", 100), "pts/0", "unknown"}, // Long service name
 		{"login", strings.Repeat("t", 100), "unknown"}, // Long TTY name
 	}
-	
+
 	for _, tc := range testCases {
 		result := GetLoginType(tc.service, tc.tty)
 		if result != tc.expected {
-			t.Errorf("GetLoginType(%q, %q) = %q, expected %q", 
+			t.Errorf("GetLoginType(%q, %q) = %q, expected %q",
 				tc.service, tc.tty, result, tc.expected)
 		}
 	}
@@ -513,11 +513,11 @@ func TestIsSocketPathValidEdgeCases(t *testing.T) {
 		{"/tmp/" + strings.Repeat("a", 103), false, "108 chars (too long)"},
 		{strings.Repeat("/a", 54), false, "very long path (108 chars)"},
 	}
-	
+
 	for _, tc := range testCases {
 		result := IsSocketPathValid(tc.path)
 		if result != tc.expected {
-			t.Errorf("IsSocketPathValid(%q) = %v, expected %v (%s)", 
+			t.Errorf("IsSocketPathValid(%q) = %v, expected %v (%s)",
 				tc.path, result, tc.expected, tc.name)
 		}
 	}
@@ -526,18 +526,18 @@ func TestIsSocketPathValidEdgeCases(t *testing.T) {
 func TestBuildAuthRequestMetadata(t *testing.T) {
 	// Test that BuildAuthRequest properly includes metadata
 	req := BuildAuthRequest("user", "sshd", "host", "pts/0")
-	
+
 	if req.Metadata == nil {
 		t.Fatal("Expected metadata to be non-nil")
 	}
-	
+
 	expectedKeys := []string{"service", "tty", "pid"}
 	for _, key := range expectedKeys {
 		if _, exists := req.Metadata[key]; !exists {
 			t.Errorf("Expected metadata key %s to exist", key)
 		}
 	}
-	
+
 	// Verify specific metadata values
 	if req.Metadata["service"] != "sshd" {
 		t.Errorf("Expected service 'sshd', got %s", req.Metadata["service"])
@@ -545,7 +545,7 @@ func TestBuildAuthRequestMetadata(t *testing.T) {
 	if req.Metadata["tty"] != "pts/0" {
 		t.Errorf("Expected tty 'pts/0', got %s", req.Metadata["tty"])
 	}
-	
+
 	// PID should be a valid number
 	if req.Metadata["pid"] == "" || req.Metadata["pid"] == "0" {
 		t.Errorf("Expected valid PID, got %s", req.Metadata["pid"])
@@ -555,28 +555,28 @@ func TestBuildAuthRequestMetadata(t *testing.T) {
 // Test concurrent access to PAM module functions
 func TestPAMModuleConcurrency(t *testing.T) {
 	module := NewPAMModule("/tmp/test.sock", true)
-	
+
 	// Test concurrent access to debug setting
 	done := make(chan bool, 10)
-	
+
 	for i := 0; i < 10; i++ {
 		go func(i int) {
 			defer func() { done <- true }()
-			
+
 			// Toggle debug mode
 			module.SetDebug(i%2 == 0)
-			
+
 			// Check debug status
 			_ = module.IsDebugEnabled()
-			
+
 			// Get socket path
 			_ = module.GetSocketPath()
-			
+
 			// Log a message
 			module.LogMessage(1, "Concurrent test message")
 		}(i)
 	}
-	
+
 	// Wait for all goroutines to complete
 	for i := 0; i < 10; i++ {
 		<-done

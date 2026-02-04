@@ -27,36 +27,36 @@ type Broker struct {
 
 // Session represents an active authentication session
 type Session struct {
-	ID              string
-	UserID          string
-	Email           string
-	Groups          []string
-	Provider        string
-	DeviceID        string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	LastAccessed    time.Time
-	SourceIP        string
-	UserAgent       string
+	ID               string
+	UserID           string
+	Email            string
+	Groups           []string
+	Provider         string
+	DeviceID         string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	LastAccessed     time.Time
+	SourceIP         string
+	UserAgent        string
 	TokenFingerprint string
-	SSHKeyID        string
-	IsActive        bool
-	RiskScore       int
-	DeviceTrusted   bool
-	Metadata        map[string]interface{}
+	SSHKeyID         string
+	IsActive         bool
+	RiskScore        int
+	DeviceTrusted    bool
+	Metadata         map[string]interface{}
 }
 
 // AuthRequest represents an authentication request
 type AuthRequest struct {
-	UserID       string
-	SourceIP     string
-	UserAgent    string
-	TargetHost   string
-	LoginType    string // "ssh", "console", "gui"
-	DeviceID     string
-	SessionID    string
-	Timestamp    time.Time
-	Metadata     map[string]interface{}
+	UserID     string
+	SourceIP   string
+	UserAgent  string
+	TargetHost string
+	LoginType  string // "ssh", "console", "gui"
+	DeviceID   string
+	SessionID  string
+	Timestamp  time.Time
+	Metadata   map[string]interface{}
 }
 
 // AuthResponse represents the response to an authentication request
@@ -85,26 +85,26 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("configuration cannot be nil")
 	}
-	
+
 	// Validate server configuration
 	if cfg.Server.SocketPath == "" {
 		return nil, fmt.Errorf("socket path cannot be empty")
 	}
-	
+
 	// Validate OIDC configuration
 	if len(cfg.OIDC.Providers) == 0 {
 		return nil, fmt.Errorf("at least one OIDC provider must be configured")
 	}
-	
+
 	// Validate security configuration
 	if cfg.Security.TokenEncryptionKey == "" {
 		return nil, fmt.Errorf("token encryption key is required for security")
 	}
-	
+
 	if len(cfg.Security.TokenEncryptionKey) < 32 {
 		return nil, fmt.Errorf("token encryption key must be at least 32 bytes for security")
 	}
-	
+
 	// Validate OIDC provider security
 	for _, provider := range cfg.OIDC.Providers {
 		// Check for required openid scope
@@ -118,16 +118,16 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		if !hasOpenIDScope {
 			return nil, fmt.Errorf("provider '%s' must include 'openid' scope", provider.Name)
 		}
-		
+
 		// Check for HTTPS requirement (except localhost for testing)
-		if provider.Issuer != "" && !strings.HasPrefix(provider.Issuer, "https://") && 
-		   !strings.HasPrefix(provider.Issuer, "http://localhost") &&
-		   !strings.HasPrefix(provider.Issuer, "http://127.0.0.1") &&
-		   !strings.HasPrefix(provider.Issuer, "mock://") {
+		if provider.Issuer != "" && !strings.HasPrefix(provider.Issuer, "https://") &&
+			!strings.HasPrefix(provider.Issuer, "http://localhost") &&
+			!strings.HasPrefix(provider.Issuer, "http://127.0.0.1") &&
+			!strings.HasPrefix(provider.Issuer, "mock://") {
 			return nil, fmt.Errorf("provider '%s' issuer must use HTTPS for security", provider.Name)
 		}
 	}
-	
+
 	// Create token manager
 	tokenManager, err := NewTokenManager(cfg)
 	if err != nil {
@@ -326,7 +326,7 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		ExpiresAt:      deviceFlow.ExpiresAt,
 		RequiresDevice: true,
 		RiskScore:      policyResult.RiskScore,
-		Metadata:       map[string]interface{}{
+		Metadata: map[string]interface{}{
 			"provider":         provider.Name,
 			"polling_interval": deviceFlow.PollingInterval,
 		},

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/crypto/ssh"
 )
 
 // KeyManager handles SSH key lifecycle management
@@ -177,7 +177,7 @@ func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
 
 	// Parse metadata
 	metadata := parseMetadata(string(metadataBytes))
-	
+
 	createdAt, err := parseTimestamp(metadata["created_at"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse created_at: %w", err)
@@ -202,7 +202,7 @@ func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
 // DeleteKey removes an SSH key pair from disk
 func (km *KeyManager) DeleteKey(username string) error {
 	userDir := filepath.Join(km.baseDir, username)
-	
+
 	// Remove all key files
 	files := []string{"id_rsa", "id_rsa.pub", "key_metadata"}
 	for _, file := range files {
@@ -310,14 +310,14 @@ func (km *KeyManager) CleanupExpiredKeys() error {
 func parseMetadata(data string) map[string]string {
 	metadata := make(map[string]string)
 	lines := strings.Split(strings.TrimSpace(data), "\n")
-	
+
 	for _, line := range lines {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
 			metadata[parts[0]] = parts[1]
 		}
 	}
-	
+
 	return metadata
 }
 
@@ -326,11 +326,11 @@ func parseTimestamp(ts string) (time.Time, error) {
 	if ts == "" {
 		return time.Time{}, fmt.Errorf("empty timestamp")
 	}
-	
+
 	timestamp, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid timestamp: %w", err)
 	}
-	
+
 	return time.Unix(timestamp, 0), nil
 }

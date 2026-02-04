@@ -62,7 +62,7 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	// Add timestamp comment
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	comment := fmt.Sprintf("# Added by OIDC PAM on %s\n", timestamp)
-	
+
 	if _, err := file.WriteString(comment); err != nil {
 		return fmt.Errorf("failed to write comment to authorized_keys: %w", err)
 	}
@@ -97,10 +97,10 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	// Parse existing keys
 	lines := strings.Split(string(data), "\n")
 	keyToRemove := strings.TrimSpace(string(publicKey))
-	
+
 	var filteredLines []string
 	removed := false
-	
+
 	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 		if trimmedLine == keyToRemove {
@@ -150,10 +150,10 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 	var filteredLines []string
 	var removedCount int
 	scanner := bufio.NewScanner(file)
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Check if this is an OIDC PAM key
 		if strings.Contains(line, "@oidc-pam-") {
 			// Extract timestamp from comment
@@ -174,7 +174,7 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 				}
 			}
 		}
-		
+
 		filteredLines = append(filteredLines, line)
 	}
 
@@ -215,7 +215,7 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 
 	var oidcKeys []string
 	lines := strings.Split(string(data), "\n")
-	
+
 	for _, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 		if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
@@ -291,7 +291,7 @@ func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
 // ValidateKeyFormat validates that a public key is in the correct format
 func (akm *AuthorizedKeysManager) ValidateKeyFormat(publicKey []byte) error {
 	keyStr := strings.TrimSpace(string(publicKey))
-	
+
 	if keyStr == "" {
 		return fmt.Errorf("empty public key")
 	}
@@ -303,7 +303,7 @@ func (akm *AuthorizedKeysManager) ValidateKeyFormat(publicKey []byte) error {
 
 	keyType := parts[0]
 	validTypes := []string{"ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"}
-	
+
 	validType := false
 	for _, validKeyType := range validTypes {
 		if keyType == validKeyType {

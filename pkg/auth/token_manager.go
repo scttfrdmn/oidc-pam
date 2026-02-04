@@ -16,11 +16,11 @@ import (
 
 // TokenManager handles token lifecycle management
 type TokenManager struct {
-	config      *config.Config
-	tokenStore  *TokenStore
-	encryption  *security.Encryption
-	stopChan    chan struct{}
-	wg          sync.WaitGroup
+	config     *config.Config
+	tokenStore *TokenStore
+	encryption *security.Encryption
+	stopChan   chan struct{}
+	wg         sync.WaitGroup
 }
 
 // TokenStore represents a token storage backend
