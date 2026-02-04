@@ -212,7 +212,7 @@ func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error
 
 	// Handle error responses
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf(tokenResp.Error)
+		return nil, fmt.Errorf("token error: %s", tokenResp.Error)
 	}
 
 	// Check if we have a valid response
