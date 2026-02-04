@@ -3,8 +3,5 @@
 
 package main
 
-/*
- */
+// No additional platform-specific CGO flags needed for Linux
 import "C"
-
-// No additional platform-specific flags needed for Linux
