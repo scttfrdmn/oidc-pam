@@ -3,5 +3,6 @@
 
 package pam
 
-// No additional platform-specific flags needed for Linux
 import "C"
+
+// No additional platform-specific flags needed for Linux
