@@ -47,11 +47,7 @@ func TestDeviceFlowMethods(t *testing.T) {
 
 	// Skip device flow tests due to network dependencies
 	// These tests would require proper OIDC provider setup with network access
-	if provider != nil {
-		t.Log("Provider created successfully, but skipping network-dependent tests")
-	} else {
-		t.Log("Provider creation failed (expected without network access)")
-	}
+	t.Log("Provider created successfully, but skipping network-dependent tests")
 
 	// Test that we can create AuthRequest struct
 	authRequest := &AuthRequest{
@@ -84,13 +80,12 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 		},
 	}
 
-	// Test helper methods only if provider is not nil
-	if provider != nil {
-		// Test generateTokenFingerprint (should work without network)
-		fingerprint := provider.generateTokenFingerprint("test-token")
-		if fingerprint == "" {
-			t.Error("Expected non-empty token fingerprint")
-		}
+	// Test helper methods
+	// Test generateTokenFingerprint (should work without network)
+	fingerprint := provider.generateTokenFingerprint("test-token")
+	if fingerprint == "" {
+		t.Error("Expected non-empty token fingerprint")
+	}
 
 		// Test multiple fingerprint generation for consistency
 		fingerprint2 := provider.generateTokenFingerprint("test-token")
@@ -104,11 +99,8 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 			t.Error("Different tokens should produce different fingerprints")
 		}
 
-		// Skip network-dependent endpoint test
-		t.Log("Skipping device authorization endpoint test (requires network)")
-	} else {
-		t.Log("Provider is nil, skipping helper methods test")
-	}
+	// Skip network-dependent endpoint test
+	t.Log("Skipping device authorization endpoint test (requires network)")
 }
 
 func TestUserInfoExtraction(t *testing.T) {
@@ -131,12 +123,11 @@ func TestUserInfoExtraction(t *testing.T) {
 		},
 	}
 
-	// Test extractUserInfoFromClaims with sample claims only if provider is not nil
-	if provider != nil {
-		claims := map[string]interface{}{
-			"email":  "test@example.com",
-			"name":   "Test User",
-			"groups": []interface{}{"users", "admin"},
+	// Test extractUserInfoFromClaims with sample claims
+	claims := map[string]interface{}{
+		"email":  "test@example.com",
+		"name":   "Test User",
+		"groups": []interface{}{"users", "admin"},
 			"sub":    "user-123",
 		}
 
@@ -155,11 +146,8 @@ func TestUserInfoExtraction(t *testing.T) {
 		if userInfo.Name != "Test User" {
 			t.Errorf("Expected name 'Test User', got '%s'", userInfo.Name)
 		}
-		if len(userInfo.Groups) != 2 {
-			t.Errorf("Expected 2 groups, got %d", len(userInfo.Groups))
-		}
-	} else {
-		t.Log("Provider is nil, skipping user info extraction test")
+	if len(userInfo.Groups) != 2 {
+		t.Errorf("Expected 2 groups, got %d", len(userInfo.Groups))
 	}
 }
 

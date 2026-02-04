@@ -123,7 +123,7 @@ func TestServerConnectionWithMalformedJSON(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	defer server.Stop()
+	defer func() { _ = server.Stop() }()
 
 	// Test connection with malformed JSON
 	conn, err := net.Dial("unix", socketPath)
@@ -181,7 +181,7 @@ func TestServerConnectionWithEmptyData(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	defer server.Stop()
+	defer func() { _ = server.Stop() }()
 
 	// Test connection with empty data
 	conn, err := net.Dial("unix", socketPath)
@@ -319,7 +319,7 @@ func TestServerConcurrentConnections(t *testing.T) {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	defer server.Stop()
+	defer func() { _ = server.Stop() }()
 
 	// Test multiple concurrent connections
 	const numConnections = 5
