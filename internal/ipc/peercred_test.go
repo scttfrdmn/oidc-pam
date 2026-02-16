@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -48,14 +49,22 @@ func TestGetPeerCredentials(t *testing.T) {
 
 		uid, gid, err := getPeerCredentials(serverConn)
 		if err != nil {
-			// On non-Linux platforms, the stub returns 0, 0, nil
-			// so this path is only hit if something unexpected happens
 			t.Fatalf("getPeerCredentials failed: %v", err)
 		}
 
-		// On Linux, uid/gid should match the current process
-		// On non-Linux (stub), uid=0 and gid=0
 		t.Logf("Peer credentials: uid=%d, gid=%d", uid, gid)
+
+		// On Linux and macOS, uid/gid should match the current process
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			expectedUID := uint32(os.Getuid())
+			expectedGID := uint32(os.Getgid())
+			if uid != expectedUID {
+				t.Errorf("Expected UID %d, got %d", expectedUID, uid)
+			}
+			if gid != expectedGID {
+				t.Errorf("Expected GID %d, got %d", expectedGID, gid)
+			}
+		}
 
 	case err := <-errCh:
 		t.Fatalf("Accept failed: %v", err)
@@ -92,12 +101,18 @@ func TestGetPeerCredentialsNonUnixConn(t *testing.T) {
 		defer serverConn.Close()
 
 		_, _, err := getPeerCredentials(serverConn)
-		// On Linux, this should fail because it's not a Unix socket
-		// On non-Linux (stub), this returns 0, 0, nil regardless
-		if err != nil {
-			t.Logf("Expected error for TCP connection: %v", err)
+		// On Linux and macOS, this should fail because it's not a Unix socket
+		// On other platforms (stub), this returns 0, 0, nil regardless
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+			if err == nil {
+				t.Error("Expected error for TCP connection on supported platform")
+			} else {
+				t.Logf("Got expected error for TCP connection: %v", err)
+			}
 		} else {
-			t.Log("Stub implementation returned no error for non-Unix connection (expected on non-Linux)")
+			if err != nil {
+				t.Errorf("Stub should not return error: %v", err)
+			}
 		}
 
 	case err := <-errCh:
