@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,12 +18,14 @@ import (
 
 // Server handles IPC communication with PAM modules
 type Server struct {
-	socketPath string
-	broker     *auth.Broker
-	listener   net.Listener
-	stopChan   chan struct{}
-	wg         sync.WaitGroup
-	stopOnce   sync.Once
+	socketPath  string
+	socketMode  os.FileMode
+	socketGroup string
+	broker      *auth.Broker
+	listener    net.Listener
+	stopChan    chan struct{}
+	wg          sync.WaitGroup
+	stopOnce    sync.Once
 }
 
 // Request represents a request from PAM module
@@ -59,11 +63,13 @@ type Response struct {
 }
 
 // NewServer creates a new IPC server
-func NewServer(socketPath string, broker *auth.Broker) (*Server, error) {
+func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string) (*Server, error) {
 	return &Server{
-		socketPath: socketPath,
-		broker:     broker,
-		stopChan:   make(chan struct{}),
+		socketPath:  socketPath,
+		socketMode:  socketMode,
+		socketGroup: socketGroup,
+		broker:      broker,
+		stopChan:    make(chan struct{}),
 	}, nil
 }
 
@@ -76,7 +82,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Create socket directory if it doesn't exist
 	socketDir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(socketDir, 0755); err != nil {
+	if err := os.MkdirAll(socketDir, 0750); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
@@ -89,11 +95,26 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = listener
 
 	// Set socket permissions
-	if err := os.Chmod(s.socketPath, 0666); err != nil {
+	if err := os.Chmod(s.socketPath, s.socketMode); err != nil {
 		log.Warn().
 			Err(err).
 			Str("socket_path", s.socketPath).
 			Msg("Failed to set socket permissions")
+	}
+
+	// Set socket group ownership if configured
+	if s.socketGroup != "" {
+		grp, err := user.LookupGroup(s.socketGroup)
+		if err != nil {
+			return fmt.Errorf("failed to look up socket group %q: %w", s.socketGroup, err)
+		}
+		gid, err := strconv.Atoi(grp.Gid)
+		if err != nil {
+			return fmt.Errorf("failed to parse group ID for %q: %w", s.socketGroup, err)
+		}
+		if err := os.Chown(s.socketPath, -1, gid); err != nil {
+			return fmt.Errorf("failed to set socket group ownership: %w", err)
+		}
 	}
 
 	log.Info().

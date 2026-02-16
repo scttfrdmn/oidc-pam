@@ -21,6 +21,8 @@ type Config struct {
 // ServerConfig contains server-specific configuration
 type ServerConfig struct {
 	SocketPath   string        `mapstructure:"socket_path"`
+	SocketMode   os.FileMode   `mapstructure:"socket_mode"`
+	SocketGroup  string        `mapstructure:"socket_group"`
 	LogLevel     string        `mapstructure:"log_level"`
 	AuditLog     string        `mapstructure:"audit_log"`
 	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
@@ -328,6 +330,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.socket_path", "/var/run/oidc-auth/broker.sock")
 	v.SetDefault("server.log_level", "info")
 	v.SetDefault("server.audit_log", "/var/log/oidc-auth/audit.log")
+	v.SetDefault("server.socket_mode", 0660)
+	v.SetDefault("server.socket_group", "")
 	v.SetDefault("server.read_timeout", "30s")
 	v.SetDefault("server.write_timeout", "30s")
 
