@@ -99,7 +99,6 @@ jobs:
         with:
           fail-on-severity: moderate
           deny-licenses: GPL-2.0, GPL-3.0
-        continue-on-error: true  # Requires Dependency Graph enabled in repo settings
 
   govulncheck:
     name: Go Vulnerability Check
