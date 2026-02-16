@@ -20,13 +20,14 @@ type Config struct {
 
 // ServerConfig contains server-specific configuration
 type ServerConfig struct {
-	SocketPath   string        `mapstructure:"socket_path"`
-	SocketMode   os.FileMode   `mapstructure:"socket_mode"`
-	SocketGroup  string        `mapstructure:"socket_group"`
-	LogLevel     string        `mapstructure:"log_level"`
-	AuditLog     string        `mapstructure:"audit_log"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	SocketPath      string        `mapstructure:"socket_path"`
+	SocketMode      os.FileMode   `mapstructure:"socket_mode"`
+	SocketGroup     string        `mapstructure:"socket_group"`
+	RequirePeerAuth bool          `mapstructure:"require_peer_auth"`
+	LogLevel        string        `mapstructure:"log_level"`
+	AuditLog        string        `mapstructure:"audit_log"`
+	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
 }
 
 // OIDCConfig contains OIDC provider configuration
@@ -332,6 +333,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.audit_log", "/var/log/oidc-auth/audit.log")
 	v.SetDefault("server.socket_mode", 0660)
 	v.SetDefault("server.socket_group", "")
+	v.SetDefault("server.require_peer_auth", true)
 	v.SetDefault("server.read_timeout", "30s")
 	v.SetDefault("server.write_timeout", "30s")
 

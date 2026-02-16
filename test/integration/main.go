@@ -137,7 +137,7 @@ func (s *IntegrationTestSuite) TestIPCServerSetup() error {
 	}
 
 	// Create IPC server
-	ipcServer, err := ipc.NewServer(s.config.Server.SocketPath, s.broker, s.config.Server.SocketMode, s.config.Server.SocketGroup)
+	ipcServer, err := ipc.NewServer(s.config.Server.SocketPath, s.broker, s.config.Server.SocketMode, s.config.Server.SocketGroup, s.config.Server.RequirePeerAuth)
 	if err != nil {
 		return fmt.Errorf("failed to create IPC server: %w", err)
 	}

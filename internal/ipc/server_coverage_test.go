@@ -24,7 +24,7 @@ func TestServerHandleRequestTypes(t *testing.T) {
 	socketPath := filepath.Join(tempDir, "test.sock")
 
 	// Create a broker (will be nil, but that's expected for these tests)
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestServerFormatInstructionsExtended(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestServerConnectionWithMalformedJSON(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestServerConnectionWithEmptyData(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestServerStartStopEdgeCases(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestServerWithValidRequestStructure(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestServerConcurrentConnections(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, nil, 0660, "")
+	server, err := NewServer(socketPath, nil, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestServerWithRealBrokerConfig(t *testing.T) {
 	}
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-	server, err := NewServer(socketPath, broker, 0660, "")
+	server, err := NewServer(socketPath, broker, 0660, "", false)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}

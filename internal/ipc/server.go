@@ -18,14 +18,15 @@ import (
 
 // Server handles IPC communication with PAM modules
 type Server struct {
-	socketPath  string
-	socketMode  os.FileMode
-	socketGroup string
-	broker      *auth.Broker
-	listener    net.Listener
-	stopChan    chan struct{}
-	wg          sync.WaitGroup
-	stopOnce    sync.Once
+	socketPath      string
+	socketMode      os.FileMode
+	socketGroup     string
+	requirePeerAuth bool
+	broker          *auth.Broker
+	listener        net.Listener
+	stopChan        chan struct{}
+	wg              sync.WaitGroup
+	stopOnce        sync.Once
 }
 
 // Request represents a request from PAM module
@@ -63,13 +64,14 @@ type Response struct {
 }
 
 // NewServer creates a new IPC server
-func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string) (*Server, error) {
+func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string, requirePeerAuth bool) (*Server, error) {
 	return &Server{
-		socketPath:  socketPath,
-		socketMode:  socketMode,
-		socketGroup: socketGroup,
-		broker:      broker,
-		stopChan:    make(chan struct{}),
+		socketPath:      socketPath,
+		socketMode:      socketMode,
+		socketGroup:     socketGroup,
+		requirePeerAuth: requirePeerAuth,
+		broker:          broker,
+		stopChan:        make(chan struct{}),
 	}, nil
 }
 
@@ -207,6 +209,30 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Set connection timeout
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// Verify peer credentials if required
+	if s.requirePeerAuth {
+		uid, gid, err := getPeerCredentials(conn)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Msg("Failed to get peer credentials, rejecting connection")
+			s.sendErrorResponse(conn, "PEER_AUTH_FAILED", "Failed to verify peer credentials")
+			return
+		}
+		if uid != 0 {
+			log.Warn().
+				Uint32("uid", uid).
+				Uint32("gid", gid).
+				Msg("Connection from non-root process rejected")
+			s.sendErrorResponse(conn, "PEER_AUTH_DENIED", "Only root processes are allowed to connect")
+			return
+		}
+		log.Debug().
+			Uint32("uid", uid).
+			Uint32("gid", gid).
+			Msg("Peer credentials verified")
+	}
 
 	log.Debug().
 		Str("remote_addr", conn.RemoteAddr().String()).
