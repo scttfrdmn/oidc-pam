@@ -42,8 +42,8 @@ func TestServerHandleRequestTypes(t *testing.T) {
 	if response.ErrorCode != "INVALID_REQUEST_TYPE" {
 		t.Errorf("Expected INVALID_REQUEST_TYPE, got %s", response.ErrorCode)
 	}
-	if !strings.Contains(response.ErrorMessage, "Unknown request type") {
-		t.Errorf("Expected error message to contain 'Unknown request type', got %s", response.ErrorMessage)
+	if response.ErrorMessage != "Invalid request type" {
+		t.Errorf("Expected generic error message 'Invalid request type', got %s", response.ErrorMessage)
 	}
 }
 

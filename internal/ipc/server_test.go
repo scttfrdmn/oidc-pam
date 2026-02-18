@@ -320,6 +320,41 @@ func TestServerHandleRequest(t *testing.T) {
 	}
 }
 
+func TestServerHandleRequestUnknownTypeDoesNotEcho(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ipc-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	socketPath := filepath.Join(tempDir, "test.sock")
+	broker := createTestBroker(t)
+	server, err := NewServer(socketPath, broker, 0660, "", false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Test that unknown request type is not echoed back in the response
+	request := &Request{
+		Type:   "secret_internal_type",
+		UserID: "test-user",
+	}
+
+	response := server.handleRequest(request)
+	if response.Success {
+		t.Error("Expected failure for unknown request type")
+	}
+	if response.ErrorCode != "INVALID_REQUEST_TYPE" {
+		t.Errorf("Expected error code INVALID_REQUEST_TYPE, got %s", response.ErrorCode)
+	}
+	if strings.Contains(response.ErrorMessage, "secret_internal_type") {
+		t.Errorf("Response should not echo back the unknown request type, got: %s", response.ErrorMessage)
+	}
+	if response.ErrorMessage != "Invalid request type" {
+		t.Errorf("Expected generic error message 'Invalid request type', got: %s", response.ErrorMessage)
+	}
+}
+
 func TestServerHandleAuthenticate(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
@@ -498,8 +533,15 @@ func TestServerRejectsPathTraversal(t *testing.T) {
 	if !strings.Contains(response, "INVALID_REQUEST") {
 		t.Errorf("Expected INVALID_REQUEST error code in response, got: %s", response)
 	}
-	if !strings.Contains(response, "invalid characters") {
-		t.Errorf("Expected 'invalid characters' in error message, got: %s", response)
+	// Verify generic message is returned, not internal validation details
+	if !strings.Contains(response, "Invalid request") {
+		t.Errorf("Expected generic 'Invalid request' message, got: %s", response)
+	}
+	if strings.Contains(response, "invalid characters") {
+		t.Errorf("Response should not contain internal validation details, got: %s", response)
+	}
+	if strings.Contains(response, "../../root") {
+		t.Errorf("Response should not echo back the malicious input, got: %s", response)
 	}
 }
 

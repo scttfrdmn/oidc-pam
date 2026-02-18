@@ -257,7 +257,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			Err(err).
 			Str("request_type", request.Type).
 			Msg("Invalid IPC request")
-		s.sendErrorResponse(conn, "INVALID_REQUEST", err.Error())
+		s.sendErrorResponse(conn, "INVALID_REQUEST", clientErrorMessage("INVALID_REQUEST"))
 		return
 	}
 
@@ -292,10 +292,13 @@ func (s *Server) handleRequest(request *Request) *Response {
 	case "revoke_session":
 		return s.handleRevokeSession(request)
 	default:
+		log.Warn().
+			Str("request_type", request.Type).
+			Msg("Unknown request type")
 		return &Response{
 			Success:      false,
 			ErrorCode:    "INVALID_REQUEST_TYPE",
-			ErrorMessage: fmt.Sprintf("Unknown request type: %s", request.Type),
+			ErrorMessage: clientErrorMessage("INVALID_REQUEST_TYPE"),
 		}
 	}
 }
@@ -326,7 +329,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 		return &Response{
 			Success:      false,
 			ErrorCode:    "AUTHENTICATION_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: clientErrorMessage("AUTHENTICATION_FAILED"),
 		}
 	}
 
@@ -370,7 +373,7 @@ func (s *Server) handleCheckSession(request *Request) *Response {
 		return &Response{
 			Success:      false,
 			ErrorCode:    "SESSION_CHECK_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: clientErrorMessage("SESSION_CHECK_FAILED"),
 		}
 	}
 
@@ -403,7 +406,7 @@ func (s *Server) handleRefreshSession(request *Request) *Response {
 		return &Response{
 			Success:      false,
 			ErrorCode:    "SESSION_REFRESH_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: clientErrorMessage("SESSION_REFRESH_FAILED"),
 		}
 	}
 
@@ -434,7 +437,7 @@ func (s *Server) handleRevokeSession(request *Request) *Response {
 		return &Response{
 			Success:      false,
 			ErrorCode:    "SESSION_REVOCATION_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: clientErrorMessage("SESSION_REVOCATION_FAILED"),
 		}
 	}
 

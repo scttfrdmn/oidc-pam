@@ -250,10 +250,15 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 			Timestamp:    time.Now(),
 		})
 
+		log.Warn().
+			Str("user_id", req.UserID).
+			Str("reason", policyResult.Reason).
+			Msg("Authentication denied by policy")
+
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "POLICY_DENIED",
-			ErrorMessage: policyResult.Reason,
+			ErrorMessage: "Access denied by policy",
 		}, nil
 	}
 
@@ -283,7 +288,7 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "DEVICE_FLOW_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: "Device authorization flow failed",
 		}, nil
 	}
 
@@ -409,7 +414,7 @@ func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "REFRESH_FAILED",
-			ErrorMessage: err.Error(),
+			ErrorMessage: "Token refresh failed",
 		}, nil
 	}
 
