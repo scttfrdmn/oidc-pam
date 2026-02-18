@@ -14,6 +14,7 @@ func TestTokenManagerCreation(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -33,6 +34,7 @@ func TestTokenManagerStartStop(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -63,6 +65,7 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -116,6 +119,7 @@ func TestTokenManagerRevocation(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -149,6 +153,7 @@ func TestTokenManagerRefresh(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -173,6 +178,7 @@ func TestTokenManagerInternalMethods(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -213,6 +219,7 @@ func TestTokenManagerCleanup(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -245,6 +252,7 @@ func TestTokenManagerConcurrency(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -289,6 +297,7 @@ func TestValidateTokenConcurrent(t *testing.T) {
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
 			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 		},
 	}
@@ -334,4 +343,64 @@ func TestValidateTokenConcurrent(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestTokenManagerAlwaysEncrypts(t *testing.T) {
+	// Verify that tokens are always stored encrypted, regardless of
+	// SecureTokenStorage setting (encryption is now mandatory).
+
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	}
+
+	tm, err := NewTokenManager(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create token manager: %v", err)
+	}
+
+	testToken := &Token{
+		AccessToken:  "plaintext-access-token",
+		RefreshToken: "plaintext-refresh-token",
+		IDToken:      "plaintext-id-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		Fingerprint:  "always-encrypt-fp",
+		Claims:       make(map[string]interface{}),
+	}
+
+	if err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
+		t.Fatalf("StoreToken failed: %v", err)
+	}
+
+	// Inspect the stored token directly — it must be encrypted.
+	tm.tokenStore.mutex.RLock()
+	defer tm.tokenStore.mutex.RUnlock()
+
+	var stored *StoredToken
+	for _, st := range tm.tokenStore.tokens {
+		if st.Fingerprint == "always-encrypt-fp" {
+			stored = st
+			break
+		}
+	}
+
+	if stored == nil {
+		t.Fatal("Stored token not found")
+	}
+
+	if !stored.Encrypted {
+		t.Error("Expected token to be marked as encrypted")
+	}
+	if stored.AccessToken == "plaintext-access-token" {
+		t.Error("Access token stored in plaintext; expected encrypted value")
+	}
+	if stored.RefreshToken == "plaintext-refresh-token" {
+		t.Error("Refresh token stored in plaintext; expected encrypted value")
+	}
+	if stored.IDToken == "plaintext-id-token" {
+		t.Error("ID token stored in plaintext; expected encrypted value")
+	}
 }
