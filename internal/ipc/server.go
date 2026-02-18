@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/user"
@@ -238,14 +239,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Str("remote_addr", conn.RemoteAddr().String()).
 		Msg("New IPC connection")
 
-	// Read request
-	decoder := json.NewDecoder(conn)
+	// Read request with size limit to prevent memory exhaustion
+	limitedReader := io.LimitReader(conn, maxRequestSize)
+	decoder := json.NewDecoder(limitedReader)
 	var request Request
 	if err := decoder.Decode(&request); err != nil {
 		log.Error().
 			Err(err).
 			Msg("Failed to decode IPC request")
 		s.sendErrorResponse(conn, "INVALID_REQUEST", "Failed to decode request")
+		return
+	}
+
+	// Validate request fields
+	if err := validateRequest(&request); err != nil {
+		log.Warn().
+			Err(err).
+			Str("request_type", request.Type).
+			Msg("Invalid IPC request")
+		s.sendErrorResponse(conn, "INVALID_REQUEST", err.Error())
 		return
 	}
 

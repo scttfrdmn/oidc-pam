@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -444,6 +445,62 @@ func TestServerHandleRevokeSession(t *testing.T) {
 	}()
 
 	_ = server.handleRevokeSession(revokeRequest)
+}
+
+func TestServerRejectsPathTraversal(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ipc-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	socketPath := filepath.Join(tempDir, "test.sock")
+	broker := createTestBroker(t)
+	server, err := NewServer(socketPath, broker, 0660, "", false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Start server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	defer func() { _ = server.Stop() }()
+
+	// Connect and send a request with path traversal in UserID
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send a path traversal authenticate request
+	reqJSON := `{"type":"authenticate","user_id":"../../root"}` + "\n"
+	if _, err := conn.Write([]byte(reqJSON)); err != nil {
+		t.Fatalf("Failed to write request: %v", err)
+	}
+
+	// Read response
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Failed to read response: %v", err)
+	}
+
+	response := string(buf[:n])
+	if !strings.Contains(response, "INVALID_REQUEST") {
+		t.Errorf("Expected INVALID_REQUEST error code in response, got: %s", response)
+	}
+	if !strings.Contains(response, "invalid characters") {
+		t.Errorf("Expected 'invalid characters' in error message, got: %s", response)
+	}
 }
 
 func TestServerFormatInstructions(t *testing.T) {
