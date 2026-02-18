@@ -294,6 +294,10 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	if err := resolveSecretReferences(&config); err != nil {
+		return nil, fmt.Errorf("failed to resolve secret references: %w", err)
+	}
+
 	if err := validateSecurityConfig(&config); err != nil {
 		return nil, err
 	}
@@ -308,6 +312,10 @@ func loadFromEnvironment(v *viper.Viper) (*Config, error) {
 	// Load from environment variables
 	if err := v.Unmarshal(&config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config from environment: %w", err)
+	}
+
+	if err := resolveSecretReferences(&config); err != nil {
+		return nil, fmt.Errorf("failed to resolve secret references: %w", err)
 	}
 
 	// Check for required environment variables
@@ -536,4 +544,56 @@ func validateSecurityConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// resolveSecretReferences resolves secret values that use reference prefixes:
+//   - "env:VAR_NAME" reads the value from the named environment variable
+//   - "file:/path/to/secret" reads the value from a file (whitespace-trimmed)
+//   - Plain values are passed through unchanged
+func resolveSecretReferences(cfg *Config) error {
+	// Resolve provider client secrets
+	for i := range cfg.OIDC.Providers {
+		resolved, err := resolveSecretValue(cfg.OIDC.Providers[i].ClientSecret)
+		if err != nil {
+			return fmt.Errorf("provider %q client_secret: %w", cfg.OIDC.Providers[i].Name, err)
+		}
+		cfg.OIDC.Providers[i].ClientSecret = resolved
+	}
+
+	// Resolve token encryption key
+	resolved, err := resolveSecretValue(cfg.Security.TokenEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("security.token_encryption_key: %w", err)
+	}
+	cfg.Security.TokenEncryptionKey = resolved
+
+	return nil
+}
+
+// resolveSecretValue resolves a single secret value. It returns the value
+// unchanged if it does not carry a recognized prefix.
+func resolveSecretValue(value string) (string, error) {
+	if value == "" {
+		return value, nil
+	}
+
+	if strings.HasPrefix(value, "env:") {
+		envVar := strings.TrimPrefix(value, "env:")
+		envVal := os.Getenv(envVar)
+		if envVal == "" {
+			return "", fmt.Errorf("environment variable %q is not set or empty", envVar)
+		}
+		return envVal, nil
+	}
+
+	if strings.HasPrefix(value, "file:") {
+		filePath := strings.TrimPrefix(value, "file:")
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read secret file %q: %w", filePath, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	return value, nil
 }

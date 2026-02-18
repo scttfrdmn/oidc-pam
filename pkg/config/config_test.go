@@ -632,6 +632,152 @@ authentication:
 	})
 }
 
+func TestResolveSecretReferences(t *testing.T) {
+	// Test env: prefix
+	t.Run("env prefix", func(t *testing.T) {
+		t.Setenv("TEST_SECRET_VALUE", "resolved-secret")
+
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: "env:TEST_SECRET_VALUE"},
+				},
+			},
+			Security: SecurityConfig{
+				TokenEncryptionKey: "env:TEST_SECRET_VALUE",
+			},
+		}
+
+		if err := resolveSecretReferences(cfg); err != nil {
+			t.Fatalf("resolveSecretReferences failed: %v", err)
+		}
+
+		if cfg.OIDC.Providers[0].ClientSecret != "resolved-secret" {
+			t.Errorf("Expected client_secret 'resolved-secret', got %q", cfg.OIDC.Providers[0].ClientSecret)
+		}
+		if cfg.Security.TokenEncryptionKey != "resolved-secret" {
+			t.Errorf("Expected token_encryption_key 'resolved-secret', got %q", cfg.Security.TokenEncryptionKey)
+		}
+	})
+
+	// Test file: prefix
+	t.Run("file prefix", func(t *testing.T) {
+		tempDir, err := os.MkdirTemp("", "secret-test-*")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		defer func() { _ = os.RemoveAll(tempDir) }()
+
+		secretPath := filepath.Join(tempDir, "secret.txt")
+		if err := os.WriteFile(secretPath, []byte("  file-secret-value\n"), 0600); err != nil {
+			t.Fatalf("Failed to write secret file: %v", err)
+		}
+
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: "file:" + secretPath},
+				},
+			},
+			Security: SecurityConfig{
+				TokenEncryptionKey: "plain-key-value",
+			},
+		}
+
+		if err := resolveSecretReferences(cfg); err != nil {
+			t.Fatalf("resolveSecretReferences failed: %v", err)
+		}
+
+		if cfg.OIDC.Providers[0].ClientSecret != "file-secret-value" {
+			t.Errorf("Expected trimmed file secret 'file-secret-value', got %q", cfg.OIDC.Providers[0].ClientSecret)
+		}
+	})
+
+	// Test plain values pass through
+	t.Run("plain values", func(t *testing.T) {
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: "plain-secret"},
+				},
+			},
+			Security: SecurityConfig{
+				TokenEncryptionKey: "plain-key",
+			},
+		}
+
+		if err := resolveSecretReferences(cfg); err != nil {
+			t.Fatalf("resolveSecretReferences failed: %v", err)
+		}
+
+		if cfg.OIDC.Providers[0].ClientSecret != "plain-secret" {
+			t.Errorf("Expected plain-secret, got %q", cfg.OIDC.Providers[0].ClientSecret)
+		}
+		if cfg.Security.TokenEncryptionKey != "plain-key" {
+			t.Errorf("Expected plain-key, got %q", cfg.Security.TokenEncryptionKey)
+		}
+	})
+
+	// Test empty values pass through
+	t.Run("empty values", func(t *testing.T) {
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: ""},
+				},
+			},
+			Security: SecurityConfig{
+				TokenEncryptionKey: "",
+			},
+		}
+
+		if err := resolveSecretReferences(cfg); err != nil {
+			t.Fatalf("resolveSecretReferences failed: %v", err)
+		}
+	})
+}
+
+func TestResolveSecretReferenceErrors(t *testing.T) {
+	// Test missing env var
+	t.Run("missing env var", func(t *testing.T) {
+		t.Setenv("NONEXISTENT_SECRET", "")
+		_ = os.Unsetenv("NONEXISTENT_SECRET")
+
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: "env:NONEXISTENT_SECRET"},
+				},
+			},
+		}
+
+		err := resolveSecretReferences(cfg)
+		if err == nil {
+			t.Error("Expected error for missing env var")
+		} else if !strings.Contains(err.Error(), "not set or empty") {
+			t.Errorf("Expected 'not set or empty' in error, got: %v", err)
+		}
+	})
+
+	// Test missing file
+	t.Run("missing file", func(t *testing.T) {
+		cfg := &Config{
+			OIDC: OIDCConfig{
+				Providers: []OIDCProvider{
+					{Name: "test", ClientSecret: "file:/nonexistent/path/secret.txt"},
+				},
+			},
+		}
+
+		err := resolveSecretReferences(cfg)
+		if err == nil {
+			t.Error("Expected error for missing file")
+		} else if !strings.Contains(err.Error(), "failed to read secret file") {
+			t.Errorf("Expected 'failed to read secret file' in error, got: %v", err)
+		}
+	})
+}
+
 func TestDevelopmentModeDetection(t *testing.T) {
 	tests := []struct {
 		name     string

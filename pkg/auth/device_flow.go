@@ -144,9 +144,9 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	data.Set("client_id", p.Config.ClientID)
 	data.Set("scope", strings.Join(p.Config.Scopes, " "))
 
-	// Include client secret if provided (for confidential clients)
+	// RFC 8628: Device flow is designed for public clients; do not send client_secret
 	if p.Config.ClientSecret != "" {
-		data.Set("client_secret", p.Config.ClientSecret)
+		log.Warn().Str("provider", p.Name).Msg("Client secret configured but not sent for device flow (RFC 8628: device flow uses public clients)")
 	}
 
 	// Make request to device authorization endpoint

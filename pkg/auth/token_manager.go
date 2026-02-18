@@ -46,14 +46,10 @@ type StoredToken struct {
 
 // NewTokenManager creates a new token manager
 func NewTokenManager(cfg *config.Config) (*TokenManager, error) {
-	// Initialize encryption if enabled
-	var encryption *security.Encryption
-	if cfg.Security.SecureTokenStorage {
-		enc, err := security.NewEncryption(cfg.Security.TokenEncryptionKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize token encryption: %w", err)
-		}
-		encryption = enc
+	// Initialize encryption (always required)
+	encryption, err := security.NewEncryption(cfg.Security.TokenEncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize token encryption: %w", err)
 	}
 
 	// Initialize token store

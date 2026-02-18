@@ -1,6 +1,10 @@
 package auth
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -414,3 +418,57 @@ func TestGetDeviceAuthorizationEndpointMethod(t *testing.T) {
 		t.Logf("Device authorization endpoint: %s", endpoint)
 	}
 }
+
+func TestDeviceFlowNoClientSecret(t *testing.T) {
+	// Verify that client_secret is NOT sent in device flow requests (RFC 8628).
+
+	var receivedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+
+		resp := DeviceAuthResponse{
+			DeviceCode:      "test-device-code",
+			UserCode:        "TEST-CODE",
+			VerificationURI: "https://example.com/verify",
+			ExpiresIn:       600,
+			Interval:        5,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := &OIDCProvider{
+		Name: "test-provider",
+		Config: config.OIDCProvider{
+			Name:           "test-provider",
+			Issuer:         server.URL,
+			ClientID:       "test-client",
+			ClientSecret:   "super-secret-value",
+			Scopes:         []string{"openid", "profile"},
+			DeviceEndpoint: server.URL + "/device",
+		},
+		httpClient: server.Client(),
+	}
+
+	_, err := provider.StartDeviceFlow(&AuthRequest{
+		UserID:    "test-user",
+		LoginType: "ssh",
+	})
+	if err != nil {
+		t.Fatalf("StartDeviceFlow failed: %v", err)
+	}
+
+	// The body must contain client_id but NOT client_secret
+	if receivedBody == "" {
+		t.Fatal("Expected non-empty request body")
+	}
+	if contains(receivedBody, "client_secret") {
+		t.Error("Request body must NOT contain client_secret (RFC 8628: device flow uses public clients)")
+	}
+	if !contains(receivedBody, "client_id=test-client") {
+		t.Error("Request body must contain client_id")
+	}
+}
+
