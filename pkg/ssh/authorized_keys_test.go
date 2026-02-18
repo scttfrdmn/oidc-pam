@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -516,6 +517,52 @@ ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... user@oidc-pam-%d
 	// Expired OIDC key should be removed
 	if strings.Contains(updatedContent, fmt.Sprintf("user@oidc-pam-%d", expiredTimestamp)) {
 		t.Error("Expired OIDC key should have been removed")
+	}
+}
+
+func TestAddPublicKeyConcurrent(t *testing.T) {
+	// Regression test: without file locking, concurrent AddPublicKey calls
+	// can produce duplicate keys. Run with -race to verify.
+	tmpDir, err := os.MkdirTemp("", "test-auth-keys-concurrent")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	akm := NewAuthorizedKeysManager(tmpDir)
+	username := "testuser"
+
+	const goroutines = 20
+	key := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest concurrent@test")
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if err := akm.AddPublicKey(username, key); err != nil {
+				t.Errorf("AddPublicKey failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Verify: the key should appear exactly once
+	authorizedKeysPath := filepath.Join(tmpDir, username, ".ssh", "authorized_keys")
+	data, err := os.ReadFile(authorizedKeysPath)
+	if err != nil {
+		t.Fatalf("Failed to read authorized_keys: %v", err)
+	}
+
+	keyLine := strings.TrimSpace(string(key))
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == keyLine {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("Expected key to appear exactly once, found %d occurrences", count)
 	}
 }
 

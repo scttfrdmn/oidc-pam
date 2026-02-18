@@ -613,24 +613,39 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
-			var expiredSessions []string
 
-			b.sessionMutex.RLock()
+			// Atomically collect and remove expired sessions under a single write lock
+			// to avoid TOCTOU race between identifying and removing sessions.
+			var expiredSessions []*Session
+			b.sessionMutex.Lock()
 			for id, session := range b.sessions {
 				if session.ExpiresAt.Before(now) {
-					expiredSessions = append(expiredSessions, id)
+					expiredSessions = append(expiredSessions, session)
+					delete(b.sessions, id)
 				}
 			}
-			b.sessionMutex.RUnlock()
+			b.sessionMutex.Unlock()
 
-			// Clean up expired sessions
-			for _, sessionID := range expiredSessions {
-				if err := b.RevokeSession(sessionID); err != nil {
-					log.Error().
-						Err(err).
-						Str("session_id", sessionID).
-						Msg("Failed to revoke expired session")
+			// Perform SSH key revocation and audit logging outside the lock.
+			// Sessions are already removed from the map, so no TOCTOU risk.
+			for _, session := range expiredSessions {
+				if session.SSHKeyID != "" {
+					if err := b.revokeSSHKey(session); err != nil {
+						log.Error().
+							Err(err).
+							Str("session_id", session.ID).
+							Str("ssh_key_id", session.SSHKeyID).
+							Msg("Failed to revoke SSH key for expired session")
+					}
 				}
+
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType: "session_revoked",
+					UserID:    session.UserID,
+					SessionID: session.ID,
+					Success:   true,
+					Timestamp: time.Now(),
+				})
 			}
 
 			if len(expiredSessions) > 0 {
