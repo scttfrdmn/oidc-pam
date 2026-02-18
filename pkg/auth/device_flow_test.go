@@ -18,8 +18,10 @@ func TestOIDCProviderCreation(t *testing.T) {
 		EnabledForLogin: true,
 	}
 
+	secCfg := config.SecurityConfig{VerifyAudience: true}
+
 	// This will fail due to network calls, but tests the creation logic
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, secCfg)
 	if err != nil {
 		t.Logf("Expected provider creation to fail due to network calls: %v", err)
 
@@ -248,7 +250,7 @@ func TestDeviceFlowNetworkMethods(t *testing.T) {
 		Priority:        1,
 	}
 
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, config.SecurityConfig{VerifyAudience: true})
 	if err != nil {
 		t.Logf("NewOIDCProvider failed as expected (network dependency): %v", err)
 	}
@@ -285,7 +287,7 @@ func TestDeviceFlowPollingMethod(t *testing.T) {
 		Priority:        1,
 	}
 
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, config.SecurityConfig{VerifyAudience: true})
 	if err != nil {
 		t.Logf("NewOIDCProvider failed as expected (network dependency): %v", err)
 		return
@@ -320,7 +322,7 @@ func TestGetUserInfoMethod(t *testing.T) {
 		Priority:        1,
 	}
 
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, config.SecurityConfig{VerifyAudience: true})
 	if err != nil {
 		t.Logf("NewOIDCProvider failed as expected (network dependency): %v", err)
 		return
@@ -357,7 +359,7 @@ func TestRefreshTokenProviderMethod(t *testing.T) {
 		Priority:        1,
 	}
 
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, config.SecurityConfig{VerifyAudience: true})
 	if err != nil {
 		t.Logf("NewOIDCProvider failed as expected (network dependency): %v", err)
 		return
@@ -394,7 +396,7 @@ func TestGetDeviceAuthorizationEndpointMethod(t *testing.T) {
 		Priority:        1,
 	}
 
-	provider, err := NewOIDCProvider(cfg)
+	provider, err := NewOIDCProvider(cfg, config.SecurityConfig{VerifyAudience: true})
 	if err != nil {
 		t.Logf("NewOIDCProvider failed as expected (network dependency): %v", err)
 		return

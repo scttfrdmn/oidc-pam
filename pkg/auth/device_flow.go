@@ -50,12 +50,13 @@ type TokenResponse struct {
 
 // OIDCProvider represents an OIDC provider with device flow support
 type OIDCProvider struct {
-	Name         string
-	Config       OIDCProviderConfig
-	Provider     *oidc.Provider
-	Verifier     *oidc.IDTokenVerifier
-	OAuth2Config *oauth2.Config
-	httpClient   *http.Client
+	Name           string
+	Config         OIDCProviderConfig
+	Provider       *oidc.Provider
+	Verifier       *oidc.IDTokenVerifier
+	OAuth2Config   *oauth2.Config
+	httpClient     *http.Client
+	securityConfig config.SecurityConfig
 }
 
 // OIDCProviderConfig is an alias for the config type
@@ -88,25 +89,27 @@ type Token struct {
 }
 
 // NewOIDCProvider creates a new OIDC provider
-func NewOIDCProvider(config OIDCProviderConfig) (*OIDCProvider, error) {
+func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfig) (*OIDCProvider, error) {
 	ctx := context.Background()
 
 	// Create OIDC provider
-	provider, err := oidc.NewProvider(ctx, config.Issuer)
+	provider, err := oidc.NewProvider(ctx, providerCfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
 	}
 
 	// Create ID token verifier
 	verifier := provider.Verifier(&oidc.Config{
-		ClientID: config.ClientID,
+		ClientID:             providerCfg.ClientID,
+		SkipClientIDCheck:    !secCfg.VerifyAudience,
+		SupportedSigningAlgs: []string{"RS256", "ES256"},
 	})
 
 	// Create OAuth2 config
 	oauth2Config := &oauth2.Config{
-		ClientID:    config.ClientID,
+		ClientID:    providerCfg.ClientID,
 		Endpoint:    provider.Endpoint(),
-		Scopes:      config.Scopes,
+		Scopes:      providerCfg.Scopes,
 		RedirectURL: "", // Not used for device flow
 	}
 
@@ -116,12 +119,13 @@ func NewOIDCProvider(config OIDCProviderConfig) (*OIDCProvider, error) {
 	}
 
 	return &OIDCProvider{
-		Name:         config.Name,
-		Config:       config,
-		Provider:     provider,
-		Verifier:     verifier,
-		OAuth2Config: oauth2Config,
-		httpClient:   httpClient,
+		Name:           providerCfg.Name,
+		Config:         providerCfg,
+		Provider:       provider,
+		Verifier:       verifier,
+		OAuth2Config:   oauth2Config,
+		httpClient:     httpClient,
+		securityConfig: secCfg,
 	}, nil
 }
 
@@ -231,6 +235,10 @@ func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error
 		if err := idToken.Claims(&claims); err != nil {
 			return nil, fmt.Errorf("failed to parse ID token claims: %w", err)
 		}
+
+		if err := p.validateIDTokenClaims(claims); err != nil {
+			return nil, fmt.Errorf("ID token claim validation failed: %w", err)
+		}
 	}
 
 	// Create token
@@ -305,6 +313,46 @@ func (p *OIDCProvider) RefreshToken(tokenFingerprint string) (*Token, error) {
 	// In a real implementation, this would look up the refresh token
 	// associated with the fingerprint and use it to get a new access token
 	return nil, fmt.Errorf("token refresh not implemented")
+}
+
+// validateIDTokenClaims performs post-verification claim validation
+// checking auth_time presence and token age constraints.
+func (p *OIDCProvider) validateIDTokenClaims(claims map[string]interface{}) error {
+	// Check auth_time requirement
+	authTimeVal, hasAuthTime := claims["auth_time"]
+	if p.securityConfig.RequireAuthTime && !hasAuthTime {
+		return fmt.Errorf("auth_time claim is required but not present in ID token")
+	}
+
+	// Check token age if MaxTokenAge is configured and auth_time is present
+	if p.securityConfig.MaxTokenAge > 0 && hasAuthTime {
+		var authTime time.Time
+		switch v := authTimeVal.(type) {
+		case float64:
+			authTime = time.Unix(int64(v), 0)
+		case json.Number:
+			n, err := v.Int64()
+			if err != nil {
+				return fmt.Errorf("invalid auth_time value: %w", err)
+			}
+			authTime = time.Unix(n, 0)
+		default:
+			return fmt.Errorf("auth_time claim has unexpected type %T", authTimeVal)
+		}
+
+		maxAge := p.securityConfig.MaxTokenAge + p.securityConfig.ClockSkewTolerance
+		if time.Since(authTime) > maxAge {
+			return fmt.Errorf("token age exceeds maximum allowed age (%s)", p.securityConfig.MaxTokenAge)
+		}
+
+		log.Debug().
+			Time("auth_time", authTime).
+			Dur("token_age", time.Since(authTime)).
+			Dur("max_token_age", p.securityConfig.MaxTokenAge).
+			Msg("ID token age validated")
+	}
+
+	return nil
 }
 
 // Helper methods

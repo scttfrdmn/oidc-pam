@@ -149,7 +149,7 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 	// Initialize OIDC providers
 	providers := make(map[string]*OIDCProvider)
 	for _, providerConfig := range cfg.OIDC.Providers {
-		provider, err := NewOIDCProvider(providerConfig)
+		provider, err := NewOIDCProvider(providerConfig, cfg.Security)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OIDC provider '%s': %w", providerConfig.Name, err)
 		}
