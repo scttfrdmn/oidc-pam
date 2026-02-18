@@ -15,8 +15,8 @@ func TestNewKeyManager(t *testing.T) {
 		t.Errorf("Expected baseDir %s, got %s", baseDir, km.baseDir)
 	}
 
-	if km.keySize != 2048 {
-		t.Errorf("Expected default keySize 2048, got %d", km.keySize)
+	if km.keySize != 4096 {
+		t.Errorf("Expected default keySize 4096, got %d", km.keySize)
 	}
 
 	if km.keyType != "rsa" {

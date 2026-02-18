@@ -205,6 +205,9 @@ func TestDeviceFlowProviderCore(t *testing.T) {
 	if fingerprint == "" {
 		t.Error("Expected non-empty fingerprint")
 	}
+	if len(fingerprint) != 64 {
+		t.Errorf("Expected 64-char hex fingerprint, got %d chars", len(fingerprint))
+	}
 
 	// Test different tokens produce different fingerprints
 	fingerprint2 := provider.generateTokenFingerprint("different-token")

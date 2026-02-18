@@ -88,6 +88,9 @@ func TestDeviceFlowHelperMethods(t *testing.T) {
 	if fingerprint == "" {
 		t.Error("Expected non-empty token fingerprint")
 	}
+	if len(fingerprint) != 64 {
+		t.Errorf("Expected 64-char hex fingerprint, got %d chars", len(fingerprint))
+	}
 
 	// Test multiple fingerprint generation for consistency
 	fingerprint2 := provider.generateTokenFingerprint("test-token")

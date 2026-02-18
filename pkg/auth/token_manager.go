@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -94,7 +93,10 @@ func (tm *TokenManager) Stop() error {
 // StoreToken stores a token in the token store
 func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) error {
 	// Generate token ID
-	tokenID := tm.generateTokenID()
+	tokenID, err := tm.generateTokenID()
+	if err != nil {
+		return fmt.Errorf("failed to generate token ID: %w", err)
+	}
 
 	// Encrypt token if encryption is enabled
 	accessToken := token.AccessToken
@@ -381,17 +383,12 @@ func (tm *TokenManager) GetTokenStats() map[string]interface{} {
 
 // Helper methods
 
-func (tm *TokenManager) generateTokenID() string {
-	// Generate random bytes
+func (tm *TokenManager) generateTokenID() (string, error) {
 	randomBytes := make([]byte, 16)
 	if _, err := rand.Read(randomBytes); err != nil {
-		// Fallback to timestamp-based ID
-		return fmt.Sprintf("token_%d", time.Now().UnixNano())
+		return "", fmt.Errorf("failed to generate token ID: %w", err)
 	}
-
-	// Create hash
-	hash := sha256.Sum256(randomBytes)
-	return hex.EncodeToString(hash[:])[:16]
+	return hex.EncodeToString(randomBytes), nil
 }
 
 func (tm *TokenManager) removeToken(tokenID string) {

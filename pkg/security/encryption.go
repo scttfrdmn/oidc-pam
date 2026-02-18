@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Encryption handles encryption and decryption of sensitive data
@@ -21,9 +23,12 @@ func NewEncryption(keyString string) (*Encryption, error) {
 		return nil, fmt.Errorf("encryption key cannot be empty")
 	}
 
-	// Generate a 32-byte key from the provided string
-	hash := sha256.Sum256([]byte(keyString))
-	key := hash[:]
+	// Derive a 32-byte key using PBKDF2 with a fixed application-level salt.
+	// The key string is expected to be a high-entropy secret (config validation
+	// requires 32+ bytes), so the static salt is acceptable — the primary benefit
+	// is computational cost against brute force.
+	salt := []byte("oidc-pam-token-encryption-v1")
+	key := pbkdf2.Key([]byte(keyString), salt, 600000, 32, sha256.New)
 
 	return &Encryption{
 		key: key,

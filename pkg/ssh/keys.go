@@ -37,7 +37,7 @@ type SSHKey struct {
 func NewKeyManager(baseDir string) *KeyManager {
 	return &KeyManager{
 		baseDir:    baseDir,
-		keySize:    2048,
+		keySize:    4096,
 		keyType:    "rsa",
 		expiration: 24 * time.Hour, // Default 24 hour expiration
 	}
