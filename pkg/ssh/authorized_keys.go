@@ -7,10 +7,31 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// withFileLock acquires an exclusive POSIX file lock on a lockfile adjacent to
+// the authorized_keys file, runs fn, then releases the lock. This serializes
+// concurrent read-then-write operations across processes.
+func withFileLock(lockPath string, fn func() error) error {
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open lock file: %w", err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("failed to acquire file lock: %w", err)
+	}
+
+	return fn()
+}
 
 // AuthorizedKeysManager manages authorized_keys files for users
 type AuthorizedKeysManager struct {
@@ -29,54 +50,57 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
+	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
 
 	// Create .ssh directory if it doesn't exist
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		return fmt.Errorf("failed to create .ssh directory: %w", err)
 	}
 
-	// Read existing authorized_keys file
-	var existingKeys []string
-	if data, err := os.ReadFile(authorizedKeysPath); err == nil {
-		existingKeys = strings.Split(string(data), "\n")
-	}
-
-	// Check if key already exists
-	newKeyLine := strings.TrimSpace(string(publicKey))
-	for _, existingKey := range existingKeys {
-		if strings.TrimSpace(existingKey) == newKeyLine {
-			log.Debug().
-				Str("username", username).
-				Msg("Public key already exists in authorized_keys")
-			return nil
+	return withFileLock(lockPath, func() error {
+		// Read existing authorized_keys file
+		var existingKeys []string
+		if data, err := os.ReadFile(authorizedKeysPath); err == nil {
+			existingKeys = strings.Split(string(data), "\n")
 		}
-	}
 
-	// Add the new key
-	file, err := os.OpenFile(authorizedKeysPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to open authorized_keys file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
+		// Check if key already exists
+		newKeyLine := strings.TrimSpace(string(publicKey))
+		for _, existingKey := range existingKeys {
+			if strings.TrimSpace(existingKey) == newKeyLine {
+				log.Debug().
+					Str("username", username).
+					Msg("Public key already exists in authorized_keys")
+				return nil
+			}
+		}
 
-	// Add timestamp comment
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	comment := fmt.Sprintf("# Added by OIDC PAM on %s\n", timestamp)
+		// Add the new key
+		file, err := os.OpenFile(authorizedKeysPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to open authorized_keys file: %w", err)
+		}
+		defer func() { _ = file.Close() }()
 
-	if _, err := file.WriteString(comment); err != nil {
-		return fmt.Errorf("failed to write comment to authorized_keys: %w", err)
-	}
+		// Add timestamp comment
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+		comment := fmt.Sprintf("# Added by OIDC PAM on %s\n", timestamp)
 
-	if _, err := file.WriteString(newKeyLine + "\n"); err != nil {
-		return fmt.Errorf("failed to write key to authorized_keys: %w", err)
-	}
+		if _, err := file.WriteString(comment); err != nil {
+			return fmt.Errorf("failed to write comment to authorized_keys: %w", err)
+		}
 
-	log.Info().
-		Str("username", username).
-		Str("authorized_keys_path", authorizedKeysPath).
-		Msg("Public key added to authorized_keys")
+		if _, err := file.WriteString(newKeyLine + "\n"); err != nil {
+			return fmt.Errorf("failed to write key to authorized_keys: %w", err)
+		}
 
-	return nil
+		log.Info().
+			Str("username", username).
+			Str("authorized_keys_path", authorizedKeysPath).
+			Msg("Public key added to authorized_keys")
+
+		return nil
+	})
 }
 
 // RemovePublicKey removes a public key from a user's authorized_keys file
@@ -84,105 +108,46 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
+	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
 
-	// Read existing authorized_keys file
-	data, err := os.ReadFile(authorizedKeysPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // File doesn't exist, nothing to remove
-		}
-		return fmt.Errorf("failed to read authorized_keys file: %w", err)
-	}
-
-	// Parse existing keys
-	lines := strings.Split(string(data), "\n")
-	keyToRemove := strings.TrimSpace(string(publicKey))
-
-	var filteredLines []string
-	removed := false
-
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine == keyToRemove {
-			removed = true
-			continue
-		}
-		filteredLines = append(filteredLines, line)
-	}
-
-	if !removed {
-		log.Debug().
-			Str("username", username).
-			Msg("Public key not found in authorized_keys")
+	// Check if .ssh directory exists; if not, nothing to remove
+	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
 		return nil
 	}
 
-	// Write filtered content back
-	newContent := strings.Join(filteredLines, "\n")
-	if err := os.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
-		return fmt.Errorf("failed to write authorized_keys file: %w", err)
-	}
-
-	log.Info().
-		Str("username", username).
-		Str("authorized_keys_path", authorizedKeysPath).
-		Msg("Public key removed from authorized_keys")
-
-	return nil
-}
-
-// RemoveExpiredKeys removes expired OIDC PAM keys from authorized_keys
-func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-
-	// Read existing authorized_keys file
-	file, err := os.Open(authorizedKeysPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // File doesn't exist, nothing to clean
-		}
-		return fmt.Errorf("failed to open authorized_keys file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	var filteredLines []string
-	var removedCount int
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Check if this is an OIDC PAM key
-		if strings.Contains(line, "@oidc-pam-") {
-			// Extract timestamp from comment
-			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				comment := parts[2]
-				if strings.Contains(comment, "@oidc-pam-") {
-					// Extract timestamp
-					timestampStr := strings.Split(comment, "@oidc-pam-")[1]
-					if timestamp, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
-						keyTime := time.Unix(timestamp, 0)
-						// Check if key is older than 24 hours (default expiration)
-						if time.Since(keyTime) > 24*time.Hour {
-							removedCount++
-							continue // Skip this line (remove the key)
-						}
-					}
-				}
+	return withFileLock(lockPath, func() error {
+		// Read existing authorized_keys file
+		data, err := os.ReadFile(authorizedKeysPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // File doesn't exist, nothing to remove
 			}
+			return fmt.Errorf("failed to read authorized_keys file: %w", err)
 		}
 
-		filteredLines = append(filteredLines, line)
-	}
+		// Parse existing keys
+		lines := strings.Split(string(data), "\n")
+		keyToRemove := strings.TrimSpace(string(publicKey))
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("failed to scan authorized_keys file: %w", err)
-	}
+		var filteredLines []string
+		removed := false
 
-	if removedCount > 0 {
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine == keyToRemove {
+				removed = true
+				continue
+			}
+			filteredLines = append(filteredLines, line)
+		}
+
+		if !removed {
+			log.Debug().
+				Str("username", username).
+				Msg("Public key not found in authorized_keys")
+			return nil
+		}
+
 		// Write filtered content back
 		newContent := strings.Join(filteredLines, "\n")
 		if err := os.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
@@ -191,11 +156,86 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 
 		log.Info().
 			Str("username", username).
-			Int("removed_count", removedCount).
-			Msg("Removed expired OIDC PAM keys from authorized_keys")
+			Str("authorized_keys_path", authorizedKeysPath).
+			Msg("Public key removed from authorized_keys")
+
+		return nil
+	})
+}
+
+// RemoveExpiredKeys removes expired OIDC PAM keys from authorized_keys
+func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
+	userHomeDir := filepath.Join(akm.baseDir, username)
+	sshDir := filepath.Join(userHomeDir, ".ssh")
+	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
+	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
+
+	// Check if .ssh directory exists; if not, nothing to clean
+	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
+		return nil
 	}
 
-	return nil
+	return withFileLock(lockPath, func() error {
+		// Read existing authorized_keys file
+		file, err := os.Open(authorizedKeysPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // File doesn't exist, nothing to clean
+			}
+			return fmt.Errorf("failed to open authorized_keys file: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+
+		var filteredLines []string
+		var removedCount int
+		scanner := bufio.NewScanner(file)
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			// Check if this is an OIDC PAM key
+			if strings.Contains(line, "@oidc-pam-") {
+				// Extract timestamp from comment
+				parts := strings.Fields(line)
+				if len(parts) >= 3 {
+					comment := parts[2]
+					if strings.Contains(comment, "@oidc-pam-") {
+						// Extract timestamp
+						timestampStr := strings.Split(comment, "@oidc-pam-")[1]
+						if timestamp, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+							keyTime := time.Unix(timestamp, 0)
+							// Check if key is older than 24 hours (default expiration)
+							if time.Since(keyTime) > 24*time.Hour {
+								removedCount++
+								continue // Skip this line (remove the key)
+							}
+						}
+					}
+				}
+			}
+
+			filteredLines = append(filteredLines, line)
+		}
+
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("failed to scan authorized_keys file: %w", err)
+		}
+
+		if removedCount > 0 {
+			// Write filtered content back
+			newContent := strings.Join(filteredLines, "\n")
+			if err := os.WriteFile(authorizedKeysPath, []byte(newContent), 0600); err != nil {
+				return fmt.Errorf("failed to write authorized_keys file: %w", err)
+			}
+
+			log.Info().
+				Str("username", username).
+				Int("removed_count", removedCount).
+				Msg("Removed expired OIDC PAM keys from authorized_keys")
+		}
+
+		return nil
+	})
 }
 
 // ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file

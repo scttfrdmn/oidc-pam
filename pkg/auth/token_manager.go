@@ -238,8 +238,8 @@ func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
 
 // ValidateToken validates a token
 func (tm *TokenManager) ValidateToken(tokenFingerprint string) (*StoredToken, error) {
-	tm.tokenStore.mutex.RLock()
-	defer tm.tokenStore.mutex.RUnlock()
+	tm.tokenStore.mutex.Lock()
+	defer tm.tokenStore.mutex.Unlock()
 
 	// Find token by fingerprint
 	for _, storedToken := range tm.tokenStore.tokens {

@@ -269,3 +269,56 @@ func TestTokenManagerConcurrency(t *testing.T) {
 	wg.Wait()
 	t.Log("Concurrent operations completed successfully")
 }
+
+func TestValidateTokenConcurrent(t *testing.T) {
+	// Regression test: ValidateToken mutates LastUsed. Under a read lock this
+	// would race; the fix uses a write lock. Run with -race to verify.
+
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	}
+
+	tm, err := NewTokenManager(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create token manager: %v", err)
+	}
+
+	// Store a token so ValidateToken has something to find
+	testToken := &Token{
+		AccessToken:  "access",
+		RefreshToken: "refresh",
+		IDToken:      "id",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		Fingerprint:  "concurrent-fp",
+		Claims:       make(map[string]interface{}),
+	}
+	if err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
+		t.Fatalf("Failed to store token: %v", err)
+	}
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				storedToken, err := tm.ValidateToken("concurrent-fp")
+				if err != nil {
+					t.Errorf("ValidateToken failed: %v", err)
+					return
+				}
+				if storedToken == nil {
+					t.Error("ValidateToken returned nil token")
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
