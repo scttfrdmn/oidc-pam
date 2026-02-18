@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -586,4 +587,124 @@ func TestServerFormatInstructions(t *testing.T) {
 	if unknownInstructions == "" {
 		t.Error("Expected non-empty instructions for unknown login type")
 	}
+}
+
+// sendRequestOverSocket connects to the unix socket, sends a JSON request, and
+// returns the decoded Response.
+func sendRequestOverSocket(t *testing.T, socketPath string, req *Request) *Response {
+	t.Helper()
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Failed to connect to socket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+	data = append(data, '\n')
+
+	if _, err := conn.Write(data); err != nil {
+		t.Fatalf("Failed to write request: %v", err)
+	}
+
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	return &resp
+}
+
+func TestServerRateLimitOverSocket(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ipc-ratelimit-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	socketPath := filepath.Join(tempDir, "test.sock")
+
+	// maxRequestsPerMinute=2, maxConcurrentAuths=0 (disabled), requirePeerAuth=false
+	server, err := NewServer(socketPath, nil, 0660, "", false, 2, 0)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = server.Start(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+	defer func() { _ = server.Stop() }()
+
+	req := &Request{
+		Type:   "check_session",
+		UserID: "test-user",
+	}
+
+	// First 2 requests should succeed (not be rate-limited — they'll fail for
+	// other reasons since broker is nil, but they should NOT get RATE_LIMIT_EXCEEDED).
+	for i := 0; i < 2; i++ {
+		resp := sendRequestOverSocket(t, socketPath, req)
+		if resp.ErrorCode == "RATE_LIMIT_EXCEEDED" {
+			t.Fatalf("request %d should not have been rate-limited", i+1)
+		}
+	}
+
+	// 3rd request should be rate-limited
+	resp := sendRequestOverSocket(t, socketPath, req)
+	if resp.ErrorCode != "RATE_LIMIT_EXCEEDED" {
+		t.Fatalf("expected RATE_LIMIT_EXCEEDED on 3rd request, got error_code=%q", resp.ErrorCode)
+	}
+	if resp.Success {
+		t.Fatal("rate-limited response should not be successful")
+	}
+}
+
+func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "ipc-authlimit-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	socketPath := filepath.Join(tempDir, "test.sock")
+
+	// rate limiting disabled, maxConcurrentAuths=1, no broker, requirePeerAuth=false
+	server, err := NewServer(socketPath, nil, 0660, "", false, 0, 1)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Test at the handleRequest level: hold one auth slot, then verify second
+	// authenticate request gets TOO_MANY_CONCURRENT_AUTHS.
+
+	// Acquire the single auth slot
+	if !server.rateLimiter.AcquireAuth() {
+		t.Fatal("failed to acquire initial auth slot")
+	}
+
+	req := &Request{
+		Type:   "authenticate",
+		UserID: "test-user",
+	}
+
+	resp := server.handleRequest(req)
+	if resp.ErrorCode != "TOO_MANY_CONCURRENT_AUTHS" {
+		t.Fatalf("expected TOO_MANY_CONCURRENT_AUTHS, got error_code=%q", resp.ErrorCode)
+	}
+	if resp.Success {
+		t.Fatal("response should not be successful when auth limit exceeded")
+	}
+
+	// Release the slot and verify we can acquire again
+	server.rateLimiter.ReleaseAuth()
+	if !server.rateLimiter.AcquireAuth() {
+		t.Fatal("should be able to acquire after release")
+	}
+	server.rateLimiter.ReleaseAuth()
 }
