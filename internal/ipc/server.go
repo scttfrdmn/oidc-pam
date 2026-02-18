@@ -24,6 +24,7 @@ type Server struct {
 	socketGroup     string
 	requirePeerAuth bool
 	broker          *auth.Broker
+	rateLimiter     *RateLimiter
 	listener        net.Listener
 	stopChan        chan struct{}
 	wg              sync.WaitGroup
@@ -64,14 +65,17 @@ type Response struct {
 	Metadata         map[string]interface{} `json:"metadata"`
 }
 
-// NewServer creates a new IPC server
-func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string, requirePeerAuth bool) (*Server, error) {
+// NewServer creates a new IPC server. maxRequestsPerMinute and
+// maxConcurrentAuths configure per-UID rate limiting and the global
+// concurrent auth cap respectively. Values <= 0 disable that limit.
+func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string, requirePeerAuth bool, maxRequestsPerMinute, maxConcurrentAuths int) (*Server, error) {
 	return &Server{
 		socketPath:      socketPath,
 		socketMode:      socketMode,
 		socketGroup:     socketGroup,
 		requirePeerAuth: requirePeerAuth,
 		broker:          broker,
+		rateLimiter:     NewRateLimiter(maxRequestsPerMinute, maxConcurrentAuths),
 		stopChan:        make(chan struct{}),
 	}, nil
 }
@@ -148,6 +152,11 @@ func (s *Server) Stop() error {
 		// Wait for goroutines to finish
 		s.wg.Wait()
 
+		// Stop rate limiter cleanup goroutine
+		if s.rateLimiter != nil {
+			s.rateLimiter.Stop()
+		}
+
 		// Remove socket file
 		if err := os.RemoveAll(s.socketPath); err != nil {
 			log.Warn().
@@ -212,6 +221,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Verify peer credentials if required
+	var peerUID uint32
 	if s.requirePeerAuth {
 		uid, gid, err := getPeerCredentials(conn)
 		if err != nil {
@@ -229,10 +239,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 			s.sendErrorResponse(conn, "PEER_AUTH_DENIED", "Only root processes are allowed to connect")
 			return
 		}
+		peerUID = uid
 		log.Debug().
 			Uint32("uid", uid).
 			Uint32("gid", gid).
 			Msg("Peer credentials verified")
+	}
+
+	// Apply per-UID rate limiting
+	if !s.rateLimiter.AllowRequest(peerUID) {
+		log.Warn().
+			Uint32("uid", peerUID).
+			Msg("Rate limit exceeded for UID")
+		s.sendErrorResponse(conn, "RATE_LIMIT_EXCEEDED", clientErrorMessage("RATE_LIMIT_EXCEEDED"))
+		return
 	}
 
 	log.Debug().
@@ -284,6 +304,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 func (s *Server) handleRequest(request *Request) *Response {
 	switch request.Type {
 	case "authenticate":
+		if !s.rateLimiter.AcquireAuth() {
+			log.Warn().Msg("Concurrent auth limit reached")
+			return &Response{
+				Success:      false,
+				ErrorCode:    "TOO_MANY_CONCURRENT_AUTHS",
+				ErrorMessage: clientErrorMessage("TOO_MANY_CONCURRENT_AUTHS"),
+			}
+		}
+		defer s.rateLimiter.ReleaseAuth()
 		return s.handleAuthenticate(request)
 	case "check_session":
 		return s.handleCheckSession(request)

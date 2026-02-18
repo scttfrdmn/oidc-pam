@@ -71,7 +71,7 @@ func main() {
 	}
 
 	// Create IPC server for PAM communication
-	ipcServer, err := ipc.NewServer(cfg.Server.SocketPath, broker, cfg.Server.SocketMode, cfg.Server.SocketGroup, cfg.Server.RequirePeerAuth)
+	ipcServer, err := ipc.NewServer(cfg.Server.SocketPath, broker, cfg.Server.SocketMode, cfg.Server.SocketGroup, cfg.Server.RequirePeerAuth, cfg.Security.RateLimiting.MaxRequestsPerMinute, cfg.Security.RateLimiting.MaxConcurrentAuths)
 	if err != nil {
 		log.Fatal().
 			Err(err).
