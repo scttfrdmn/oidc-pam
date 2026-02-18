@@ -2,6 +2,8 @@ package security
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -219,7 +221,12 @@ func createAuditOutput(config config.AuditOutput) (AuditOutput, error) {
 }
 
 func generateEventID() string {
-	return fmt.Sprintf("audit_%d", time.Now().UnixNano())
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// This indicates a broken system; return a best-effort fallback.
+		return fmt.Sprintf("audit_%d", time.Now().UnixNano())
+	}
+	return "audit_" + hex.EncodeToString(b)
 }
 
 // FileAuditOutput implementation

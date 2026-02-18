@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -401,12 +403,8 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 }
 
 func (p *OIDCProvider) generateTokenFingerprint(accessToken string) string {
-	// Generate a simple fingerprint based on the first and last 8 characters
-	// In a real implementation, this would be a proper hash
-	if len(accessToken) < 16 {
-		return accessToken
-	}
-	return accessToken[:8] + "..." + accessToken[len(accessToken)-8:]
+	hash := sha256.Sum256([]byte(accessToken))
+	return hex.EncodeToString(hash[:])
 }
 
 func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) (*UserInfo, error) {

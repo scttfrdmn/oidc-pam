@@ -183,15 +183,24 @@ func TestTokenManagerInternalMethods(t *testing.T) {
 	}
 
 	// Test generateTokenID
-	tokenID := tm.generateTokenID()
+	tokenID, err := tm.generateTokenID()
+	if err != nil {
+		t.Fatalf("generateTokenID returned error: %v", err)
+	}
 	if tokenID == "" {
 		t.Error("Expected non-empty token ID")
+	}
+	if len(tokenID) != 32 {
+		t.Errorf("Expected 32-char hex token ID, got %d chars", len(tokenID))
 	}
 
 	// Test multiple token ID generation for uniqueness
 	ids := make(map[string]bool)
 	for i := 0; i < 10; i++ {
-		id := tm.generateTokenID()
+		id, err := tm.generateTokenID()
+		if err != nil {
+			t.Fatalf("generateTokenID returned error: %v", err)
+		}
 		if ids[id] {
 			t.Error("Generated duplicate token ID")
 		}
@@ -253,7 +262,11 @@ func TestTokenManagerConcurrency(t *testing.T) {
 			defer wg.Done()
 
 			// Generate unique token ID
-			tokenID := tm.generateTokenID()
+			tokenID, err := tm.generateTokenID()
+			if err != nil {
+				t.Errorf("generateTokenID returned error in goroutine %d: %v", i, err)
+				return
+			}
 			if tokenID == "" {
 				t.Errorf("Generated empty token ID in goroutine %d", i)
 				return
