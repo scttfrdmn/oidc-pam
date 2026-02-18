@@ -137,7 +137,7 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 		key.CreatedAt.Unix(),
 		key.ExpiresAt.Unix(),
 		key.Comment)
-	if err := os.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
+	if err := os.WriteFile(metadataPath, []byte(metadata), 0600); err != nil {
 		return fmt.Errorf("failed to save key metadata: %w", err)
 	}
 

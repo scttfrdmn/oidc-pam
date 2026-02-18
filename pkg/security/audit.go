@@ -232,7 +232,7 @@ func generateEventID() string {
 // FileAuditOutput implementation
 
 func NewFileAuditOutput(config config.AuditOutput) (*FileAuditOutput, error) {
-	file, err := os.OpenFile(config.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.OpenFile(config.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit file: %w", err)
 	}
