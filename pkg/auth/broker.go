@@ -233,6 +233,20 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		b.removeSession(req.SessionID)
 	}
 
+	// Check per-user session limit
+	maxSessions := b.config.Authentication.MaxConcurrentSessions
+	if maxSessions > 0 && b.countUserSessions(req.UserID) >= maxSessions {
+		log.Warn().
+			Str("user_id", req.UserID).
+			Int("max_sessions", maxSessions).
+			Msg("Maximum concurrent sessions reached for user")
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "TOO_MANY_SESSIONS",
+			ErrorMessage: "Maximum concurrent sessions reached",
+		}, nil
+	}
+
 	// Apply policy checks
 	policyResult, err := b.policyEngine.EvaluateRequest(req)
 	if err != nil {
@@ -479,6 +493,20 @@ func (b *Broker) removeSession(sessionID string) {
 	b.sessionMutex.Lock()
 	defer b.sessionMutex.Unlock()
 	delete(b.sessions, sessionID)
+}
+
+// countUserSessions returns the number of active sessions for the given user.
+func (b *Broker) countUserSessions(userID string) int {
+	b.sessionMutex.RLock()
+	defer b.sessionMutex.RUnlock()
+
+	count := 0
+	for _, session := range b.sessions {
+		if session.UserID == userID {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *Broker) createSuccessResponse(session *Session) *AuthResponse {

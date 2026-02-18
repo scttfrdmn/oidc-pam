@@ -96,14 +96,8 @@ func (pe *PolicyEngine) applyGlobalPolicies(req *AuthRequest, result *PolicyResu
 		result.RequiredGroups = pe.config.Authentication.RequireGroups
 	}
 
-	// Check max concurrent sessions
-	if pe.config.Authentication.MaxConcurrentSessions > 0 {
-		// This would check against active sessions
-		// For now, we'll just log
-		log.Debug().
-			Int("max_sessions", pe.config.Authentication.MaxConcurrentSessions).
-			Msg("Checking concurrent session limit")
-	}
+	// Note: MaxConcurrentSessions is enforced in Broker.Authenticate() which
+	// has access to the session map. The policy engine does not own sessions.
 
 	return nil
 }
