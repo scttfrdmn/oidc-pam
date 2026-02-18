@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -268,9 +269,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
 
-	// Enable environment variable support
+	// Enable environment variable support for safe settings only
 	v.SetEnvPrefix("OIDC_AUTH")
-	v.AutomaticEnv()
+	bindSafeEnvironmentVariables(v)
 
 	// Check config file permissions
 	if info, err := os.Stat(configPath); err == nil {
@@ -291,6 +292,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	var config Config
 	if err := v.Unmarshal(&config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	if err := validateSecurityConfig(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
@@ -328,6 +333,10 @@ func loadFromEnvironment(v *viper.Viper) (*Config, error) {
 				EnabledForLogin: true,
 			},
 		}
+	}
+
+	if err := validateSecurityConfig(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
@@ -423,6 +432,107 @@ func (c *Config) Validate() error {
 	}
 	if c.Authentication.MaxConcurrentSessions <= 0 {
 		return fmt.Errorf("authentication.max_concurrent_sessions must be positive")
+	}
+
+	return nil
+}
+
+// isDevelopmentMode checks if development mode is enabled via OIDC_AUTH_DEV environment variable.
+func isDevelopmentMode() bool {
+	val := strings.ToLower(os.Getenv("OIDC_AUTH_DEV"))
+	return val == "true" || val == "1" || val == "yes"
+}
+
+// bindSafeEnvironmentVariables binds only non-security-critical config keys to environment variables.
+// Security booleans (secure_token_storage, verify_audience, require_pkce, skip_tls_verify) are NOT
+// bound in production mode — they can only come from the config file or defaults.
+func bindSafeEnvironmentVariables(v *viper.Viper) {
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Server settings (safe)
+	safeKeys := []string{
+		"server.socket_path",
+		"server.log_level",
+		"server.audit_log",
+		"server.socket_group",
+		"server.read_timeout",
+		"server.write_timeout",
+
+		// Authentication settings (safe)
+		"authentication.token_lifetime",
+		"authentication.refresh_threshold",
+		"authentication.max_concurrent_sessions",
+
+		// Cloud settings (safe)
+		"cloud.provider",
+		"cloud.auto_discovery",
+
+		// Audit settings (safe)
+		"audit.format",
+		"audit.retention_period",
+
+		// Security settings (safe subset)
+		"security.token_encryption_key",
+		"security.rate_limiting.max_requests_per_minute",
+		"security.rate_limiting.max_concurrent_auths",
+	}
+
+	for _, key := range safeKeys {
+		_ = v.BindEnv(key)
+	}
+
+	// In development mode, also bind security-critical settings with a warning
+	if isDevelopmentMode() {
+		log.Printf("WARNING: Development mode enabled (OIDC_AUTH_DEV=true). Security settings can be overridden via environment variables. DO NOT use in production.")
+
+		securityKeys := []string{
+			"security.secure_token_storage",
+			"security.verify_audience",
+			"security.require_pkce",
+			"security.tls_verification.skip_tls_verify",
+		}
+
+		for _, key := range securityKeys {
+			_ = v.BindEnv(key)
+		}
+	}
+}
+
+// validateSecurityConfig validates that security-critical settings are not weakened.
+// In development mode, weakened settings produce warnings instead of errors.
+func validateSecurityConfig(cfg *Config) error {
+	devMode := isDevelopmentMode()
+
+	if !cfg.Security.SecureTokenStorage {
+		if devMode {
+			log.Printf("WARNING: secure_token_storage is disabled (development mode)")
+		} else {
+			return fmt.Errorf("security.secure_token_storage must be enabled; set OIDC_AUTH_DEV=true to override for development")
+		}
+	}
+
+	if !cfg.Security.VerifyAudience {
+		if devMode {
+			log.Printf("WARNING: verify_audience is disabled (development mode)")
+		} else {
+			return fmt.Errorf("security.verify_audience must be enabled; set OIDC_AUTH_DEV=true to override for development")
+		}
+	}
+
+	if !cfg.Security.RequirePKCE {
+		if devMode {
+			log.Printf("WARNING: require_pkce is disabled (development mode)")
+		} else {
+			return fmt.Errorf("security.require_pkce must be enabled; set OIDC_AUTH_DEV=true to override for development")
+		}
+	}
+
+	if cfg.Security.TLSVerification.SkipTLSVerify {
+		if devMode {
+			log.Printf("WARNING: skip_tls_verify is enabled (development mode)")
+		} else {
+			return fmt.Errorf("security.tls_verification.skip_tls_verify must be disabled; set OIDC_AUTH_DEV=true to override for development")
+		}
 	}
 
 	return nil
