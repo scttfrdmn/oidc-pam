@@ -98,10 +98,10 @@ func testOIDCServer(t *testing.T) (*httptest.Server, *rsa.PrivateKey) {
 		scheme := "http"
 		baseURL := scheme + "://" + r.Host
 		disc := map[string]interface{}{
-			"issuer":                 baseURL,
-			"authorization_endpoint": baseURL + "/authorize",
-			"token_endpoint":         baseURL + "/token",
-			"jwks_uri":               baseURL + "/jwks",
+			"issuer":                                baseURL,
+			"authorization_endpoint":                baseURL + "/authorize",
+			"token_endpoint":                        baseURL + "/token",
+			"jwks_uri":                              baseURL + "/jwks",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		}
 		w.Header().Set("Content-Type", "application/json")

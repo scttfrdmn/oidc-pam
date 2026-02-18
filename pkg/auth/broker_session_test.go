@@ -356,6 +356,50 @@ func TestAuthenticateIgnoresClientSessionID(t *testing.T) {
 	}
 }
 
+func TestAuthenticateTooManySessions(t *testing.T) {
+	broker, server := newTestBrokerWithDeviceServer(t)
+	defer server.Close()
+	defer func() { close(broker.stopChan); broker.wg.Wait() }()
+
+	// Set max concurrent sessions to 2
+	broker.config.Authentication.MaxConcurrentSessions = 2
+
+	// Create 2 sessions (should succeed)
+	for i := 0; i < 2; i++ {
+		req := &AuthRequest{
+			UserID:     "test-user",
+			SourceIP:   "127.0.0.1",
+			TargetHost: "test-host",
+			LoginType:  "ssh",
+		}
+		resp, err := broker.Authenticate(req)
+		if err != nil {
+			t.Fatalf("Authenticate call %d failed: %v", i+1, err)
+		}
+		if resp.ErrorCode == "TOO_MANY_SESSIONS" {
+			t.Fatalf("Authenticate call %d should not hit session limit", i+1)
+		}
+	}
+
+	// 3rd session should be rejected
+	req := &AuthRequest{
+		UserID:     "test-user",
+		SourceIP:   "127.0.0.1",
+		TargetHost: "test-host",
+		LoginType:  "ssh",
+	}
+	resp, err := broker.Authenticate(req)
+	if err != nil {
+		t.Fatalf("Authenticate call 3 returned unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("Expected failure when session limit exceeded")
+	}
+	if resp.ErrorCode != "TOO_MANY_SESSIONS" {
+		t.Fatalf("Expected TOO_MANY_SESSIONS error code, got %q", resp.ErrorCode)
+	}
+}
+
 func TestAuthenticateSessionIDUniqueness(t *testing.T) {
 	broker, server := newTestBrokerWithDeviceServer(t)
 	defer server.Close()

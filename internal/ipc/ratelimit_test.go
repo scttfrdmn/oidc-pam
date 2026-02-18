@@ -209,3 +209,29 @@ func TestRateLimiterCleanupKeepsFresh(t *testing.T) {
 		t.Fatal("stale bucket for UID 2000 should be evicted")
 	}
 }
+
+func BenchmarkAllowRequest(b *testing.B) {
+	rl := NewRateLimiter(10000, 0)
+	defer rl.Stop()
+
+	b.RunParallel(func(pb *testing.PB) {
+		uid := uint32(0)
+		for pb.Next() {
+			rl.AllowRequest(uid % 100) // spread across 100 UIDs
+			uid++
+		}
+	})
+}
+
+func BenchmarkAcquireReleaseAuth(b *testing.B) {
+	rl := NewRateLimiter(0, 10000)
+	defer rl.Stop()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if rl.AcquireAuth() {
+				rl.ReleaseAuth()
+			}
+		}
+	})
+}

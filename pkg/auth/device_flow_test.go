@@ -471,4 +471,3 @@ func TestDeviceFlowNoClientSecret(t *testing.T) {
 		t.Error("Request body must contain client_id")
 	}
 }
-
