@@ -8,21 +8,21 @@ package pam
 import "C"
 import (
 	"fmt"
+	"sync/atomic"
 	"unsafe"
 )
 
 // PAMModule represents the PAM module interface
 type PAMModule struct {
 	socketPath string
-	debug      bool
+	debug      atomic.Bool
 }
 
 // NewPAMModule creates a new PAM module instance
 func NewPAMModule(socketPath string, debug bool) *PAMModule {
-	return &PAMModule{
-		socketPath: socketPath,
-		debug:      debug,
-	}
+	m := &PAMModule{socketPath: socketPath}
+	m.debug.Store(debug)
+	return m
 }
 
 // AuthenticateUser handles user authentication through the broker
@@ -89,10 +89,10 @@ func (p *PAMModule) GetSocketPath() string {
 
 // IsDebugEnabled returns whether debug mode is enabled
 func (p *PAMModule) IsDebugEnabled() bool {
-	return p.debug
+	return p.debug.Load()
 }
 
 // SetDebug enables or disables debug mode
 func (p *PAMModule) SetDebug(enabled bool) {
-	p.debug = enabled
+	p.debug.Store(enabled)
 }
