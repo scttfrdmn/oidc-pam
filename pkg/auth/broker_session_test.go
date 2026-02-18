@@ -2,11 +2,15 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	"github.com/scttfrdmn/oidc-pam/pkg/security"
 )
 
 func TestBrokerSessionMethods(t *testing.T) {
@@ -240,5 +244,139 @@ func TestBrokerStartStop(t *testing.T) {
 	err = broker.Stop()
 	if err != nil {
 		t.Logf("Stop returned error on unstarted broker: %v", err)
+	}
+}
+
+// newTestBrokerWithDeviceServer creates a broker backed by an httptest server
+// that responds to device authorization requests. The caller must defer server.Close().
+func newTestBrokerWithDeviceServer(t *testing.T) (*Broker, *httptest.Server) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := DeviceAuthResponse{
+			DeviceCode:      "test-device-code",
+			UserCode:        "TEST-CODE",
+			VerificationURI: "https://example.com/verify",
+			ExpiresIn:       600,
+			Interval:        5,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+
+	provider := &OIDCProvider{
+		Name: "test-provider",
+		Config: config.OIDCProvider{
+			Name:            "test-provider",
+			Issuer:          server.URL,
+			ClientID:        "test-client",
+			Scopes:          []string{"openid", "profile"},
+			DeviceEndpoint:  server.URL + "/device",
+			EnabledForLogin: true,
+		},
+		httpClient: server.Client(),
+	}
+
+	auditLogger, err := security.NewAuditLogger(config.AuditConfig{Enabled: false})
+	if err != nil {
+		t.Fatalf("Failed to create audit logger: %v", err)
+	}
+
+	cfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:         time.Hour,
+			RefreshThreshold:      time.Minute * 15,
+			MaxConcurrentSessions: 10,
+		},
+	}
+
+	broker := &Broker{
+		config:       cfg,
+		sessions:     make(map[string]*Session),
+		sessionMutex: sync.RWMutex{},
+		policyEngine: &PolicyEngine{config: cfg},
+		providers:    map[string]*OIDCProvider{"test-provider": provider},
+		auditLogger:  auditLogger,
+		stopChan:     make(chan struct{}),
+	}
+
+	return broker, server
+}
+
+func TestAuthenticateGeneratesSessionID(t *testing.T) {
+	broker, server := newTestBrokerWithDeviceServer(t)
+	defer server.Close()
+	defer func() { close(broker.stopChan); broker.wg.Wait() }()
+
+	req := &AuthRequest{
+		UserID:     "test-user",
+		SourceIP:   "127.0.0.1",
+		TargetHost: "test-host",
+		LoginType:  "ssh",
+		SessionID:  "", // Client provides no session ID
+	}
+
+	resp, err := broker.Authenticate(req)
+	if err != nil {
+		t.Fatalf("Authenticate failed: %v", err)
+	}
+	if resp.SessionID == "" {
+		t.Fatal("Expected non-empty server-generated session ID")
+	}
+
+	// Verify the session ID is NOT the client-provided one
+	if resp.SessionID == req.SessionID {
+		t.Error("Session ID should be server-generated, not taken from request")
+	}
+}
+
+func TestAuthenticateIgnoresClientSessionID(t *testing.T) {
+	broker, server := newTestBrokerWithDeviceServer(t)
+	defer server.Close()
+	defer func() { close(broker.stopChan); broker.wg.Wait() }()
+
+	clientSessionID := "client-provided-session-id"
+	req := &AuthRequest{
+		UserID:     "test-user",
+		SourceIP:   "127.0.0.1",
+		TargetHost: "test-host",
+		LoginType:  "ssh",
+		SessionID:  clientSessionID,
+	}
+
+	resp, err := broker.Authenticate(req)
+	if err != nil {
+		t.Fatalf("Authenticate failed: %v", err)
+	}
+	if resp.SessionID == clientSessionID {
+		t.Error("Session ID must not be the client-provided value (session fixation vulnerability)")
+	}
+	if resp.SessionID == "" {
+		t.Fatal("Expected non-empty server-generated session ID")
+	}
+}
+
+func TestAuthenticateSessionIDUniqueness(t *testing.T) {
+	broker, server := newTestBrokerWithDeviceServer(t)
+	defer server.Close()
+	defer func() { close(broker.stopChan); broker.wg.Wait() }()
+
+	seen := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		req := &AuthRequest{
+			UserID:     "test-user",
+			SourceIP:   "127.0.0.1",
+			TargetHost: "test-host",
+			LoginType:  "ssh",
+		}
+
+		resp, err := broker.Authenticate(req)
+		if err != nil {
+			t.Fatalf("Authenticate call %d failed: %v", i, err)
+		}
+		if seen[resp.SessionID] {
+			t.Fatalf("Duplicate session ID generated on call %d: %s", i, resp.SessionID)
+		}
+		seen[resp.SessionID] = true
 	}
 }

@@ -313,9 +313,15 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		qrCode = "" // Continue without QR code
 	}
 
+	// Generate server-side session ID to prevent session fixation attacks
+	sessionID, err := security.GenerateNonce()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate session ID: %w", err)
+	}
+
 	// Create pending session
 	session := &Session{
-		ID:               req.SessionID,
+		ID:               sessionID,
 		UserID:           req.UserID,
 		Provider:         provider.Name,
 		DeviceID:         req.DeviceID,
