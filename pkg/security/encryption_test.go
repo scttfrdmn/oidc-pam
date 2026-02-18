@@ -215,6 +215,43 @@ func TestDecryptBytesInvalidData(t *testing.T) {
 	}
 }
 
+func TestGenerateNonce(t *testing.T) {
+	nonces := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		nonce, err := GenerateNonce()
+		if err != nil {
+			t.Fatalf("Failed to generate nonce: %v", err)
+		}
+
+		if nonce == "" {
+			t.Error("Generated nonce should not be empty")
+		}
+
+		// Verify URL-safe: only base64url characters (no +, /, or =)
+		for _, c := range nonce {
+			if c == '+' || c == '/' || c == '=' {
+				t.Errorf("Nonce contains non-URL-safe character %q: %s", c, nonce)
+				break
+			}
+		}
+
+		// Verify uniqueness
+		if nonces[nonce] {
+			t.Error("Generated nonce should be unique")
+		}
+		nonces[nonce] = true
+
+		// Verify base64url-decodable and correct length (32 bytes)
+		decoded, err := base64.RawURLEncoding.DecodeString(nonce)
+		if err != nil {
+			t.Errorf("Generated nonce should be valid base64url: %v", err)
+		}
+		if len(decoded) != 32 {
+			t.Errorf("Generated nonce should decode to 32 bytes, got %d", len(decoded))
+		}
+	}
+}
+
 func TestGenerateKey(t *testing.T) {
 	// Generate multiple keys
 	keys := make(map[string]bool)
