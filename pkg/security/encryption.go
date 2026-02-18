@@ -174,6 +174,16 @@ func (e *Encryption) DecryptBytes(ciphertext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// GenerateNonce generates a cryptographically random URL-safe nonce string.
+// Returns 32 random bytes, base64url-encoded (no padding).
+func GenerateNonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // GenerateKey generates a new encryption key
 func GenerateKey() (string, error) {
 	key := make([]byte, 32)
