@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -270,6 +271,13 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Enable environment variable support
 	v.SetEnvPrefix("OIDC_AUTH")
 	v.AutomaticEnv()
+
+	// Check config file permissions
+	if info, err := os.Stat(configPath); err == nil {
+		if mode := info.Mode().Perm(); mode&0137 != 0 {
+			log.Printf("WARNING: config file %s has permissions %04o, which are more permissive than recommended 0640", configPath, mode)
+		}
+	}
 
 	// Try to read config file
 	if err := v.ReadInConfig(); err != nil {
