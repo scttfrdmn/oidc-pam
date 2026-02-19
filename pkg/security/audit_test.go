@@ -1,17 +1,42 @@
 package security
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 )
+
+// captureOutput is an AuditOutput that records every written event.
+type captureOutput struct {
+	mu     sync.Mutex
+	events []AuditEvent
+	count  atomic.Int64
+}
+
+func (c *captureOutput) Write(event AuditEvent) error {
+	c.mu.Lock()
+	c.events = append(c.events, event)
+	c.mu.Unlock()
+	c.count.Add(1)
+	return nil
+}
+
+func (c *captureOutput) Close() error { return nil }
+
+func (c *captureOutput) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.events)
+}
 
 func TestNewAuditLogger(t *testing.T) {
 	tests := []struct {
@@ -428,6 +453,170 @@ func TestHTTPAuditOutputEmptyURL(t *testing.T) {
 	_, err := NewHTTPAuditOutput(config.AuditOutput{Type: "http", URL: ""})
 	if err == nil {
 		t.Error("Expected error for empty URL, got nil")
+	}
+}
+
+// TestAuditLoggerBufferSize verifies that BufferSize=0 falls back to 1000 and
+// that an explicit value is honoured.
+func TestAuditLoggerBufferSize(t *testing.T) {
+	t.Run("default 1000 when zero", func(t *testing.T) {
+		cfg := config.AuditConfig{
+			Enabled:    true,
+			BufferSize: 0,
+			Outputs:    []config.AuditOutput{{Type: "stdout"}},
+		}
+		logger, err := NewAuditLogger(cfg)
+		if err != nil {
+			t.Fatalf("NewAuditLogger: %v", err)
+		}
+		if cap(logger.eventChan) != 1000 {
+			t.Errorf("Expected channel capacity 1000, got %d", cap(logger.eventChan))
+		}
+	})
+
+	t.Run("explicit buffer size", func(t *testing.T) {
+		cfg := config.AuditConfig{
+			Enabled:    true,
+			BufferSize: 42,
+			Outputs:    []config.AuditOutput{{Type: "stdout"}},
+		}
+		logger, err := NewAuditLogger(cfg)
+		if err != nil {
+			t.Fatalf("NewAuditLogger: %v", err)
+		}
+		if cap(logger.eventChan) != 42 {
+			t.Errorf("Expected channel capacity 42, got %d", cap(logger.eventChan))
+		}
+	})
+}
+
+// TestAuditLoggerDropCounter verifies that DroppedEvents increments when the
+// async channel is full and the overflow strategy is "drop" (the default).
+func TestAuditLoggerDropCounter(t *testing.T) {
+	out := &captureOutput{}
+	cfg := config.AuditConfig{
+		Enabled:          true,
+		BufferSize:       2,
+		OverflowStrategy: "drop",
+	}
+	logger, err := NewAuditLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	// Inject the capture output directly; do NOT start processEvents so the
+	// channel fills up immediately.
+	logger.outputs = []AuditOutput{out}
+
+	event := AuditEvent{EventType: "test", UserID: "u1", Success: true}
+	const total = 5
+	for i := 0; i < total; i++ {
+		logger.LogAuthEvent(event)
+	}
+
+	// 2 slots fit in the buffer; remaining 3 must be dropped.
+	if dropped := logger.DroppedEvents(); dropped != 3 {
+		t.Errorf("Expected 3 dropped events (buffer=2, sent=%d), got %d", total, dropped)
+	}
+}
+
+// TestAuditLoggerDropCounterDefault verifies the same behaviour when
+// OverflowStrategy is empty (should default to "drop").
+func TestAuditLoggerDropCounterDefault(t *testing.T) {
+	out := &captureOutput{}
+	cfg := config.AuditConfig{
+		Enabled:          true,
+		BufferSize:       1,
+		OverflowStrategy: "", // empty → drop
+	}
+	logger, err := NewAuditLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.outputs = []AuditOutput{out}
+
+	event := AuditEvent{EventType: "test", UserID: "u1", Success: true}
+	for i := 0; i < 3; i++ {
+		logger.LogAuthEvent(event)
+	}
+
+	if dropped := logger.DroppedEvents(); dropped != 2 {
+		t.Errorf("Expected 2 dropped events (buffer=1, sent=3), got %d", dropped)
+	}
+}
+
+// TestAuditLoggerSyncStrategy verifies that the "sync" overflow strategy writes
+// all events directly to outputs, bypassing the async channel, so no events
+// are dropped even when processEvents is not running.
+func TestAuditLoggerSyncStrategy(t *testing.T) {
+	out := &captureOutput{}
+	cfg := config.AuditConfig{
+		Enabled:          true,
+		BufferSize:       1,
+		OverflowStrategy: "sync",
+	}
+	logger, err := NewAuditLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	// Do NOT start processEvents — sync strategy must not need it.
+	logger.outputs = []AuditOutput{out}
+
+	event := AuditEvent{EventType: "test", UserID: "u1", Success: true}
+	const total = 10
+	for i := 0; i < total; i++ {
+		logger.LogAuthEvent(event)
+	}
+
+	if n := out.len(); n != total {
+		t.Errorf("Expected all %d events written synchronously, got %d", total, n)
+	}
+	if dropped := logger.DroppedEvents(); dropped != 0 {
+		t.Errorf("Expected 0 dropped events with sync strategy, got %d", dropped)
+	}
+}
+
+// TestAuditLoggerBlockStrategy verifies that the "block" strategy delivers all
+// events without dropping any, relying on processEvents to drain the channel.
+func TestAuditLoggerBlockStrategy(t *testing.T) {
+	out := &captureOutput{}
+	cfg := config.AuditConfig{
+		Enabled:          true,
+		BufferSize:       4,
+		OverflowStrategy: "block",
+	}
+	logger, err := NewAuditLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.outputs = []AuditOutput{out}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := logger.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	event := AuditEvent{EventType: "test", UserID: "u1", Success: true}
+	const total = 20
+	for i := 0; i < total; i++ {
+		logger.LogAuthEvent(event)
+	}
+
+	// Allow processEvents to drain the channel before stopping.
+	deadline := time.Now().Add(2 * time.Second)
+	for out.count.Load() < total && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if n := out.count.Load(); n != total {
+		t.Errorf("Expected all %d events with block strategy, got %d", total, n)
+	}
+	if dropped := logger.DroppedEvents(); dropped != 0 {
+		t.Errorf("Expected 0 dropped events with block strategy, got %d", dropped)
 	}
 }
 

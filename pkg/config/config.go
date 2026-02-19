@@ -256,6 +256,15 @@ type AuditConfig struct {
 	IncludeNetworkPath       bool          `mapstructure:"include_network_path"`
 	ComplianceFrameworks     []string      `mapstructure:"compliance_frameworks"`
 	RetentionPeriod          string        `mapstructure:"retention_period"`
+	// BufferSize is the capacity of the in-memory audit event channel.
+	// Defaults to 1000 when ≤ 0.
+	BufferSize int `mapstructure:"buffer_size"`
+	// OverflowStrategy controls what happens when the event buffer is full.
+	// Valid values:
+	//   "drop"  – discard the event and increment the dropped counter (default)
+	//   "block" – block the caller until buffer space is available (backpressure)
+	//   "sync"  – bypass the channel and write the event synchronously
+	OverflowStrategy string `mapstructure:"overflow_strategy"`
 }
 
 // AuditOutput defines where audit logs are sent

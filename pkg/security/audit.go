@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -21,11 +22,20 @@ import (
 
 // AuditLogger handles audit event logging
 type AuditLogger struct {
-	config    config.AuditConfig
-	outputs   []AuditOutput
-	eventChan chan AuditEvent
-	stopChan  chan struct{}
-	wg        sync.WaitGroup
+	config        config.AuditConfig
+	outputs       []AuditOutput
+	eventChan     chan AuditEvent
+	stopChan      chan struct{}
+	wg            sync.WaitGroup
+	droppedEvents atomic.Int64 // total events dropped due to full channel
+	lastDropLog   atomic.Int64 // Unix second of last drop error log (rate limiter)
+	syncMu        sync.Mutex   // serialises direct writeEvent calls for "sync" strategy
+}
+
+// DroppedEvents returns the cumulative number of audit events dropped because
+// the event channel was full and the overflow strategy is "drop" (the default).
+func (al *AuditLogger) DroppedEvents() int64 {
+	return al.droppedEvents.Load()
 }
 
 // AuditEvent represents a security audit event
@@ -108,10 +118,15 @@ func NewAuditLogger(cfg config.AuditConfig) (*AuditLogger, error) {
 		outputs = append(outputs, output)
 	}
 
+	bufSize := cfg.BufferSize
+	if bufSize <= 0 {
+		bufSize = 1000 // default async buffer
+	}
+
 	return &AuditLogger{
 		config:    cfg,
 		outputs:   outputs,
-		eventChan: make(chan AuditEvent, 1000), // Buffer for async processing
+		eventChan: make(chan AuditEvent, bufSize),
 		stopChan:  make(chan struct{}),
 	}, nil
 }
@@ -174,11 +189,32 @@ func (al *AuditLogger) LogAuthEvent(event AuditEvent) {
 		event.ComplianceFrameworks = al.config.ComplianceFrameworks
 	}
 
-	// Send to event channel for async processing
-	select {
-	case al.eventChan <- event:
-	default:
-		log.Warn().Msg("Audit event channel full, dropping event")
+	// Dispatch according to the configured overflow strategy.
+	switch al.config.OverflowStrategy {
+	case "block":
+		// Apply backpressure: block the caller until the channel has room.
+		al.eventChan <- event
+	case "sync":
+		// Bypass the async channel and write directly, serialised by syncMu so
+		// concurrent callers do not interleave partial writes.
+		al.syncMu.Lock()
+		al.writeEvent(event)
+		al.syncMu.Unlock()
+	default: // "drop" (and any unrecognised value)
+		select {
+		case al.eventChan <- event:
+		default:
+			dropped := al.droppedEvents.Add(1)
+			// Rate-limit the error log to at most once per second to avoid
+			// flooding the log when the channel is persistently full.
+			now := time.Now().Unix()
+			last := al.lastDropLog.Load()
+			if now > last && al.lastDropLog.CompareAndSwap(last, now) {
+				log.Error().
+					Int64("total_dropped", dropped).
+					Msg("Audit event channel full — events are being dropped")
+			}
+		}
 	}
 }
 
