@@ -19,6 +19,15 @@ const (
 
 	// maxFieldLen is the maximum length for generic string fields.
 	maxFieldLen = 256
+
+	// maxMetadataKeys is the maximum number of entries in the metadata map.
+	maxMetadataKeys = 32
+
+	// maxMetadataKeyLen is the maximum length of a single metadata key.
+	maxMetadataKeyLen = 64
+
+	// maxMetadataValueLen is the maximum length of a string metadata value.
+	maxMetadataValueLen = 1024
 )
 
 // userIDRegexp matches valid Unix usernames: starts with a lowercase letter or
@@ -58,6 +67,9 @@ func validateRequest(req *Request) error {
 			if err := validateSessionID(req.SessionID); err != nil {
 				return err
 			}
+		}
+		if err := validateMetadata(req.Metadata); err != nil {
+			return err
 		}
 		return nil
 
@@ -116,6 +128,51 @@ func validateStringField(val, name string, maxLen int) error {
 	for _, r := range val {
 		if unicode.IsControl(r) {
 			return fmt.Errorf("%s contains invalid control characters", name)
+		}
+	}
+	return nil
+}
+
+// validateMetadata validates the metadata map: enforces limits on key count,
+// key length, and value types/sizes. Allowed value types are string, bool,
+// float64 (JSON number), and nil.
+func validateMetadata(m map[string]interface{}) error {
+	if len(m) == 0 {
+		return nil
+	}
+	if len(m) > maxMetadataKeys {
+		return fmt.Errorf("metadata exceeds maximum of %d keys", maxMetadataKeys)
+	}
+	for k, v := range m {
+		if len(k) == 0 {
+			return fmt.Errorf("metadata key must not be empty")
+		}
+		if len(k) > maxMetadataKeyLen {
+			return fmt.Errorf("metadata key %q exceeds maximum length of %d", k, maxMetadataKeyLen)
+		}
+		for _, r := range k {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("metadata key %q contains invalid control characters", k)
+			}
+		}
+		switch val := v.(type) {
+		case nil:
+			// allowed
+		case bool:
+			// allowed
+		case float64:
+			// allowed (JSON numbers decode to float64)
+		case string:
+			if len(val) > maxMetadataValueLen {
+				return fmt.Errorf("metadata value for key %q exceeds maximum length of %d", k, maxMetadataValueLen)
+			}
+			for _, r := range val {
+				if unicode.IsControl(r) {
+					return fmt.Errorf("metadata value for key %q contains invalid control characters", k)
+				}
+			}
+		default:
+			return fmt.Errorf("metadata value for key %q has unsupported type %T (allowed: string, bool, number, null)", k, v)
 		}
 	}
 	return nil

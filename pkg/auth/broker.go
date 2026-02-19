@@ -569,8 +569,10 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			b.removeSession(session.ID)
 			return
 		case <-ticker.C:
-			// Poll for authorization
-			token, err := provider.PollDeviceAuthorization(deviceFlow.DeviceCode)
+			// Poll for authorization using a per-attempt context with timeout.
+			pollCtx, pollCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			token, err := provider.PollDeviceAuthorization(pollCtx, deviceFlow.DeviceCode)
+			pollCancel()
 			if err != nil {
 				// Handle specific error types
 				if err.Error() == "authorization_pending" {

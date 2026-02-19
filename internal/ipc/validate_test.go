@@ -256,3 +256,74 @@ func TestValidateRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		meta    map[string]interface{}
+		wantErr bool
+	}{
+		{"nil map", nil, false},
+		{"empty map", map[string]interface{}{}, false},
+		{"string value", map[string]interface{}{"k": "v"}, false},
+		{"bool value", map[string]interface{}{"flag": true}, false},
+		{"float64 value", map[string]interface{}{"score": float64(42)}, false},
+		{"nil value", map[string]interface{}{"k": nil}, false},
+		{"mixed valid types", map[string]interface{}{"a": "str", "b": true, "c": float64(1), "d": nil}, false},
+		{
+			"too many keys",
+			func() map[string]interface{} {
+				m := make(map[string]interface{})
+				for i := 0; i < maxMetadataKeys+1; i++ {
+					m[strings.Repeat("k", i+1)] = "v"
+				}
+				return m
+			}(),
+			true,
+		},
+		{"empty key", map[string]interface{}{"": "v"}, true},
+		{"key too long", map[string]interface{}{strings.Repeat("k", maxMetadataKeyLen+1): "v"}, true},
+		{"key with control char", map[string]interface{}{"key\x00bad": "v"}, true},
+		{"string value too long", map[string]interface{}{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
+		{"string value with control char", map[string]interface{}{"k": "val\x00ue"}, true},
+		{"unsupported type slice", map[string]interface{}{"k": []string{"a"}}, true},
+		{"unsupported type map", map[string]interface{}{"k": map[string]string{"a": "b"}}, true},
+		{"unsupported type int", map[string]interface{}{"k": 42}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMetadata(tt.meta)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateMetadata() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRequestMetadata(t *testing.T) {
+	// Verify metadata validation is wired into validateRequest for authenticate.
+	tests := []struct {
+		name    string
+		meta    map[string]interface{}
+		wantErr bool
+	}{
+		{"valid metadata", map[string]interface{}{"service": "sshd", "tty": "pts/0"}, false},
+		{"unsupported value type", map[string]interface{}{"nested": map[string]interface{}{"a": "b"}}, true},
+		{"value too long", map[string]interface{}{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &Request{
+				Type:     "authenticate",
+				UserID:   "testuser",
+				Metadata: tt.meta,
+			}
+			err := validateRequest(req)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
