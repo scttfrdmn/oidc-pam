@@ -10,19 +10,22 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 	"github.com/scttfrdmn/oidc-pam/pkg/security"
+	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
 
 // Broker manages authentication requests and OIDC provider interactions
 type Broker struct {
-	config       *config.Config
-	providers    map[string]*OIDCProvider
-	tokenManager *TokenManager
-	policyEngine *PolicyEngine
-	auditLogger  *security.AuditLogger
-	sessions     map[string]*Session
-	sessionMutex sync.RWMutex
-	stopChan     chan struct{}
-	wg           sync.WaitGroup
+	config                *config.Config
+	providers             map[string]*OIDCProvider
+	tokenManager          *TokenManager
+	policyEngine          *PolicyEngine
+	auditLogger           *security.AuditLogger
+	sessions              map[string]*Session
+	sessionMutex          sync.RWMutex
+	keyManager            *sshpkg.KeyManager
+	authorizedKeysManager *sshpkg.AuthorizedKeysManager
+	stopChan              chan struct{}
+	wg                    sync.WaitGroup
 }
 
 // Session represents an active authentication session
@@ -40,6 +43,7 @@ type Session struct {
 	UserAgent        string
 	TokenFingerprint string
 	SSHKeyID         string
+	SSHPublicKey     string
 	IsActive         bool
 	RiskScore        int
 	DeviceTrusted    bool
@@ -157,13 +161,15 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 	}
 
 	broker := &Broker{
-		config:       cfg,
-		providers:    providers,
-		tokenManager: tokenManager,
-		policyEngine: policyEngine,
-		auditLogger:  auditLogger,
-		sessions:     make(map[string]*Session),
-		stopChan:     make(chan struct{}),
+		config:                cfg,
+		providers:             providers,
+		tokenManager:          tokenManager,
+		policyEngine:          policyEngine,
+		auditLogger:           auditLogger,
+		sessions:              make(map[string]*Session),
+		keyManager:            sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys"),
+		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager("/home"),
+		stopChan:              make(chan struct{}),
 	}
 
 	return broker, nil
@@ -523,7 +529,7 @@ func (b *Broker) createSuccessResponse(session *Session) *AuthResponse {
 		Groups:       session.Groups,
 		SessionID:    session.ID,
 		ExpiresAt:    session.ExpiresAt,
-		SSHPublicKey: session.SSHKeyID, // This would be the actual public key
+		SSHPublicKey: session.SSHPublicKey,
 		RiskScore:    session.RiskScore,
 		Metadata: map[string]interface{}{
 			"provider":       session.Provider,
@@ -611,6 +617,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 						Msg("Failed to generate SSH key")
 				} else {
 					session.SSHKeyID = sshKey.ID
+					session.SSHPublicKey = sshKey.PublicKey
 				}
 			}
 
@@ -692,22 +699,78 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 }
 
 func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
-	// This would generate an SSH key pair and return the key info
-	// For now, return a placeholder
+	if b.keyManager == nil || b.authorizedKeysManager == nil {
+		return nil, fmt.Errorf("SSH key manager not initialized")
+	}
+
+	// Generate an RSA key pair with the username as the comment prefix
+	sshKey, err := b.keyManager.GenerateKey(session.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate SSH key pair: %w", err)
+	}
+
+	// Persist the key pair on disk, keyed by session ID so multiple
+	// concurrent sessions for the same user don't overwrite each other.
+	if err := b.keyManager.SaveKey(session.ID, sshKey); err != nil {
+		return nil, fmt.Errorf("failed to save SSH key: %w", err)
+	}
+
+	// Append the public key to the user's authorized_keys file
+	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey); err != nil {
+		// Best-effort cleanup: remove the stored key if we couldn't authorize it
+		_ = b.keyManager.DeleteKey(session.ID)
+		return nil, fmt.Errorf("failed to add public key to authorized_keys: %w", err)
+	}
+
+	log.Info().
+		Str("session_id", session.ID).
+		Str("user_id", session.UserID).
+		Time("expires_at", sshKey.ExpiresAt).
+		Msg("SSH key generated and authorized")
+
 	return &SSHKey{
-		ID:        fmt.Sprintf("ssh-key-%s", session.ID),
-		PublicKey: "ssh-rsa AAAAB3NzaC1yc2E...",
-		ExpiresAt: session.ExpiresAt,
+		ID:        session.ID,
+		PublicKey: string(sshKey.PublicKey),
+		ExpiresAt: sshKey.ExpiresAt,
 	}, nil
 }
 
 func (b *Broker) revokeSSHKey(session *Session) error {
-	// This would revoke the SSH key
-	// For now, just log
+	if b.keyManager == nil || b.authorizedKeysManager == nil {
+		return nil
+	}
+
+	// Load the stored key to obtain the public key bytes needed for removal
+	sshKey, err := b.keyManager.LoadKey(session.SSHKeyID)
+	if err != nil {
+		// Key may have already been deleted; treat as success
+		log.Debug().
+			Err(err).
+			Str("session_id", session.ID).
+			Str("ssh_key_id", session.SSHKeyID).
+			Msg("SSH key not found during revocation (may already be deleted)")
+		return nil
+	}
+
+	// Remove from authorized_keys (best effort — do not abort on failure)
+	if err := b.authorizedKeysManager.RemovePublicKey(session.UserID, sshKey.PublicKey); err != nil {
+		log.Warn().
+			Err(err).
+			Str("session_id", session.ID).
+			Str("user_id", session.UserID).
+			Msg("Failed to remove public key from authorized_keys during revocation")
+	}
+
+	// Delete the key files from disk
+	if err := b.keyManager.DeleteKey(session.SSHKeyID); err != nil {
+		return fmt.Errorf("failed to delete SSH key files: %w", err)
+	}
+
 	log.Info().
 		Str("session_id", session.ID).
 		Str("ssh_key_id", session.SSHKeyID).
-		Msg("Revoking SSH key")
+		Msg("SSH key revoked")
+
 	return nil
 }
 

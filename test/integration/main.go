@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/scttfrdmn/oidc-pam/internal/ipc"
 	"github.com/scttfrdmn/oidc-pam/pkg/auth"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
 
 func main() {
@@ -224,9 +226,92 @@ func (s *IntegrationTestSuite) TestSessionManagement() error {
 }
 
 func (s *IntegrationTestSuite) TestSSHKeyGeneration() error {
-	// Test SSH key generation functionality
-	// This would typically involve creating SSH keys and managing authorized_keys
-	log.Println("SSH key generation test passed (placeholder)")
+	// Test SSH key generation and authorized_keys management using the ssh package
+	// directly, so this test works without a running broker.
+	keyDir, err := os.MkdirTemp("", "oidc-pam-ssh-keys-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp key dir: %w", err)
+	}
+	defer os.RemoveAll(keyDir)
+
+	homeDir, err := os.MkdirTemp("", "oidc-pam-home-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp home dir: %w", err)
+	}
+	defer os.RemoveAll(homeDir)
+
+	km := sshpkg.NewKeyManager(keyDir)
+	km.SetKeySize(2048) // small key for speed
+
+	akm := sshpkg.NewAuthorizedKeysManager(homeDir)
+
+	username := "integration-test-user"
+	sessionID := "integration-test-session"
+
+	// Generate a key.
+	sshKey, err := km.GenerateKey(username)
+	if err != nil {
+		return fmt.Errorf("GenerateKey failed: %w", err)
+	}
+	if len(sshKey.PublicKey) == 0 {
+		return fmt.Errorf("generated public key is empty")
+	}
+
+	// Save the key using the session ID as the storage key.
+	if err := km.SaveKey(sessionID, sshKey); err != nil {
+		return fmt.Errorf("SaveKey failed: %w", err)
+	}
+
+	// Add to authorized_keys.
+	if err := akm.AddPublicKey(username, sshKey.PublicKey); err != nil {
+		return fmt.Errorf("AddPublicKey failed: %w", err)
+	}
+
+	// Load the key back and verify.
+	loaded, err := km.LoadKey(sessionID)
+	if err != nil {
+		return fmt.Errorf("LoadKey failed: %w", err)
+	}
+	if string(loaded.PublicKey) != string(sshKey.PublicKey) {
+		return fmt.Errorf("loaded public key does not match generated key")
+	}
+
+	// Verify the key appears in authorized_keys.
+	akPath := filepath.Join(homeDir, username, ".ssh", "authorized_keys")
+	akData, err := os.ReadFile(akPath)
+	if err != nil {
+		return fmt.Errorf("failed to read authorized_keys: %w", err)
+	}
+	pubKeyStr := strings.TrimSpace(string(sshKey.PublicKey))
+	if !strings.Contains(string(akData), pubKeyStr) {
+		return fmt.Errorf("public key not found in authorized_keys")
+	}
+
+	// Remove the public key.
+	if err := akm.RemovePublicKey(username, sshKey.PublicKey); err != nil {
+		return fmt.Errorf("RemovePublicKey failed: %w", err)
+	}
+
+	// Verify removal.
+	akData, err = os.ReadFile(akPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read authorized_keys after removal: %w", err)
+	}
+	if err == nil && strings.Contains(string(akData), pubKeyStr) {
+		return fmt.Errorf("public key still present in authorized_keys after removal")
+	}
+
+	// Delete the key files.
+	if err := km.DeleteKey(sessionID); err != nil {
+		return fmt.Errorf("DeleteKey failed: %w", err)
+	}
+
+	// Verify deletion.
+	if _, err := km.LoadKey(sessionID); err == nil {
+		return fmt.Errorf("expected key files to be deleted")
+	}
+
+	log.Println("SSH key generation test passed")
 	return nil
 }
 
