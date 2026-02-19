@@ -21,13 +21,23 @@ type AuthRequest struct {
 	Metadata   map[string]string `json:"metadata"`
 }
 
-// AuthResponse represents an authentication response
+// AuthResponse represents an authentication response from the broker.
+// The JSON field names mirror the IPC server Response struct.
 type AuthResponse struct {
-	Success        bool   `json:"success"`
-	RequiresDevice bool   `json:"requires_device,omitempty"`
-	Instructions   string `json:"instructions,omitempty"`
-	ErrorMessage   string `json:"error,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
+	Success          bool     `json:"success"`
+	UserID           string   `json:"user_id,omitempty"`
+	Email            string   `json:"email,omitempty"`
+	Groups           []string `json:"groups,omitempty"`
+	SessionID        string   `json:"session_id,omitempty"`
+	DeviceCode       string   `json:"device_code,omitempty"` // user-visible code to enter at DeviceURL
+	DeviceURL        string   `json:"device_url,omitempty"`  // URL the user must visit to complete auth
+	SSHPublicKey     string   `json:"ssh_public_key,omitempty"`
+	RequiresDevice   bool     `json:"requires_device,omitempty"`
+	RequiresApproval bool     `json:"requires_approval,omitempty"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ErrorMessage     string   `json:"error_message,omitempty"`
+	Instructions     string   `json:"instructions,omitempty"`
+	RiskScore        int      `json:"risk_score,omitempty"`
 }
 
 // ConnectToBroker connects to the authentication broker

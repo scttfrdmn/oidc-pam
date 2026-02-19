@@ -174,6 +174,174 @@ func TestAuthResponse(t *testing.T) {
 	}
 }
 
+// TestParseBrokerResponse tests the JSON response parser.
+func TestParseBrokerResponse(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantErr   bool
+		checkResp func(t *testing.T, r *AuthResponse)
+	}{
+		{
+			name:    "empty string",
+			input:   "",
+			wantErr: true,
+		},
+		{
+			name:    "invalid JSON",
+			input:   "not-json",
+			wantErr: true,
+		},
+		{
+			name:  "simple success",
+			input: `{"success":true}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if !r.Success {
+					t.Error("Expected Success=true")
+				}
+			},
+		},
+		{
+			name:  "full success response",
+			input: `{"success":true,"user_id":"alice","email":"alice@example.com","session_id":"sess-123","instructions":"Welcome"}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if !r.Success {
+					t.Error("Expected Success=true")
+				}
+				if r.UserID != "alice" {
+					t.Errorf("Expected UserID=alice, got %q", r.UserID)
+				}
+				if r.Email != "alice@example.com" {
+					t.Errorf("Expected Email=alice@example.com, got %q", r.Email)
+				}
+				if r.SessionID != "sess-123" {
+					t.Errorf("Expected SessionID=sess-123, got %q", r.SessionID)
+				}
+				if r.Instructions != "Welcome" {
+					t.Errorf("Expected Instructions=Welcome, got %q", r.Instructions)
+				}
+			},
+		},
+		{
+			name:  "device flow response",
+			input: `{"success":true,"requires_device":true,"device_code":"ABCD-1234","device_url":"https://example.com/activate","session_id":"sess-456"}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if !r.RequiresDevice {
+					t.Error("Expected RequiresDevice=true")
+				}
+				if r.DeviceCode != "ABCD-1234" {
+					t.Errorf("Expected DeviceCode=ABCD-1234, got %q", r.DeviceCode)
+				}
+				if r.DeviceURL != "https://example.com/activate" {
+					t.Errorf("Expected DeviceURL, got %q", r.DeviceURL)
+				}
+			},
+		},
+		{
+			name:  "failure with error_message and error_code",
+			input: `{"success":false,"error_message":"Access denied by policy","error_code":"POLICY_DENIED"}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if r.Success {
+					t.Error("Expected Success=false")
+				}
+				if r.ErrorMessage != "Access denied by policy" {
+					t.Errorf("Expected ErrorMessage, got %q", r.ErrorMessage)
+				}
+				if r.ErrorCode != "POLICY_DENIED" {
+					t.Errorf("Expected ErrorCode=POLICY_DENIED, got %q", r.ErrorCode)
+				}
+			},
+		},
+		{
+			name:  "rate limit response",
+			input: `{"success":false,"error_code":"RATE_LIMIT_EXCEEDED","error_message":"Too many requests"}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if r.ErrorCode != "RATE_LIMIT_EXCEEDED" {
+					t.Errorf("Expected RATE_LIMIT_EXCEEDED, got %q", r.ErrorCode)
+				}
+			},
+		},
+		{
+			name:  "risk score included",
+			input: `{"success":true,"risk_score":42}`,
+			checkResp: func(t *testing.T, r *AuthResponse) {
+				if r.RiskScore != 42 {
+					t.Errorf("Expected RiskScore=42, got %d", r.RiskScore)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := ParseBrokerResponse(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseBrokerResponse() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && tt.checkResp != nil {
+				tt.checkResp(t, resp)
+			}
+		})
+	}
+}
+
+// TestErrorCodeToPAMResult verifies the mapping of broker error codes to PAM
+// result codes.
+func TestErrorCodeToPAMResult(t *testing.T) {
+	tests := []struct {
+		errorCode string
+		want      PAMResultCode
+	}{
+		{"RATE_LIMIT_EXCEEDED", PAMMaxTries},
+		{"TOO_MANY_CONCURRENT_AUTHS", PAMMaxTries},
+		{"TOO_MANY_SESSIONS", PAMPermDenied},
+		{"POLICY_DENIED", PAMPermDenied},
+		{"NO_PROVIDER", PAMPermDenied},
+		{"SESSION_EXPIRED", PAMAuthError},
+		{"SESSION_NOT_FOUND", PAMAuthError},
+		{"REFRESH_FAILED", PAMAuthError},
+		{"", PAMAuthError},
+		{"UNKNOWN_CODE", PAMAuthError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.errorCode, func(t *testing.T) {
+			got := errorCodeToPAMResult(tt.errorCode)
+			if got != tt.want {
+				t.Errorf("errorCodeToPAMResult(%q) = %d, want %d", tt.errorCode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPAMAuthFailureError checks that PAMAuthFailure implements the error
+// interface and carries the expected code.
+func TestPAMAuthFailureError(t *testing.T) {
+	f := &PAMAuthFailure{Code: PAMPermDenied, Message: "access denied"}
+	if f.Error() != "access denied" {
+		t.Errorf("Expected 'access denied', got %q", f.Error())
+	}
+	if f.Code != PAMPermDenied {
+		t.Errorf("Expected PAMPermDenied, got %d", f.Code)
+	}
+
+	// Verify it satisfies the error interface
+	var _ error = f
+}
+
+// TestPAMAuthFailureCodesAreDistinct checks that the PAM result code constants
+// are not accidentally aliased.
+func TestPAMAuthFailureCodesAreDistinct(t *testing.T) {
+	codes := []PAMResultCode{PAMSuccess, PAMSystemError, PAMPermDenied, PAMAuthError, PAMMaxTries}
+	seen := make(map[PAMResultCode]bool)
+	for _, c := range codes {
+		if seen[c] {
+			t.Errorf("Duplicate PAM result code value: %d", c)
+		}
+		seen[c] = true
+	}
+}
+
 // Helper function to check if string contains substring
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr ||
