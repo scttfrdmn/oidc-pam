@@ -13,8 +13,9 @@ import (
 
 // PolicyEngine evaluates authentication policies
 type PolicyEngine struct {
-	config  *config.Config
-	geoipDB *geoip2.Reader
+	config          *config.Config
+	geoipDB         *geoip2.Reader
+	locationHistory *LocationHistory
 }
 
 // PolicyResult represents the result of policy evaluation
@@ -42,7 +43,24 @@ func NewPolicyEngine(cfg *config.Config) (*PolicyEngine, error) {
 		log.Info().Str("path", cfg.Authentication.GeoIPDatabasePath).Msg("GeoIP database loaded")
 	}
 
+	if cfg != nil {
+		pe.locationHistory = NewLocationHistory(cfg.Authentication.LocationHistory)
+	} else {
+		pe.locationHistory = NewLocationHistory(config.LocationHistoryConfig{})
+	}
+
 	return pe, nil
+}
+
+// RecordLocation records a successful login from sourceIP for userID so that
+// future logins from the same /24 subnet or country are not flagged as unusual.
+// Call this after authentication succeeds.
+func (pe *PolicyEngine) RecordLocation(userID, sourceIP string) {
+	if pe.locationHistory == nil {
+		return
+	}
+	country := pe.getCountryFromIP(sourceIP)
+	pe.locationHistory.RecordLocation(userID, sourceIP, country)
 }
 
 // Close releases resources held by the policy engine (e.g. the GeoIP database).
@@ -476,7 +494,9 @@ func (pe *PolicyEngine) isAfterHours(now time.Time) bool {
 }
 
 func (pe *PolicyEngine) isUnusualLocation(userID, sourceIP string) bool {
-	// This would check against historical location data
-	// For now, return false
-	return false
+	if pe.locationHistory == nil {
+		return false
+	}
+	country := pe.getCountryFromIP(sourceIP)
+	return pe.locationHistory.IsUnusual(userID, sourceIP, country)
 }

@@ -647,6 +647,10 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 
 			b.setSession(session)
 
+			// Record the login location so future logins from the same
+			// /24 subnet or country are not flagged as unusual.
+			b.policyEngine.RecordLocation(session.UserID, session.SourceIP)
+
 			// Audit log
 			b.auditLogger.LogAuthEvent(security.AuditEvent{
 				EventType: "authentication_successful",

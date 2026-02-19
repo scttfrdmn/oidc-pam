@@ -81,6 +81,24 @@ type ResearchPolicies struct {
 	EnableDataUseAgreements       bool `mapstructure:"enable_data_use_agreements"`
 }
 
+// LocationHistoryConfig controls how per-user login location history is stored
+// for the "unusual location" risk-score signal.
+type LocationHistoryConfig struct {
+	// HistoryWindow is how far back recorded locations are considered "known".
+	// Entries older than this are ignored during checks and pruned on write.
+	// Defaults to 90 days when zero.
+	HistoryWindow time.Duration `mapstructure:"history_window"`
+
+	// MaxLocationsPerUser caps the number of location entries kept per user.
+	// When the cap is hit the oldest entry is evicted.  Defaults to 10.
+	MaxLocationsPerUser int `mapstructure:"max_locations_per_user"`
+
+	// PersistPath is an optional file path where the location history is
+	// saved as JSON so it survives broker restarts.  Leave empty to use
+	// an in-memory-only store.
+	PersistPath string `mapstructure:"persist_path"`
+}
+
 // AuthenticationConfig contains authentication policies
 type AuthenticationConfig struct {
 	TokenLifetime         time.Duration                   `mapstructure:"token_lifetime"`
@@ -92,6 +110,7 @@ type AuthenticationConfig struct {
 	TimeBasedPolicies     TimeBasedPolicies               `mapstructure:"time_based_policies"`
 	RiskPolicies          []RiskPolicy                    `mapstructure:"risk_policies"`
 	GeoIPDatabasePath     string                          `mapstructure:"geoip_database_path"`
+	LocationHistory       LocationHistoryConfig           `mapstructure:"location_history"`
 }
 
 // AuthenticationPolicy defines access control policies
