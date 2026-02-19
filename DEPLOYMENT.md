@@ -877,4 +877,59 @@ echo "Audit report generated: $REPORT_FILE"
 
 ---
 
+## GeoIP Database Setup
+
+Geographic access restrictions (`geo_restrictions` in the configuration) require a MaxMind GeoLite2 Country database. Without a database, the policy engine cannot resolve country codes, and any `allowed_countries` restriction will deny all access.
+
+### Obtaining the Database
+
+1. Register for a free MaxMind account at <https://www.maxmind.com/en/geolite2/signup>
+2. Generate a license key in your account portal
+3. Download the **GeoLite2-Country** database in `.mmdb` format:
+
+   ```bash
+   # Using the official geoipupdate tool (recommended for automatic updates)
+   sudo apt-get install geoipupdate          # Debian/Ubuntu
+   sudo dnf install geoipupdate             # RHEL/Fedora
+
+   # Configure /etc/GeoIP.conf:
+   # AccountID  <your-account-id>
+   # LicenseKey <your-license-key>
+   # EditionIDs GeoLite2-Country
+
+   sudo geoipupdate
+   # Database is written to /usr/share/GeoIP/GeoLite2-Country.mmdb
+   ```
+
+   Or download manually:
+
+   ```bash
+   curl -o GeoLite2-Country.mmdb.tar.gz \
+     "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=YOUR_KEY&suffix=tar.gz"
+   tar -xzf GeoLite2-Country.mmdb.tar.gz --strip-components=1 --wildcards '*.mmdb'
+   sudo install -m 644 GeoLite2-Country.mmdb /usr/share/GeoIP/GeoLite2-Country.mmdb
+   ```
+
+### Configuration
+
+Set `geoip_database_path` in the `authentication` section of your configuration file:
+
+```yaml
+authentication:
+  geoip_database_path: /usr/share/GeoIP/GeoLite2-Country.mmdb
+  time_based_policies:
+    geo_restrictions:
+      - allowed_countries: [US, CA, GB]
+```
+
+The broker will fail to start if the path is set but the file cannot be opened.
+
+### Notes
+
+- The GeoLite2 database is updated monthly by MaxMind. Set up `geoipupdate` as a cron job or systemd timer to keep it current.
+- Private, loopback, and link-local addresses always return an empty country code and are unaffected by geo restrictions.
+- If `geoip_database_path` is not set, `getCountryFromIP` returns `""`. Any `allowed_countries` restriction will then block access, so **do not configure geo restrictions without also setting a database path**.
+
+---
+
 This deployment guide provides comprehensive instructions for production deployment of the OIDC PAM authentication system. Always test thoroughly in a non-production environment before deploying to production.
