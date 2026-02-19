@@ -1,12 +1,17 @@
 package security
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/syslog"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,12 +76,20 @@ type FileAuditOutput struct {
 // SyslogAuditOutput writes audit events to syslog
 type SyslogAuditOutput struct {
 	config config.AuditOutput
+	writer *syslog.Writer
 }
 
 // HTTPAuditOutput writes audit events to an HTTP endpoint
 type HTTPAuditOutput struct {
-	config config.AuditOutput
+	config     config.AuditOutput
+	httpClient *http.Client
 }
+
+const (
+	httpAuditMaxRetries = 3
+	httpAuditRetryDelay = time.Second
+	httpAuditTimeout    = 10 * time.Second
+)
 
 // NewAuditLogger creates a new audit logger
 func NewAuditLogger(cfg config.AuditConfig) (*AuditLogger, error) {
@@ -288,61 +301,184 @@ func (sao *StdoutAuditOutput) Close() error {
 
 // SyslogAuditOutput implementation
 
-func NewSyslogAuditOutput(config config.AuditOutput) (*SyslogAuditOutput, error) {
-	// This would implement syslog output
-	// For now, return a placeholder
-	return &SyslogAuditOutput{
-		config: config,
-	}, nil
+func NewSyslogAuditOutput(cfg config.AuditOutput) (*SyslogAuditOutput, error) {
+	priority := parseSyslogPriority(cfg.Facility, cfg.Severity)
+	writer, err := syslog.New(priority, "oidc-pam")
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to syslog: %w", err)
+	}
+	return &SyslogAuditOutput{config: cfg, writer: writer}, nil
 }
 
 func (sao *SyslogAuditOutput) Write(event AuditEvent) error {
-	// This would write to syslog
-	// For now, just log to stderr
 	data, err := json.Marshal(event)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal audit event: %w", err)
 	}
+	msg := string(data)
 
-	log.Info().
-		Str("facility", sao.config.Facility).
-		Str("severity", sao.config.Severity).
-		RawJSON("event", data).
-		Msg("Syslog audit event")
-
-	return nil
+	switch strings.ToUpper(sao.config.Severity) {
+	case "EMERG", "EMERGENCY":
+		return sao.writer.Emerg(msg)
+	case "ALERT":
+		return sao.writer.Alert(msg)
+	case "CRIT", "CRITICAL":
+		return sao.writer.Crit(msg)
+	case "ERR", "ERROR":
+		return sao.writer.Err(msg)
+	case "WARNING", "WARN":
+		return sao.writer.Warning(msg)
+	case "NOTICE":
+		return sao.writer.Notice(msg)
+	case "DEBUG":
+		return sao.writer.Debug(msg)
+	default: // INFO
+		return sao.writer.Info(msg)
+	}
 }
 
 func (sao *SyslogAuditOutput) Close() error {
-	return nil
+	return sao.writer.Close()
+}
+
+// parseSyslogPriority maps facility/severity strings to a syslog.Priority value.
+func parseSyslogPriority(facility, severity string) syslog.Priority {
+	return parseSyslogFacility(facility) | parseSyslogSeverity(severity)
+}
+
+func parseSyslogFacility(facility string) syslog.Priority {
+	switch strings.ToUpper(facility) {
+	case "KERN":
+		return syslog.LOG_KERN
+	case "USER":
+		return syslog.LOG_USER
+	case "MAIL":
+		return syslog.LOG_MAIL
+	case "DAEMON":
+		return syslog.LOG_DAEMON
+	case "AUTH", "SECURITY":
+		return syslog.LOG_AUTH
+	case "SYSLOG":
+		return syslog.LOG_SYSLOG
+	case "LPR":
+		return syslog.LOG_LPR
+	case "NEWS":
+		return syslog.LOG_NEWS
+	case "UUCP":
+		return syslog.LOG_UUCP
+	case "CRON":
+		return syslog.LOG_CRON
+	case "AUTHPRIV":
+		return syslog.LOG_AUTHPRIV
+	case "FTP":
+		return syslog.LOG_FTP
+	case "LOCAL0":
+		return syslog.LOG_LOCAL0
+	case "LOCAL1":
+		return syslog.LOG_LOCAL1
+	case "LOCAL2":
+		return syslog.LOG_LOCAL2
+	case "LOCAL3":
+		return syslog.LOG_LOCAL3
+	case "LOCAL4":
+		return syslog.LOG_LOCAL4
+	case "LOCAL5":
+		return syslog.LOG_LOCAL5
+	case "LOCAL6":
+		return syslog.LOG_LOCAL6
+	case "LOCAL7":
+		return syslog.LOG_LOCAL7
+	default:
+		return syslog.LOG_AUTHPRIV // sensible default for auth-related events
+	}
+}
+
+func parseSyslogSeverity(severity string) syslog.Priority {
+	switch strings.ToUpper(severity) {
+	case "EMERG", "EMERGENCY":
+		return syslog.LOG_EMERG
+	case "ALERT":
+		return syslog.LOG_ALERT
+	case "CRIT", "CRITICAL":
+		return syslog.LOG_CRIT
+	case "ERR", "ERROR":
+		return syslog.LOG_ERR
+	case "WARNING", "WARN":
+		return syslog.LOG_WARNING
+	case "NOTICE":
+		return syslog.LOG_NOTICE
+	case "DEBUG":
+		return syslog.LOG_DEBUG
+	default: // INFO
+		return syslog.LOG_INFO
+	}
 }
 
 // HTTPAuditOutput implementation
 
-func NewHTTPAuditOutput(config config.AuditOutput) (*HTTPAuditOutput, error) {
-	// This would implement HTTP output
-	// For now, return a placeholder
+func NewHTTPAuditOutput(cfg config.AuditOutput) (*HTTPAuditOutput, error) {
+	if cfg.URL == "" {
+		return nil, fmt.Errorf("HTTP audit output requires a non-empty URL")
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
 	return &HTTPAuditOutput{
-		config: config,
+		config: cfg,
+		httpClient: &http.Client{
+			Transport: transport,
+			Timeout:   httpAuditTimeout,
+		},
 	}, nil
 }
 
 func (hao *HTTPAuditOutput) Write(event AuditEvent) error {
-	// This would POST to an HTTP endpoint
-	// For now, just log
 	data, err := json.Marshal(event)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal audit event: %w", err)
 	}
 
-	log.Info().
-		Str("url", hao.config.URL).
-		RawJSON("event", data).
-		Msg("HTTP audit event")
+	var lastErr error
+	for attempt := 0; attempt < httpAuditMaxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * httpAuditRetryDelay)
+		}
 
-	return nil
+		req, err := http.NewRequest(http.MethodPost, hao.config.URL, bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("failed to create HTTP audit request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hao.config.Headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := hao.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("HTTP audit POST failed: %w", err)
+			log.Warn().Err(lastErr).Int("attempt", attempt+1).Str("url", hao.config.URL).
+				Msg("Audit HTTP POST failed, retrying")
+			continue
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+
+		lastErr = fmt.Errorf("audit HTTP endpoint returned status %d", resp.StatusCode)
+		log.Warn().Err(lastErr).Int("attempt", attempt+1).Str("url", hao.config.URL).
+			Msg("Audit HTTP POST returned non-2xx, retrying")
+	}
+
+	return fmt.Errorf("audit HTTP POST failed after %d attempts: %w", httpAuditMaxRetries, lastErr)
 }
 
 func (hao *HTTPAuditOutput) Close() error {
+	hao.httpClient.CloseIdleConnections()
 	return nil
 }
