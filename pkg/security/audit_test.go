@@ -3,7 +3,10 @@ package security
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,19 +269,18 @@ func TestStdoutAuditOutput(t *testing.T) {
 
 func TestSyslogAuditOutput(t *testing.T) {
 	cfg := config.AuditOutput{
-		Type: "syslog",
+		Type:     "syslog",
+		Facility: "AUTHPRIV",
+		Severity: "INFO",
 	}
 
 	output, err := NewSyslogAuditOutput(cfg)
 	if err != nil {
-		t.Fatalf("Failed to create syslog audit output: %v", err)
+		// Syslog may not be available in all test environments (e.g. CI containers).
+		t.Skipf("Skipping syslog test: syslog not available: %v", err)
 	}
+	defer output.Close()
 
-	if output == nil {
-		t.Error("Expected non-nil syslog audit output")
-	}
-
-	// Test writing events
 	event := AuditEvent{
 		EventType:  "test_syslog",
 		UserID:     "user123",
@@ -288,22 +290,68 @@ func TestSyslogAuditOutput(t *testing.T) {
 		Timestamp:  time.Now(),
 	}
 
-	err = output.Write(event)
-	if err != nil {
+	if err := output.Write(event); err != nil {
 		t.Errorf("Failed to write to syslog: %v", err)
 	}
+}
 
-	// Test closing
-	err = output.Close()
-	if err != nil {
-		t.Errorf("Failed to close syslog output: %v", err)
+func TestSyslogPriorityParsing(t *testing.T) {
+	tests := []struct {
+		facility string
+		severity string
+	}{
+		{"AUTHPRIV", "INFO"},
+		{"AUTH", "WARNING"},
+		{"DAEMON", "ERR"},
+		{"LOCAL0", "DEBUG"},
+		{"LOCAL7", "NOTICE"},
+		{"", ""},       // defaults
+		{"INVALID", "INVALID"}, // unknown → defaults
+	}
+
+	for _, tt := range tests {
+		// Just verify it doesn't panic and returns a valid priority.
+		p := parseSyslogPriority(tt.facility, tt.severity)
+		if p < 0 {
+			t.Errorf("parseSyslogPriority(%q, %q) returned negative priority", tt.facility, tt.severity)
+		}
 	}
 }
 
 func TestHTTPAuditOutput(t *testing.T) {
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+
+		if r.Method != http.MethodPost {
+			t.Errorf("Expected POST, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Expected Content-Type application/json, got %s", ct)
+		}
+		if r.Header.Get("X-Test-Header") != "test-value" {
+			t.Errorf("Expected custom header to be set")
+		}
+
+		var event AuditEvent
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			t.Errorf("Failed to decode request body: %v", err)
+		}
+		if event.UserID != "user123" {
+			t.Errorf("Expected UserID 'user123', got %q", event.UserID)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
 	cfg := config.AuditOutput{
 		Type: "http",
-		URL:  "https://example.com/audit",
+		URL:  server.URL + "/audit",
+		Headers: map[string]string{
+			"X-Test-Header": "test-value",
+		},
 	}
 
 	output, err := NewHTTPAuditOutput(cfg)
@@ -311,11 +359,6 @@ func TestHTTPAuditOutput(t *testing.T) {
 		t.Fatalf("Failed to create HTTP audit output: %v", err)
 	}
 
-	if output == nil {
-		t.Error("Expected non-nil HTTP audit output")
-	}
-
-	// Test writing events (will fail due to invalid URL, but tests the method)
 	event := AuditEvent{
 		EventType:  "test_http",
 		UserID:     "user123",
@@ -325,60 +368,110 @@ func TestHTTPAuditOutput(t *testing.T) {
 		Timestamp:  time.Now(),
 	}
 
-	err = output.Write(event)
-	// This may fail due to network issues, but that's expected in tests
-	if err != nil {
-		t.Logf("HTTP write failed as expected: %v", err)
+	if err := output.Write(event); err != nil {
+		t.Errorf("Unexpected error writing to HTTP audit output: %v", err)
 	}
 
-	// Test closing
-	err = output.Close()
-	if err != nil {
+	if requestCount.Load() != 1 {
+		t.Errorf("Expected 1 HTTP request, got %d", requestCount.Load())
+	}
+
+	if err := output.Close(); err != nil {
 		t.Errorf("Failed to close HTTP output: %v", err)
 	}
 }
 
+func TestHTTPAuditOutputRetries(t *testing.T) {
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requestCount.Add(1)
+		if n < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := config.AuditOutput{
+		Type: "http",
+		URL:  server.URL + "/audit",
+	}
+
+	output, err := NewHTTPAuditOutput(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create HTTP audit output: %v", err)
+	}
+
+	// Override the retry delay to zero so the test is fast.
+	// We do this by temporarily patching httpAuditRetryDelay — we can't change the
+	// constant, so instead we test that the output succeeds on the 3rd attempt
+	// by using a real server that fails the first two requests.
+	event := AuditEvent{EventType: "retry_test", UserID: "u1", Success: true, Timestamp: time.Now()}
+
+	// With default retry delay this would take 3s+; we accept the latency in
+	// this test since it exercises real retry behaviour. Skip in short mode.
+	if testing.Short() {
+		t.Skip("skipping retry test in short mode")
+	}
+
+	if err := output.Write(event); err != nil {
+		t.Errorf("Expected success on 3rd attempt, got error: %v", err)
+	}
+	if requestCount.Load() != 3 {
+		t.Errorf("Expected 3 HTTP requests (2 failures + 1 success), got %d", requestCount.Load())
+	}
+}
+
+func TestHTTPAuditOutputEmptyURL(t *testing.T) {
+	_, err := NewHTTPAuditOutput(config.AuditOutput{Type: "http", URL: ""})
+	if err == nil {
+		t.Error("Expected error for empty URL, got nil")
+	}
+}
+
 func TestAuditOutputCreation(t *testing.T) {
-	// Test creating different audit output types
+	// httptest server to back the HTTP output creation check.
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer httpServer.Close()
+
 	testCases := []struct {
-		config      config.AuditOutput
-		expectError bool
-		outputType  string
+		config        config.AuditOutput
+		expectError   bool
+		skipIfNoSyslog bool
+		outputType    string
 	}{
 		{
-			config: config.AuditOutput{
-				Type: "file",
-				Path: "/tmp/test-audit.log",
-			},
+			config:      config.AuditOutput{Type: "file", Path: "/tmp/test-audit.log"},
 			expectError: false,
 			outputType:  "file",
 		},
 		{
-			config: config.AuditOutput{
-				Type: "stdout",
-			},
+			config:      config.AuditOutput{Type: "stdout"},
 			expectError: false,
 			outputType:  "stdout",
 		},
 		{
-			config: config.AuditOutput{
-				Type: "syslog",
-			},
-			expectError: false,
-			outputType:  "syslog",
+			config:         config.AuditOutput{Type: "syslog", Facility: "AUTHPRIV", Severity: "INFO"},
+			expectError:    false,
+			skipIfNoSyslog: true,
+			outputType:     "syslog",
 		},
 		{
-			config: config.AuditOutput{
-				Type: "http",
-				URL:  "https://example.com/audit",
-			},
+			config:      config.AuditOutput{Type: "http", URL: httpServer.URL + "/audit"},
 			expectError: false,
 			outputType:  "http",
 		},
 		{
-			config: config.AuditOutput{
-				Type: "unknown",
-			},
+			config:      config.AuditOutput{Type: "http", URL: ""},
+			expectError: true,
+			outputType:  "http_empty_url",
+		},
+		{
+			config:      config.AuditOutput{Type: "unknown"},
 			expectError: true,
 			outputType:  "unknown",
 		},
@@ -395,6 +488,9 @@ func TestAuditOutputCreation(t *testing.T) {
 				output, err = NewStdoutAuditOutput(tc.config)
 			case "syslog":
 				output, err = NewSyslogAuditOutput(tc.config)
+				if err != nil && tc.skipIfNoSyslog {
+					t.Skipf("syslog not available: %v", err)
+				}
 			case "http":
 				output, err = NewHTTPAuditOutput(tc.config)
 			default:
