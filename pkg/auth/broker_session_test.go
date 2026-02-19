@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/oauth2"
+
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 	"github.com/scttfrdmn/oidc-pam/pkg/security"
 )
@@ -397,6 +399,162 @@ func TestAuthenticateTooManySessions(t *testing.T) {
 	}
 	if resp.ErrorCode != "TOO_MANY_SESSIONS" {
 		t.Fatalf("Expected TOO_MANY_SESSIONS error code, got %q", resp.ErrorCode)
+	}
+}
+
+func TestBrokerRefreshSessionSuccess(t *testing.T) {
+	// Mock token endpoint returns a new access token and refresh token.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TokenResponse{
+			AccessToken:  "refreshed-access-token",
+			TokenType:    "Bearer",
+			ExpiresIn:    3600,
+			RefreshToken: "refreshed-refresh-token",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := &OIDCProvider{
+		Name: "test-provider",
+		Config: config.OIDCProvider{
+			ClientID: "test-client",
+			Scopes:   []string{"openid", "profile"},
+		},
+		OAuth2Config: &oauth2.Config{
+			Endpoint: oauth2.Endpoint{
+				TokenURL: server.URL + "/token",
+			},
+		},
+		httpClient: server.Client(),
+	}
+
+	auditLogger, err := security.NewAuditLogger(config.AuditConfig{Enabled: false})
+	if err != nil {
+		t.Fatalf("Failed to create audit logger: %v", err)
+	}
+
+	broker := &Broker{
+		config: &config.Config{
+			Authentication: config.AuthenticationConfig{
+				TokenLifetime:    time.Hour,
+				RefreshThreshold: 15 * time.Minute,
+			},
+		},
+		sessions:     make(map[string]*Session),
+		sessionMutex: sync.RWMutex{},
+		providers:    map[string]*OIDCProvider{"test-provider": provider},
+		auditLogger:  auditLogger,
+	}
+
+	// Session is within the refresh threshold (expires in 5 minutes < 15 minute threshold)
+	session := &Session{
+		ID:               "refresh-test",
+		UserID:           "test-user",
+		Email:            "user@example.com",
+		Provider:         "test-provider",
+		IsActive:         true,
+		TokenFingerprint: "old-fingerprint",
+		RefreshToken:     "old-refresh-token",
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+		LastAccessed:     time.Now(),
+	}
+	broker.setSession(session)
+
+	resp, err := broker.RefreshSession("refresh-test")
+	if err != nil {
+		t.Fatalf("RefreshSession returned unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("Expected success, got error %q: %s", resp.ErrorCode, resp.ErrorMessage)
+	}
+
+	// Verify the session was updated
+	updated := broker.getSession("refresh-test")
+	if updated == nil {
+		t.Fatal("Session was removed after refresh")
+	}
+	if updated.TokenFingerprint == "old-fingerprint" {
+		t.Error("Expected token fingerprint to be updated after refresh")
+	}
+	if updated.RefreshToken != "refreshed-refresh-token" {
+		t.Errorf("Expected refresh token to be updated, got %q", updated.RefreshToken)
+	}
+}
+
+func TestBrokerRefreshSessionNoRefreshToken(t *testing.T) {
+	auditLogger, err := security.NewAuditLogger(config.AuditConfig{Enabled: false})
+	if err != nil {
+		t.Fatalf("Failed to create audit logger: %v", err)
+	}
+
+	broker := &Broker{
+		config: &config.Config{
+			Authentication: config.AuthenticationConfig{
+				TokenLifetime:    time.Hour,
+				RefreshThreshold: 15 * time.Minute,
+			},
+		},
+		sessions:     make(map[string]*Session),
+		sessionMutex: sync.RWMutex{},
+		providers:    map[string]*OIDCProvider{"test-provider": {}},
+		auditLogger:  auditLogger,
+	}
+
+	// Session without a refresh token
+	session := &Session{
+		ID:           "no-refresh-token-session",
+		UserID:       "test-user",
+		Provider:     "test-provider",
+		IsActive:     true,
+		RefreshToken: "", // no refresh token
+		ExpiresAt:    time.Now().Add(5 * time.Minute),
+	}
+	broker.setSession(session)
+
+	resp, err := broker.RefreshSession("no-refresh-token-session")
+	if err != nil {
+		t.Fatalf("RefreshSession returned unexpected error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("Expected failure when no refresh token is available")
+	}
+	if resp.ErrorCode != "NO_REFRESH_TOKEN" {
+		t.Errorf("Expected NO_REFRESH_TOKEN error code, got %q", resp.ErrorCode)
+	}
+}
+
+func TestBrokerRefreshSessionNotCloseToExpiry(t *testing.T) {
+	// Session not yet within the refresh threshold — RefreshSession should return success
+	// without hitting the token endpoint.
+	broker := &Broker{
+		config: &config.Config{
+			Authentication: config.AuthenticationConfig{
+				TokenLifetime:    time.Hour,
+				RefreshThreshold: 15 * time.Minute,
+			},
+		},
+		sessions:     make(map[string]*Session),
+		sessionMutex: sync.RWMutex{},
+		providers:    map[string]*OIDCProvider{},
+	}
+
+	session := &Session{
+		ID:           "fresh-session",
+		UserID:       "test-user",
+		IsActive:     true,
+		RefreshToken: "some-token",
+		ExpiresAt:    time.Now().Add(30 * time.Minute), // well outside threshold
+	}
+	broker.setSession(session)
+
+	resp, err := broker.RefreshSession("fresh-session")
+	if err != nil {
+		t.Fatalf("RefreshSession returned unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected success for session not yet needing refresh, got %q", resp.ErrorCode)
 	}
 }
 

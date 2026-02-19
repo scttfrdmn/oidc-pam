@@ -42,6 +42,7 @@ type Session struct {
 	SourceIP         string
 	UserAgent        string
 	TokenFingerprint string
+	RefreshToken     string // OAuth2 refresh token for session renewal
 	SSHKeyID         string
 	SSHPublicKey     string
 	IsActive         bool
@@ -426,7 +427,18 @@ func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
 		}, nil
 	}
 
-	newToken, err := provider.RefreshToken(session.TokenFingerprint)
+	if session.RefreshToken == "" {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "NO_REFRESH_TOKEN",
+			ErrorMessage: "No refresh token available for this session",
+		}, nil
+	}
+
+	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer refreshCancel()
+
+	newToken, err := provider.RefreshToken(refreshCtx, session.RefreshToken)
 	if err != nil {
 		b.auditLogger.LogAuthEvent(security.AuditEvent{
 			EventType:    "token_refresh_failed",
@@ -444,12 +456,21 @@ func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
 		}, nil
 	}
 
-	// Update session
+	// Update session with new token data
 	session.TokenFingerprint = newToken.Fingerprint
+	session.RefreshToken = newToken.RefreshToken
 	session.ExpiresAt = time.Now().Add(b.config.Authentication.TokenLifetime)
 	session.LastAccessed = time.Now()
 
 	b.setSession(session)
+
+	b.auditLogger.LogAuthEvent(security.AuditEvent{
+		EventType: "token_refreshed",
+		UserID:    session.UserID,
+		SessionID: sessionID,
+		Success:   true,
+		Timestamp: time.Now(),
+	})
 
 	return b.createSuccessResponse(session), nil
 }
@@ -606,6 +627,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			session.Email = userInfo.Email
 			session.Groups = userInfo.Groups
 			session.TokenFingerprint = token.Fingerprint
+			session.RefreshToken = token.RefreshToken
 			session.IsActive = true
 			session.DeviceTrusted = userInfo.DeviceTrusted
 

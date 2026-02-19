@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 )
@@ -384,7 +387,7 @@ func TestRefreshTokenProviderMethod(t *testing.T) {
 		Claims:       make(map[string]interface{}),
 	}
 
-	newToken, err := provider.RefreshToken(mockToken.Fingerprint)
+	newToken, err := provider.RefreshToken(context.Background(), mockToken.Fingerprint)
 	if err != nil {
 		t.Logf("RefreshToken failed as expected: %v", err)
 	}
@@ -470,5 +473,141 @@ func TestDeviceFlowNoClientSecret(t *testing.T) {
 	}
 	if !contains(receivedBody, "client_id=test-client") {
 		t.Error("Request body must contain client_id")
+	}
+}
+
+// newRefreshProvider builds a minimal OIDCProvider pointed at the given token endpoint URL.
+func newRefreshProvider(tokenURL string, httpClient *http.Client) *OIDCProvider {
+	return &OIDCProvider{
+		Name: "test-provider",
+		Config: config.OIDCProvider{
+			ClientID: "test-client",
+			Scopes:   []string{"openid", "profile"},
+		},
+		OAuth2Config: &oauth2.Config{
+			Endpoint: oauth2.Endpoint{
+				TokenURL: tokenURL,
+			},
+		},
+		httpClient: httpClient,
+	}
+}
+
+func TestRefreshTokenSuccess(t *testing.T) {
+	var receivedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+
+		resp := TokenResponse{
+			AccessToken:  "new-access-token",
+			TokenType:    "Bearer",
+			ExpiresIn:    3600,
+			RefreshToken: "new-refresh-token",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := newRefreshProvider(server.URL+"/token", server.Client())
+
+	token, err := provider.RefreshToken(context.Background(), "original-refresh-token")
+	if err != nil {
+		t.Fatalf("RefreshToken failed: %v", err)
+	}
+	if token.AccessToken != "new-access-token" {
+		t.Errorf("Expected 'new-access-token', got %q", token.AccessToken)
+	}
+	if token.RefreshToken != "new-refresh-token" {
+		t.Errorf("Expected 'new-refresh-token', got %q", token.RefreshToken)
+	}
+	if token.Fingerprint == "" {
+		t.Error("Expected non-empty fingerprint")
+	}
+	if token.ExpiresAt.IsZero() {
+		t.Error("Expected non-zero ExpiresAt")
+	}
+
+	// Verify request parameters
+	params, err := url.ParseQuery(receivedBody)
+	if err != nil {
+		t.Fatalf("Failed to parse request body: %v", err)
+	}
+	if params.Get("grant_type") != "refresh_token" {
+		t.Errorf("Expected grant_type=refresh_token, got %q", params.Get("grant_type"))
+	}
+	if params.Get("refresh_token") != "original-refresh-token" {
+		t.Errorf("Expected refresh_token=original-refresh-token, got %q", params.Get("refresh_token"))
+	}
+	if params.Get("client_id") != "test-client" {
+		t.Errorf("Expected client_id=test-client, got %q", params.Get("client_id"))
+	}
+}
+
+func TestRefreshTokenPreservesOriginalWhenNoneReturned(t *testing.T) {
+	// RFC 6749 §6: if the provider doesn't issue a new refresh token, reuse the original.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TokenResponse{
+			AccessToken: "new-access-token",
+			TokenType:   "Bearer",
+			ExpiresIn:   3600,
+			// No RefreshToken in response
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := newRefreshProvider(server.URL+"/token", server.Client())
+
+	token, err := provider.RefreshToken(context.Background(), "original-refresh-token")
+	if err != nil {
+		t.Fatalf("RefreshToken failed: %v", err)
+	}
+	if token.RefreshToken != "original-refresh-token" {
+		t.Errorf("Expected original refresh token to be preserved, got %q", token.RefreshToken)
+	}
+}
+
+func TestRefreshTokenProviderError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := TokenResponse{
+			Error:            "invalid_grant",
+			ErrorDescription: "Refresh token expired or revoked",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := newRefreshProvider(server.URL+"/token", server.Client())
+
+	_, err := provider.RefreshToken(context.Background(), "expired-token")
+	if err == nil {
+		t.Fatal("Expected error for invalid_grant response")
+	}
+	if !contains(err.Error(), "invalid_grant") {
+		t.Errorf("Expected error to mention invalid_grant, got: %v", err)
+	}
+}
+
+func TestRefreshTokenEmptyString(t *testing.T) {
+	provider := newRefreshProvider("http://unused/token", http.DefaultClient)
+	_, err := provider.RefreshToken(context.Background(), "")
+	if err == nil {
+		t.Fatal("Expected error for empty refresh token")
+	}
+}
+
+func TestRefreshTokenNoProvider(t *testing.T) {
+	// Provider without OAuth2Config or Provider set — should return a clear error.
+	provider := &OIDCProvider{
+		Name:   "empty-provider",
+		Config: config.OIDCProvider{ClientID: "test-client"},
+	}
+	_, err := provider.RefreshToken(context.Background(), "some-token")
+	if err == nil {
+		t.Fatal("Expected error when no token endpoint is configured")
 	}
 }

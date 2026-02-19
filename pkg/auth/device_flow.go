@@ -317,11 +317,102 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 	return p.extractUserInfoFromClaims(userInfoClaims)
 }
 
-// RefreshToken refreshes an access token
-func (p *OIDCProvider) RefreshToken(tokenFingerprint string) (*Token, error) {
-	// In a real implementation, this would look up the refresh token
-	// associated with the fingerprint and use it to get a new access token
-	return nil, fmt.Errorf("token refresh not implemented")
+// RefreshToken exchanges a refresh token for a new access token (RFC 6749 §6).
+// If the provider does not return a new refresh token, the original is preserved.
+func (p *OIDCProvider) RefreshToken(ctx context.Context, refreshTokenStr string) (*Token, error) {
+	if refreshTokenStr == "" {
+		return nil, fmt.Errorf("refresh token is empty")
+	}
+
+	tokenEndpoint, err := p.tokenEndpointURL()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get token endpoint: %w", err)
+	}
+
+	// Build refresh request body
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", refreshTokenStr)
+	data.Set("client_id", p.Config.ClientID)
+	if len(p.Config.Scopes) > 0 {
+		data.Set("scope", strings.Join(p.Config.Scopes, " "))
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token refresh request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var tokenResp TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to decode token refresh response: %w", err)
+	}
+
+	if tokenResp.Error != "" {
+		return nil, fmt.Errorf("token refresh error: %s", tokenResp.Error)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("no access token in refresh response")
+	}
+
+	// Verify the new ID token if the provider included one
+	var claims map[string]interface{}
+	if tokenResp.IDToken != "" && p.Verifier != nil {
+		idToken, err := p.Verifier.Verify(ctx, tokenResp.IDToken)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify refreshed ID token: %w", err)
+		}
+		if err := idToken.Claims(&claims); err != nil {
+			return nil, fmt.Errorf("failed to parse refreshed ID token claims: %w", err)
+		}
+		if err := p.validateIDTokenClaims(claims); err != nil {
+			return nil, fmt.Errorf("refreshed ID token claim validation failed: %w", err)
+		}
+	}
+
+	// RFC 6749 §6: if the provider didn't issue a new refresh token, reuse the original.
+	newRefreshToken := tokenResp.RefreshToken
+	if newRefreshToken == "" {
+		newRefreshToken = refreshTokenStr
+	}
+
+	token := &Token{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: newRefreshToken,
+		IDToken:      tokenResp.IDToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		Fingerprint:  p.generateTokenFingerprint(tokenResp.AccessToken),
+		Claims:       claims,
+	}
+
+	log.Debug().
+		Str("provider", p.Name).
+		Time("expires_at", token.ExpiresAt).
+		Msg("Token refreshed successfully")
+
+	return token, nil
+}
+
+// tokenEndpointURL returns the OAuth2 token endpoint URL.
+// It prefers the URL from OAuth2Config (set during OIDC discovery) and falls
+// back to the live provider discovery if OAuth2Config is not populated.
+func (p *OIDCProvider) tokenEndpointURL() (string, error) {
+	if p.OAuth2Config != nil && p.OAuth2Config.Endpoint.TokenURL != "" {
+		return p.OAuth2Config.Endpoint.TokenURL, nil
+	}
+	if p.Provider != nil {
+		return p.Provider.Endpoint().TokenURL, nil
+	}
+	return "", fmt.Errorf("token endpoint not available: provider not initialized")
 }
 
 // validateIDTokenClaims performs post-verification claim validation
