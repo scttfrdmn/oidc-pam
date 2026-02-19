@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -93,9 +95,25 @@ type Token struct {
 
 // NewOIDCProvider creates a new OIDC provider
 func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfig) (*OIDCProvider, error) {
-	ctx := context.Background()
+	// Build the TLS config first so both the discovery request and all
+	// subsequent token/userinfo requests use the same TLS settings.
+	tlsConfig, err := buildTLSConfig(secCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build TLS config: %w", err)
+	}
 
-	// Create OIDC provider
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+
+	// Pass the configured HTTP client to the OIDC provider discovery so that
+	// the CA bundle, skip-verify flag, and certificate pins apply to the
+	// /.well-known/openid-configuration fetch as well.
+	ctx := oidc.ClientContext(context.Background(), httpClient)
+
 	provider, err := oidc.NewProvider(ctx, providerCfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
@@ -116,16 +134,6 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		RedirectURL: "", // Not used for device flow
 	}
 
-	// Create HTTP client with TLS 1.2 minimum and a sensible timeout.
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-	}
-
 	return &OIDCProvider{
 		Name:           providerCfg.Name,
 		Config:         providerCfg,
@@ -135,6 +143,59 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		httpClient:     httpClient,
 		securityConfig: secCfg,
 	}, nil
+}
+
+// buildTLSConfig constructs a *tls.Config from the security configuration.
+// It always enforces TLS 1.2 as the minimum version and optionally applies:
+//   - A custom CA bundle (TrustedCABundle) that replaces the system trust store
+//   - InsecureSkipVerify (SkipTLSVerify) with a loud warning log
+//   - Certificate pinning (PinnedCertificates) via VerifyPeerCertificate
+func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load custom CA bundle if specified.
+	if secCfg.TLSVerification.TrustedCABundle != "" {
+		caPEM, err := os.ReadFile(secCfg.TLSVerification.TrustedCABundle)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read trusted CA bundle %q: %w", secCfg.TLSVerification.TrustedCABundle, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("no valid PEM certificates found in CA bundle %q", secCfg.TLSVerification.TrustedCABundle)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	// Apply SkipTLSVerify — config.Validate() already blocks this outside dev
+	// mode, so this path is only reached during testing or with OIDC_AUTH_DEV.
+	if secCfg.TLSVerification.SkipTLSVerify {
+		log.Warn().Msg("TLS certificate verification is DISABLED — this is insecure and must only be used for testing")
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // intentional, gated by config.Validate
+	}
+
+	// Apply certificate pinning.
+	if len(secCfg.TLSVerification.PinnedCertificates) > 0 {
+		// Normalise pins: lowercase hex without colons so both "aabbcc..."
+		// and "aa:bb:cc:..." formats are accepted.
+		pins := make(map[string]bool, len(secCfg.TLSVerification.PinnedCertificates))
+		for _, pin := range secCfg.TLSVerification.PinnedCertificates {
+			pins[strings.ToLower(strings.ReplaceAll(pin, ":", ""))] = true
+		}
+
+		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			for _, raw := range rawCerts {
+				fp := fmt.Sprintf("%x", sha256.Sum256(raw))
+				if pins[fp] {
+					return nil
+				}
+			}
+			return fmt.Errorf("TLS certificate pinning: no certificate in the server chain matches a pinned fingerprint")
+		}
+	}
+
+	return tlsCfg, nil
 }
 
 // StartDeviceFlow initiates the OAuth2 device authorization flow

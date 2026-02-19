@@ -179,9 +179,19 @@ type SecurityConfig struct {
 
 // TLSVerification contains TLS verification settings
 type TLSVerification struct {
-	PinCertificates bool   `mapstructure:"pin_certificates"`
+	// PinnedCertificates is a list of SHA-256 fingerprints (lowercase hex,
+	// with or without colon separators) of certificates that must appear in
+	// the server's TLS chain. When non-empty, connections whose chain does
+	// not contain a matching certificate are rejected.
+	PinnedCertificates []string `mapstructure:"pinned_certificates"`
+	// TrustedCABundle is the path to a PEM file containing one or more CA
+	// certificates that replace the system trust store for OIDC provider
+	// connections. Leave empty to use the system store.
 	TrustedCABundle string `mapstructure:"trusted_ca_bundle"`
-	SkipTLSVerify   bool   `mapstructure:"skip_tls_verify"`
+	// SkipTLSVerify disables TLS certificate verification. This is insecure
+	// and is only permitted when the OIDC_AUTH_DEV environment variable is
+	// set. A loud warning is logged whenever this setting is active.
+	SkipTLSVerify bool `mapstructure:"skip_tls_verify"`
 }
 
 // RateLimiting contains rate limiting settings
