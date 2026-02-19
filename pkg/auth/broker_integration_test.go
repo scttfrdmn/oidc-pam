@@ -2,11 +2,14 @@ package auth
 
 import (
 	"context"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
 
 func TestBrokerInternalMethods(t *testing.T) {
@@ -301,45 +304,89 @@ func TestBrokerProviderSelection(t *testing.T) {
 }
 
 func TestBrokerSSHKeyMethods(t *testing.T) {
-	// Test SSH key methods without requiring full broker initialization
+	// Use real temp directories for key storage and home dirs.
+	keyDir := t.TempDir()
+	homeDir := t.TempDir()
 
-	// Create broker with minimal config
 	broker := &Broker{
 		config: &config.Config{
 			Security: config.SecurityConfig{
 				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
 			},
 		},
+		keyManager:            sshpkg.NewKeyManager(keyDir),
+		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
 	}
 
-	// Test SSH key generation with mock session
-	mockSession := &Session{
-		ID:               "test-session",
-		UserID:           "test-user",
-		Email:            "test@example.com",
+	// Use a short key size to keep the test fast.
+	broker.keyManager.SetKeySize(2048)
+
+	session := &Session{
+		ID:               "test-session-ssh",
+		UserID:           "test-user-ssh",
+		Email:            "ssh@example.com",
 		Groups:           []string{"users"},
 		Provider:         "test-provider",
 		DeviceID:         "test-device",
 		CreatedAt:        time.Now(),
 		ExpiresAt:        time.Now().Add(time.Hour),
 		LastAccessed:     time.Now(),
-		SourceIP:         "192.168.1.100",
+		SourceIP:         "192.168.1.1",
 		UserAgent:        "test-agent-ssh",
 		TokenFingerprint: "test-token-fp-ssh",
-		SSHKeyID:         "test-ssh-key-ssh",
 		IsActive:         true,
-		RiskScore:        20,
+		RiskScore:        0,
 	}
 
-	_, err := broker.generateSSHKey(mockSession)
+	// Generate an SSH key.
+	sshKey, err := broker.generateSSHKey(session)
 	if err != nil {
-		t.Logf("SSH key generation failed as expected: %v", err)
+		t.Fatalf("generateSSHKey failed: %v", err)
+	}
+	if sshKey == nil {
+		t.Fatal("Expected non-nil SSHKey")
+	}
+	if sshKey.PublicKey == "" {
+		t.Error("Expected non-empty public key")
+	}
+	if !strings.HasPrefix(sshKey.PublicKey, "ssh-rsa ") {
+		t.Errorf("Expected public key to start with 'ssh-rsa ', got: %.20s", sshKey.PublicKey)
+	}
+	if sshKey.ID != session.ID {
+		t.Errorf("Expected key ID %q, got %q", session.ID, sshKey.ID)
 	}
 
-	// Test SSH key revocation
-	err = broker.revokeSSHKey(mockSession)
+	// Verify the public key was written to authorized_keys.
+	akPath := homeDir + "/" + session.UserID + "/.ssh/authorized_keys"
+	akData, err := os.ReadFile(akPath)
 	if err != nil {
-		t.Logf("SSH key revocation failed as expected: %v", err)
+		t.Fatalf("Failed to read authorized_keys: %v", err)
+	}
+	if !strings.Contains(string(akData), strings.TrimSpace(sshKey.PublicKey)) {
+		t.Error("Public key not found in authorized_keys")
+	}
+
+	// Set the SSHKeyID on the session so revokeSSHKey can find it.
+	session.SSHKeyID = session.ID
+	session.SSHPublicKey = sshKey.PublicKey
+
+	// Revoke the SSH key.
+	if err := broker.revokeSSHKey(session); err != nil {
+		t.Fatalf("revokeSSHKey failed: %v", err)
+	}
+
+	// Verify the public key was removed from authorized_keys.
+	akData, err = os.ReadFile(akPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Failed to read authorized_keys after revocation: %v", err)
+	}
+	if err == nil && strings.Contains(string(akData), strings.TrimSpace(sshKey.PublicKey)) {
+		t.Error("Public key still present in authorized_keys after revocation")
+	}
+
+	// Verify the key files were deleted.
+	if _, err := broker.keyManager.LoadKey(session.ID); err == nil {
+		t.Error("Expected key files to be deleted after revocation")
 	}
 }
 
