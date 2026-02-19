@@ -91,6 +91,7 @@ type AuthenticationConfig struct {
 	NetworkRequirements   NetworkRequirements             `mapstructure:"network_requirements"`
 	TimeBasedPolicies     TimeBasedPolicies               `mapstructure:"time_based_policies"`
 	RiskPolicies          []RiskPolicy                    `mapstructure:"risk_policies"`
+	GeoIPDatabasePath     string                          `mapstructure:"geoip_database_path"`
 }
 
 // AuthenticationPolicy defines access control policies

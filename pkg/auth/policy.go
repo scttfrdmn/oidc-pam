@@ -6,13 +6,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oschwald/geoip2-golang"
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 )
 
 // PolicyEngine evaluates authentication policies
 type PolicyEngine struct {
-	config *config.Config
+	config  *config.Config
+	geoipDB *geoip2.Reader
 }
 
 // PolicyResult represents the result of policy evaluation
@@ -29,9 +31,26 @@ type PolicyResult struct {
 
 // NewPolicyEngine creates a new policy engine
 func NewPolicyEngine(cfg *config.Config) (*PolicyEngine, error) {
-	return &PolicyEngine{
-		config: cfg,
-	}, nil
+	pe := &PolicyEngine{config: cfg}
+
+	if cfg != nil && cfg.Authentication.GeoIPDatabasePath != "" {
+		db, err := geoip2.Open(cfg.Authentication.GeoIPDatabasePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open GeoIP database %q: %w", cfg.Authentication.GeoIPDatabasePath, err)
+		}
+		pe.geoipDB = db
+		log.Info().Str("path", cfg.Authentication.GeoIPDatabasePath).Msg("GeoIP database loaded")
+	}
+
+	return pe, nil
+}
+
+// Close releases resources held by the policy engine (e.g. the GeoIP database).
+func (pe *PolicyEngine) Close() {
+	if pe.geoipDB != nil {
+		_ = pe.geoipDB.Close()
+		pe.geoipDB = nil
+	}
 }
 
 // EvaluateRequest evaluates an authentication request against policies
@@ -345,10 +364,32 @@ func (pe *PolicyEngine) isWithinAllowedHours(allowedHours string, now time.Time,
 	return localTime.After(startTime) && localTime.Before(endTime)
 }
 
-func (pe *PolicyEngine) getCountryFromIP(ip string) string {
-	// This would use a GeoIP database to determine country
-	// For now, return a placeholder
-	return "US"
+// getCountryFromIP returns the ISO 3166-1 alpha-2 country code for the given IP
+// address. Returns an empty string if the country cannot be determined (private
+// address, loopback, or no GeoIP database configured).
+func (pe *PolicyEngine) getCountryFromIP(ipStr string) string {
+	if pe.geoipDB == nil {
+		return ""
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		log.Debug().Str("ip", ipStr).Msg("GeoIP: invalid IP address")
+		return ""
+	}
+
+	// Private and loopback addresses have no meaningful country.
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return ""
+	}
+
+	record, err := pe.geoipDB.Country(ip)
+	if err != nil {
+		log.Debug().Err(err).Str("ip", ipStr).Msg("GeoIP lookup failed")
+		return ""
+	}
+
+	return record.Country.IsoCode
 }
 
 func (pe *PolicyEngine) calculateRiskScore(req *AuthRequest, result *PolicyResult) int {
