@@ -24,8 +24,9 @@ type TokenManager struct {
 
 // TokenStore represents a token storage backend
 type TokenStore struct {
-	tokens map[string]*StoredToken
-	mutex  sync.RWMutex
+	tokens           map[string]*StoredToken
+	fingerprintIndex map[string]string // fingerprint → tokenID for O(1) ValidateToken
+	mutex            sync.RWMutex
 }
 
 // StoredToken represents a token stored in the token store
@@ -54,7 +55,8 @@ func NewTokenManager(cfg *config.Config) (*TokenManager, error) {
 
 	// Initialize token store
 	tokenStore := &TokenStore{
-		tokens: make(map[string]*StoredToken),
+		tokens:           make(map[string]*StoredToken),
+		fingerprintIndex: make(map[string]string),
 	}
 
 	return &TokenManager{
@@ -145,9 +147,12 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) error
 		storedToken.Metadata["claims"] = token.Claims
 	}
 
-	// Store in token store
+	// Store in token store and update fingerprint index
 	tm.tokenStore.mutex.Lock()
 	tm.tokenStore.tokens[tokenID] = storedToken
+	if storedToken.Fingerprint != "" {
+		tm.tokenStore.fingerprintIndex[storedToken.Fingerprint] = tokenID
+	}
 	tm.tokenStore.mutex.Unlock()
 
 	log.Debug().
@@ -234,27 +239,30 @@ func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
 	return token, nil
 }
 
-// ValidateToken validates a token
+// ValidateToken validates a token by fingerprint in O(1) using the fingerprint
+// index.
 func (tm *TokenManager) ValidateToken(tokenFingerprint string) (*StoredToken, error) {
 	tm.tokenStore.mutex.Lock()
 	defer tm.tokenStore.mutex.Unlock()
 
-	// Find token by fingerprint
-	for _, storedToken := range tm.tokenStore.tokens {
-		if storedToken.Fingerprint == tokenFingerprint {
-			// Check if token has expired
-			if storedToken.ExpiresAt.Before(time.Now()) {
-				return nil, fmt.Errorf("token expired")
-			}
-
-			// Update last used time
-			storedToken.LastUsed = time.Now()
-
-			return storedToken, nil
-		}
+	tokenID, ok := tm.tokenStore.fingerprintIndex[tokenFingerprint]
+	if !ok {
+		return nil, fmt.Errorf("token not found")
 	}
 
-	return nil, fmt.Errorf("token not found")
+	storedToken, ok := tm.tokenStore.tokens[tokenID]
+	if !ok {
+		// Index is out of sync (should not happen); clean up the stale entry.
+		delete(tm.tokenStore.fingerprintIndex, tokenFingerprint)
+		return nil, fmt.Errorf("token not found")
+	}
+
+	if storedToken.ExpiresAt.Before(time.Now()) {
+		return nil, fmt.Errorf("token expired")
+	}
+
+	storedToken.LastUsed = time.Now()
+	return storedToken, nil
 }
 
 // RefreshToken refreshes a token
@@ -287,6 +295,7 @@ func (tm *TokenManager) RevokeToken(tokenID string) error {
 	defer tm.tokenStore.mutex.Unlock()
 
 	if storedToken, exists := tm.tokenStore.tokens[tokenID]; exists {
+		delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 		delete(tm.tokenStore.tokens, tokenID)
 
 		log.Debug().
@@ -309,6 +318,7 @@ func (tm *TokenManager) RevokeUserTokens(userID string) error {
 	var revokedTokens []string
 	for tokenID, storedToken := range tm.tokenStore.tokens {
 		if storedToken.UserID == userID {
+			delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 			delete(tm.tokenStore.tokens, tokenID)
 			revokedTokens = append(revokedTokens, tokenID)
 		}
@@ -330,6 +340,7 @@ func (tm *TokenManager) RevokeSessionTokens(sessionID string) error {
 	var revokedTokens []string
 	for tokenID, storedToken := range tm.tokenStore.tokens {
 		if storedToken.SessionID == sessionID {
+			delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 			delete(tm.tokenStore.tokens, tokenID)
 			revokedTokens = append(revokedTokens, tokenID)
 		}
@@ -390,7 +401,10 @@ func (tm *TokenManager) generateTokenID() (string, error) {
 func (tm *TokenManager) removeToken(tokenID string) {
 	tm.tokenStore.mutex.Lock()
 	defer tm.tokenStore.mutex.Unlock()
-	delete(tm.tokenStore.tokens, tokenID)
+	if st, ok := tm.tokenStore.tokens[tokenID]; ok {
+		delete(tm.tokenStore.fingerprintIndex, st.Fingerprint)
+		delete(tm.tokenStore.tokens, tokenID)
+	}
 }
 
 func (tm *TokenManager) cleanupExpiredTokens(ctx context.Context) {
@@ -424,8 +438,11 @@ func (tm *TokenManager) performCleanup() {
 		}
 	}
 
-	// Remove expired tokens
+	// Remove expired tokens and their index entries
 	for _, tokenID := range expiredTokens {
+		if st, ok := tm.tokenStore.tokens[tokenID]; ok {
+			delete(tm.tokenStore.fingerprintIndex, st.Fingerprint)
+		}
 		delete(tm.tokenStore.tokens, tokenID)
 	}
 

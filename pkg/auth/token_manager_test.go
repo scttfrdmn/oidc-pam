@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -343,6 +344,274 @@ func TestValidateTokenConcurrent(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// newTMForTest returns a ready-to-use TokenManager with encryption configured.
+func newTMForTest(t *testing.T) *TokenManager {
+	t.Helper()
+	tm, err := NewTokenManager(&config.Config{
+		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
+			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	return tm
+}
+
+// storeTestToken stores a token with the given fingerprint and returns it.
+func storeTestToken(t *testing.T, tm *TokenManager, fp string) *Token {
+	t.Helper()
+	tok := &Token{
+		AccessToken: "access-" + fp,
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		Fingerprint: fp,
+		Claims:      make(map[string]interface{}),
+	}
+	if err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
+		t.Fatalf("StoreToken(%q): %v", fp, err)
+	}
+	return tok
+}
+
+// TestFingerprintIndexPopulatedOnStore verifies that StoreToken adds an entry
+// to the fingerprint index.
+func TestFingerprintIndexPopulatedOnStore(t *testing.T) {
+	tm := newTMForTest(t)
+	storeTestToken(t, tm, "fp-store-test")
+
+	tm.tokenStore.mutex.RLock()
+	_, ok := tm.tokenStore.fingerprintIndex["fp-store-test"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if !ok {
+		t.Error("Expected fingerprint index to contain the stored fingerprint")
+	}
+}
+
+// TestFingerprintIndexRemovedOnRevoke verifies that RevokeToken removes the
+// fingerprint index entry.
+func TestFingerprintIndexRemovedOnRevoke(t *testing.T) {
+	tm := newTMForTest(t)
+	storeTestToken(t, tm, "fp-revoke-test")
+
+	// Find the tokenID from the index, then revoke it.
+	tm.tokenStore.mutex.RLock()
+	tokenID := tm.tokenStore.fingerprintIndex["fp-revoke-test"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if err := tm.RevokeToken(tokenID); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+
+	tm.tokenStore.mutex.RLock()
+	_, ok := tm.tokenStore.fingerprintIndex["fp-revoke-test"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if ok {
+		t.Error("Expected fingerprint index entry to be removed after revoke")
+	}
+}
+
+// TestFingerprintIndexRemovedOnCleanup verifies that performCleanup removes
+// expired tokens' fingerprint index entries.
+func TestFingerprintIndexRemovedOnCleanup(t *testing.T) {
+	tm := newTMForTest(t)
+
+	// Store a token that is already expired.
+	tok := &Token{
+		AccessToken: "expired-access",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(-time.Minute), // already expired
+		Fingerprint: "fp-cleanup-test",
+		Claims:      make(map[string]interface{}),
+	}
+	if err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
+		t.Fatalf("StoreToken: %v", err)
+	}
+
+	tm.performCleanup()
+
+	tm.tokenStore.mutex.RLock()
+	_, inTokens := tm.tokenStore.tokens[tm.tokenStore.fingerprintIndex["fp-cleanup-test"]]
+	_, inIndex := tm.tokenStore.fingerprintIndex["fp-cleanup-test"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if inTokens || inIndex {
+		t.Error("Expected expired token and its index entry to be removed after cleanup")
+	}
+}
+
+// TestFingerprintIndexRemovedByUserRevoke verifies RevokeUserTokens cleans the index.
+func TestFingerprintIndexRemovedByUserRevoke(t *testing.T) {
+	tm := newTMForTest(t)
+	storeTestToken(t, tm, "fp-user-revoke")
+
+	if err := tm.RevokeUserTokens("user1"); err != nil {
+		t.Fatalf("RevokeUserTokens: %v", err)
+	}
+
+	tm.tokenStore.mutex.RLock()
+	_, ok := tm.tokenStore.fingerprintIndex["fp-user-revoke"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if ok {
+		t.Error("Expected index entry removed after RevokeUserTokens")
+	}
+}
+
+// TestFingerprintIndexRemovedBySessionRevoke verifies RevokeSessionTokens
+// cleans the index.
+func TestFingerprintIndexRemovedBySessionRevoke(t *testing.T) {
+	tm := newTMForTest(t)
+	storeTestToken(t, tm, "fp-session-revoke")
+
+	if err := tm.RevokeSessionTokens("sess1"); err != nil {
+		t.Fatalf("RevokeSessionTokens: %v", err)
+	}
+
+	tm.tokenStore.mutex.RLock()
+	_, ok := tm.tokenStore.fingerprintIndex["fp-session-revoke"]
+	tm.tokenStore.mutex.RUnlock()
+
+	if ok {
+		t.Error("Expected index entry removed after RevokeSessionTokens")
+	}
+}
+
+// TestValidateTokenO1 stores a large number of tokens and validates one that
+// sits in the middle, confirming the O(1) path works correctly regardless of
+// store size.
+func TestValidateTokenO1(t *testing.T) {
+	tm := newTMForTest(t)
+
+	const n = 200
+	var targetFP string
+	for i := 0; i < n; i++ {
+		fp := fmt.Sprintf("fp-%04d", i)
+		storeTestToken(t, tm, fp)
+		if i == n/2 {
+			targetFP = fp
+		}
+	}
+
+	st, err := tm.ValidateToken(targetFP)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if st.Fingerprint != targetFP {
+		t.Errorf("Expected fingerprint %q, got %q", targetFP, st.Fingerprint)
+	}
+}
+
+// TestValidateTokenIndexConsistency verifies that the fingerprint index and
+// the token map stay in sync across a sequence of stores and revocations.
+func TestValidateTokenIndexConsistency(t *testing.T) {
+	tm := newTMForTest(t)
+
+	for i := 0; i < 10; i++ {
+		storeTestToken(t, tm, fmt.Sprintf("fp-consistency-%d", i))
+	}
+
+	// Revoke half of them via RevokeUserTokens.
+	if err := tm.RevokeUserTokens("user1"); err != nil {
+		t.Fatalf("RevokeUserTokens: %v", err)
+	}
+
+	tm.tokenStore.mutex.RLock()
+	tokenCount := len(tm.tokenStore.tokens)
+	indexCount := len(tm.tokenStore.fingerprintIndex)
+	tm.tokenStore.mutex.RUnlock()
+
+	if tokenCount != indexCount {
+		t.Errorf("Token map (%d) and fingerprint index (%d) are out of sync", tokenCount, indexCount)
+	}
+}
+
+// BenchmarkValidateToken measures ValidateToken throughput with a populated
+// store.  Run with: go test -bench=BenchmarkValidateToken -benchmem ./pkg/auth/
+func BenchmarkValidateToken(b *testing.B) {
+	tm, err := NewTokenManager(&config.Config{
+		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
+			TokenEncryptionKey: "benchmark-key-that-is-long-enough-for-security",
+		},
+	})
+	if err != nil {
+		b.Fatalf("NewTokenManager: %v", err)
+	}
+
+	// Pre-populate the store with 1000 tokens.
+	const storeSize = 1000
+	fps := make([]string, storeSize)
+	for i := 0; i < storeSize; i++ {
+		fp := fmt.Sprintf("bench-fp-%04d", i)
+		fps[i] = fp
+		tok := &Token{
+			AccessToken: "access-" + fp,
+			TokenType:   "Bearer",
+			ExpiresAt:   time.Now().Add(time.Hour),
+			Fingerprint: fp,
+			Claims:      make(map[string]interface{}),
+		}
+		if err := tm.StoreToken(tok, "user", "sess"); err != nil {
+			b.Fatalf("StoreToken: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			fp := fps[i%storeSize]
+			if _, err := tm.ValidateToken(fp); err != nil {
+				b.Errorf("ValidateToken(%q): %v", fp, err)
+			}
+			i++
+		}
+	})
+}
+
+// BenchmarkValidateTokenSerial is a serial variant of BenchmarkValidateToken
+// that shows single-goroutine latency.
+func BenchmarkValidateTokenSerial(b *testing.B) {
+	tm, err := NewTokenManager(&config.Config{
+		Security: config.SecurityConfig{
+			SecureTokenStorage: true,
+			TokenEncryptionKey: "benchmark-key-that-is-long-enough-for-security",
+		},
+	})
+	if err != nil {
+		b.Fatalf("NewTokenManager: %v", err)
+	}
+
+	const storeSize = 1000
+	fps := make([]string, storeSize)
+	for i := 0; i < storeSize; i++ {
+		fp := fmt.Sprintf("bench-serial-fp-%04d", i)
+		fps[i] = fp
+		tok := &Token{
+			AccessToken: "access-" + fp,
+			TokenType:   "Bearer",
+			ExpiresAt:   time.Now().Add(time.Hour),
+			Fingerprint: fp,
+			Claims:      make(map[string]interface{}),
+		}
+		if err := tm.StoreToken(tok, "user", "sess"); err != nil {
+			b.Fatalf("StoreToken: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fp := fps[i%storeSize]
+		if _, err := tm.ValidateToken(fp); err != nil {
+			b.Errorf("ValidateToken(%q): %v", fp, err)
+		}
+	}
 }
 
 func TestTokenManagerAlwaysEncrypts(t *testing.T) {
