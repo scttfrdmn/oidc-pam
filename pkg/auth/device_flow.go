@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -115,9 +116,14 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		RedirectURL: "", // Not used for device flow
 	}
 
-	// Create HTTP client with appropriate timeout
+	// Create HTTP client with TLS 1.2 minimum and a sensible timeout.
 	httpClient := &http.Client{
 		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		},
 	}
 
 	return &OIDCProvider{
@@ -192,8 +198,9 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	return deviceFlow, nil
 }
 
-// PollDeviceAuthorization polls for device authorization completion
-func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error) {
+// PollDeviceAuthorization polls for device authorization completion.
+// ctx is used for ID token verification so callers can apply deadlines.
+func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode string) (*Token, error) {
 	// Get token endpoint
 	tokenEndpoint := p.Provider.Endpoint().TokenURL
 
@@ -229,7 +236,7 @@ func (p *OIDCProvider) PollDeviceAuthorization(deviceCode string) (*Token, error
 	// Parse and verify ID token if present
 	var claims map[string]interface{}
 	if tokenResp.IDToken != "" {
-		idToken, err := p.Verifier.Verify(context.Background(), tokenResp.IDToken)
+		idToken, err := p.Verifier.Verify(ctx, tokenResp.IDToken)
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify ID token: %w", err)
 		}

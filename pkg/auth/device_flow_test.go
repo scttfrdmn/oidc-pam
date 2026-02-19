@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -309,7 +310,7 @@ func TestDeviceFlowPollingMethod(t *testing.T) {
 		PollingInterval: 5,
 	}
 
-	token, err := provider.PollDeviceAuthorization(deviceFlow.DeviceCode)
+	token, err := provider.PollDeviceAuthorization(context.Background(), deviceFlow.DeviceCode)
 	if err != nil {
 		t.Logf("PollDeviceAuthorization failed as expected: %v", err)
 	}
