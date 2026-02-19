@@ -305,7 +305,7 @@ func TestSyslogPriorityParsing(t *testing.T) {
 		{"DAEMON", "ERR"},
 		{"LOCAL0", "DEBUG"},
 		{"LOCAL7", "NOTICE"},
-		{"", ""},       // defaults
+		{"", ""},               // defaults
 		{"INVALID", "INVALID"}, // unknown → defaults
 	}
 
@@ -439,10 +439,10 @@ func TestAuditOutputCreation(t *testing.T) {
 	defer httpServer.Close()
 
 	testCases := []struct {
-		config        config.AuditOutput
-		expectError   bool
+		config         config.AuditOutput
+		expectError    bool
 		skipIfNoSyslog bool
-		outputType    string
+		outputType     string
 	}{
 		{
 			config:      config.AuditOutput{Type: "file", Path: "/tmp/test-audit.log"},
