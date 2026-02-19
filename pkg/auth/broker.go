@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	oidcmetrics "github.com/scttfrdmn/oidc-pam/pkg/metrics"
 	"github.com/scttfrdmn/oidc-pam/pkg/security"
 	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
@@ -26,6 +27,14 @@ type Broker struct {
 	authorizedKeysManager *sshpkg.AuthorizedKeysManager
 	stopChan              chan struct{}
 	wg                    sync.WaitGroup
+	metrics               *oidcmetrics.Metrics // nil when metrics are disabled
+}
+
+// SetMetrics attaches a Metrics instance to the broker and its policy engine.
+// Call this after NewBroker and before Start.
+func (b *Broker) SetMetrics(m *oidcmetrics.Metrics) {
+	b.metrics = m
+	b.policyEngine.SetMetrics(m)
 }
 
 // Session represents an active authentication session
@@ -198,6 +207,12 @@ func (b *Broker) Start(ctx context.Context) error {
 	return nil
 }
 
+// DroppedAuditEvents returns the cumulative count of audit events dropped by
+// the audit logger.  Used to back the oidc_audit_events_dropped_total metric.
+func (b *Broker) DroppedAuditEvents() int64 {
+	return b.auditLogger.DroppedEvents()
+}
+
 // Stop stops the broker services
 func (b *Broker) Stop() error {
 	log.Info().Msg("Stopping authentication broker services")
@@ -261,6 +276,9 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	}
 
 	if !policyResult.Allowed {
+		if b.metrics != nil {
+			b.metrics.RecordAuth("", "policy_denied", "POLICY_DENIED")
+		}
 		b.auditLogger.LogAuthEvent(security.AuditEvent{
 			EventType:    "authentication_denied",
 			UserID:       req.UserID,
@@ -525,6 +543,11 @@ func (b *Broker) setSession(session *Session) {
 func (b *Broker) removeSession(sessionID string) {
 	b.sessionMutex.Lock()
 	defer b.sessionMutex.Unlock()
+	if s, ok := b.sessions[sessionID]; ok && s.IsActive {
+		if b.metrics != nil {
+			b.metrics.ActiveSessions.Dec()
+		}
+	}
 	delete(b.sessions, sessionID)
 }
 
@@ -600,6 +623,9 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					continue // Keep polling
 				}
 				// Other errors mean failure
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", err.Error())
+				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "device_authorization_failed",
 					UserID:       session.UserID,
@@ -619,6 +645,9 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					Err(err).
 					Str("session_id", session.ID).
 					Msg("Failed to get user info")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "USER_INFO_FAILED")
+				}
 				b.removeSession(session.ID)
 				return
 			}
@@ -646,6 +675,11 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			}
 
 			b.setSession(session)
+
+			if b.metrics != nil {
+				b.metrics.RecordAuth(provider.Name, "success", "")
+				b.metrics.ActiveSessions.Inc()
+			}
 
 			// Record the login location so future logins from the same
 			// /24 subnet or country are not flagged as unusual.
@@ -695,6 +729,14 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 			}
 			b.sessionMutex.Unlock()
 
+			if b.metrics != nil {
+				for _, session := range expiredSessions {
+					if session.IsActive {
+						b.metrics.ActiveSessions.Dec()
+					}
+				}
+			}
+
 			// Perform SSH key revocation and audit logging outside the lock.
 			// Sessions are already removed from the map, so no TOCTOU risk.
 			for _, session := range expiredSessions {
@@ -734,12 +776,18 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 	// Generate an RSA key pair with the username as the comment prefix
 	sshKey, err := b.keyManager.GenerateKey(session.UserID)
 	if err != nil {
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("generate", "failure")
+		}
 		return nil, fmt.Errorf("failed to generate SSH key pair: %w", err)
 	}
 
 	// Persist the key pair on disk, keyed by session ID so multiple
 	// concurrent sessions for the same user don't overwrite each other.
 	if err := b.keyManager.SaveKey(session.ID, sshKey); err != nil {
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("generate", "failure")
+		}
 		return nil, fmt.Errorf("failed to save SSH key: %w", err)
 	}
 
@@ -747,6 +795,9 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey); err != nil {
 		// Best-effort cleanup: remove the stored key if we couldn't authorize it
 		_ = b.keyManager.DeleteKey(session.ID)
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("generate", "failure")
+		}
 		return nil, fmt.Errorf("failed to add public key to authorized_keys: %w", err)
 	}
 
@@ -755,6 +806,10 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 		Str("user_id", session.UserID).
 		Time("expires_at", sshKey.ExpiresAt).
 		Msg("SSH key generated and authorized")
+
+	if b.metrics != nil {
+		b.metrics.RecordSSHKeyOp("generate", "success")
+	}
 
 	return &SSHKey{
 		ID:        session.ID,
@@ -791,6 +846,9 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 
 	// Delete the key files from disk
 	if err := b.keyManager.DeleteKey(session.SSHKeyID); err != nil {
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("revoke", "failure")
+		}
 		return fmt.Errorf("failed to delete SSH key files: %w", err)
 	}
 
@@ -798,6 +856,10 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 		Str("session_id", session.ID).
 		Str("ssh_key_id", session.SSHKeyID).
 		Msg("SSH key revoked")
+
+	if b.metrics != nil {
+		b.metrics.RecordSSHKeyOp("revoke", "success")
+	}
 
 	return nil
 }

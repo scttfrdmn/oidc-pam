@@ -9,11 +9,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/internal/ipc"
 	"github.com/scttfrdmn/oidc-pam/pkg/auth"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	oidcmetrics "github.com/scttfrdmn/oidc-pam/pkg/metrics"
 )
 
 var (
@@ -70,6 +72,19 @@ func main() {
 			Msg("Failed to create authentication broker")
 	}
 
+	// Initialise Prometheus metrics and optionally start the /metrics endpoint.
+	var metricsServer *oidcmetrics.Server
+	if cfg.Server.MetricsAddr != "" {
+		reg := prometheus.NewRegistry()
+		m := oidcmetrics.New(reg, func() float64 {
+			return float64(broker.DroppedAuditEvents())
+		})
+		broker.SetMetrics(m)
+		metricsServer = oidcmetrics.NewServer(cfg.Server.MetricsAddr, reg)
+		metricsServer.Start()
+		log.Info().Str("addr", cfg.Server.MetricsAddr).Msg("Prometheus metrics endpoint enabled")
+	}
+
 	// Create IPC server for PAM communication
 	ipcServer, err := ipc.NewServer(cfg.Server.SocketPath, broker, cfg.Server.SocketMode, cfg.Server.SocketGroup, cfg.Server.RequirePeerAuth, cfg.Security.RateLimiting.MaxRequestsPerMinute, cfg.Security.RateLimiting.MaxConcurrentAuths)
 	if err != nil {
@@ -119,6 +134,15 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
+		// Stop metrics server (if enabled).
+		if metricsServer != nil {
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutCancel()
+			if err := metricsServer.Stop(shutCtx); err != nil {
+				log.Error().Err(err).Msg("Error stopping metrics server")
+			}
+		}
 
 		// Stop IPC server
 		if err := ipcServer.Stop(); err != nil {

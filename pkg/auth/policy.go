@@ -9,6 +9,7 @@ import (
 	"github.com/oschwald/geoip2-golang"
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	oidcmetrics "github.com/scttfrdmn/oidc-pam/pkg/metrics"
 )
 
 // PolicyEngine evaluates authentication policies
@@ -16,6 +17,12 @@ type PolicyEngine struct {
 	config          *config.Config
 	geoipDB         *geoip2.Reader
 	locationHistory *LocationHistory
+	metrics         *oidcmetrics.Metrics // nil when metrics are disabled
+}
+
+// SetMetrics attaches a Metrics instance to the policy engine.
+func (pe *PolicyEngine) SetMetrics(m *oidcmetrics.Metrics) {
+	pe.metrics = m
 }
 
 // PolicyResult represents the result of policy evaluation
@@ -122,6 +129,10 @@ func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest) (*PolicyResult, error)
 		Int("risk_score", result.RiskScore).
 		Strs("risk_factors", result.RiskFactors).
 		Msg("Policy evaluation completed")
+
+	if pe.metrics != nil {
+		pe.metrics.RecordPolicyEval(result.Allowed, result.RiskScore)
+	}
 
 	return result, nil
 }

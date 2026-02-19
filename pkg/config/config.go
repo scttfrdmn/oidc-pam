@@ -30,6 +30,9 @@ type ServerConfig struct {
 	AuditLog        string        `mapstructure:"audit_log"`
 	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
+	// MetricsAddr is the TCP address on which the /metrics HTTP endpoint is
+	// served for Prometheus scraping (e.g. ":9090").  Leave empty to disable.
+	MetricsAddr string `mapstructure:"metrics_addr"`
 }
 
 // OIDCConfig contains OIDC provider configuration
