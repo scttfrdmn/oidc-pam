@@ -334,9 +334,10 @@ func (pe *PolicyEngine) isPrivateIP(ip string) bool {
 }
 
 func (pe *PolicyEngine) matchesTimeRestriction(req *AuthRequest, restriction config.TimeRestriction, now time.Time) bool {
-	// Check if any providers match
+	// "all" applies to every user. Provider-scoped matching requires a ProviderName
+	// field on AuthRequest (TODO: add when provider selection moves earlier in the flow).
 	for _, provider := range restriction.Providers {
-		if provider == "all" || strings.Contains(req.UserID, provider) {
+		if provider == "all" {
 			return true
 		}
 	}
@@ -344,9 +345,10 @@ func (pe *PolicyEngine) matchesTimeRestriction(req *AuthRequest, restriction con
 }
 
 func (pe *PolicyEngine) matchesGeoRestriction(req *AuthRequest, restriction config.GeoRestriction) bool {
-	// Check if any providers match
+	// "all" applies to every user. Provider-scoped matching requires a ProviderName
+	// field on AuthRequest (TODO: add when provider selection moves earlier in the flow).
 	for _, provider := range restriction.Providers {
-		if provider == "all" || strings.Contains(req.UserID, provider) {
+		if provider == "all" {
 			return true
 		}
 	}
@@ -468,18 +470,12 @@ func (pe *PolicyEngine) evaluateRiskCondition(condition string, req *AuthRequest
 }
 
 func (pe *PolicyEngine) matchesResourcePolicy(targetHost, policyName string) bool {
-	// Simple pattern matching
-	// In a real implementation, this would support more complex patterns
-	switch policyName {
-	case "production":
-		return strings.Contains(targetHost, "prod")
-	case "staging":
-		return strings.Contains(targetHost, "staging") || strings.Contains(targetHost, "stage")
-	case "development":
-		return strings.Contains(targetHost, "dev")
-	default:
-		return false
-	}
+	// Match exact hostname or hosts in a subdomain of policyName.
+	// e.g. policy "production" matches "production" and "api.production.example.com"
+	// but NOT "not-production" or "production-test".
+	return targetHost == policyName ||
+		strings.HasPrefix(targetHost, policyName+".") ||
+		strings.Contains(targetHost, "."+policyName+".")
 }
 
 func (pe *PolicyEngine) matchesIPPattern(ip, pattern string) bool {

@@ -2,12 +2,14 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +31,7 @@ type DeviceFlow struct {
 	PollingInterval int
 	ClientID        string
 	Scopes          []string
+	Nonce           string // OIDC nonce for replay protection; validated against ID token claims
 }
 
 // DeviceAuthResponse represents the response from device authorization endpoint
@@ -93,8 +96,18 @@ type Token struct {
 	Claims       map[string]interface{}
 }
 
+
 // NewOIDCProvider creates a new OIDC provider
 func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfig) (*OIDCProvider, error) {
+	// PKCE (RFC 7636) is not defined for the device authorization grant (RFC 8628).
+	// If require_pkce is set without a client_secret, warn the operator — the
+	// appropriate protection for public device-flow clients is mTLS or DPoP, not PKCE.
+	if providerCfg.RequirePKCE && providerCfg.ClientSecret == "" {
+		log.Warn().
+			Str("provider", providerCfg.Name).
+			Msg("require_pkce is set but PKCE does not apply to the device authorization flow (RFC 8628); use a client_secret or mTLS to protect this client")
+	}
+
 	// Build the TLS config first so both the discovery request and all
 	// subsequent token/userinfo requests use the same TLS settings.
 	tlsConfig, err := buildTLSConfig(secCfg)
@@ -175,7 +188,7 @@ func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec // intentional, gated by config.Validate
 	}
 
-	// Apply certificate pinning.
+	// Apply certificate pinning via fingerprint list.
 	if len(secCfg.TLSVerification.PinnedCertificates) > 0 {
 		// Normalise pins: lowercase hex without colons so both "aabbcc..."
 		// and "aa:bb:cc:..." formats are accepted.
@@ -206,10 +219,17 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		return nil, fmt.Errorf("failed to get device authorization endpoint: %w", err)
 	}
 
+	// Generate a nonce for replay protection
+	nonce, err := generateNonce()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
 	// Prepare request data
 	data := url.Values{}
 	data.Set("client_id", p.Config.ClientID)
 	data.Set("scope", strings.Join(p.Config.Scopes, " "))
+	data.Set("nonce", nonce)
 
 	// RFC 8628: Device flow is designed for public clients; do not send client_secret
 	if p.Config.ClientSecret != "" {
@@ -233,6 +253,26 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		return nil, fmt.Errorf("failed to decode device authorization response: %w", err)
 	}
 
+	// Reject implausible ExpiresIn values to prevent integer overflow in duration arithmetic.
+	// RFC 8628 §6.1 recommends short-lived device codes; 24 hours is a generous upper bound.
+	const maxDeviceCodeExpiry = 86400
+	if deviceResp.ExpiresIn <= 0 || deviceResp.ExpiresIn > maxDeviceCodeExpiry {
+		return nil, fmt.Errorf("provider returned invalid expires_in value: %d (must be 1–%d seconds)", deviceResp.ExpiresIn, maxDeviceCodeExpiry)
+	}
+
+	// RFC 8628 §3.5: clients MUST wait at least the interval seconds between polls.
+	// Clamp to [5, 3600]: prevents time.NewTicker panic on ≤0 and resource
+	// exhaustion from provider-supplied sub-second intervals.
+	const (
+		minPollingInterval = 5
+		maxPollingInterval = 3600
+	)
+	if deviceResp.Interval < minPollingInterval {
+		deviceResp.Interval = minPollingInterval
+	} else if deviceResp.Interval > maxPollingInterval {
+		deviceResp.Interval = maxPollingInterval
+	}
+
 	// Create device flow
 	deviceFlow := &DeviceFlow{
 		DeviceCode:      deviceResp.DeviceCode,
@@ -242,6 +282,7 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		PollingInterval: deviceResp.Interval,
 		ClientID:        p.Config.ClientID,
 		Scopes:          p.Config.Scopes,
+		Nonce:           nonce,
 	}
 
 	// Use complete URI if available (includes user code)
@@ -360,9 +401,9 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 		return nil, fmt.Errorf("userinfo request failed with status %d", resp.StatusCode)
 	}
 
-	// Parse user info
+	// Parse user info — limit body to 1 MB to prevent OOM from a malicious provider.
 	var userInfoClaims map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&userInfoClaims); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&userInfoClaims); err != nil {
 		return nil, fmt.Errorf("failed to decode userinfo response: %w", err)
 	}
 
@@ -519,13 +560,41 @@ func (p *OIDCProvider) validateIDTokenClaims(claims map[string]interface{}) erro
 // Helper methods
 
 func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
-	// Check if device endpoint is configured
+	issuerURL, err := url.Parse(p.Config.Issuer)
+	if err != nil {
+		return "", fmt.Errorf("invalid issuer URL: %w", err)
+	}
+
+	// validateEndpoint ensures the endpoint uses HTTPS (or localhost/127.0.0.1 for testing)
+	// and that its host matches the issuer host.
+	validateEndpoint := func(endpoint string) error {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return fmt.Errorf("invalid endpoint URL: %w", err)
+		}
+		isLocalhost := strings.HasPrefix(u.Host, "localhost") || strings.HasPrefix(u.Host, "127.0.0.1")
+		if u.Scheme != "https" && !isLocalhost {
+			return fmt.Errorf("endpoint must use HTTPS, got %q", u.Scheme)
+		}
+		if u.Host != issuerURL.Host {
+			return fmt.Errorf("endpoint host %q does not match issuer host %q", u.Host, issuerURL.Host)
+		}
+		return nil
+	}
+
+	// Check if device endpoint is explicitly configured
 	if p.Config.DeviceEndpoint != "" {
+		if err := validateEndpoint(p.Config.DeviceEndpoint); err != nil {
+			return "", fmt.Errorf("configured device endpoint rejected: %w", err)
+		}
 		return p.Config.DeviceEndpoint, nil
 	}
 
 	// Check custom endpoints
 	if deviceEndpoint, ok := p.Config.CustomEndpoints["device_authorization"]; ok {
+		if err := validateEndpoint(deviceEndpoint); err != nil {
+			return "", fmt.Errorf("custom device_authorization endpoint rejected: %w", err)
+		}
 		return deviceEndpoint, nil
 	}
 
@@ -554,11 +623,23 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 	}
 
 	if discoveryResp.DeviceAuthorizationEndpoint != "" {
+		if err := validateEndpoint(discoveryResp.DeviceAuthorizationEndpoint); err != nil {
+			return "", fmt.Errorf("discovered device_authorization_endpoint rejected: %w", err)
+		}
 		return discoveryResp.DeviceAuthorizationEndpoint, nil
 	}
 
 	// Fallback to common endpoint patterns
 	return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+}
+
+// generateNonce returns a cryptographically random 16-byte hex nonce.
+func generateNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (p *OIDCProvider) generateTokenFingerprint(accessToken string) string {
@@ -613,6 +694,17 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 						}
 					}
 
+					// Enforce allowlist if configured — drop groups not in the set.
+					if len(mapping.AllowedGroups) > 0 {
+						allowed := make(map[string]bool, len(mapping.AllowedGroups))
+						for _, g := range mapping.AllowedGroups {
+							allowed[strings.ToLower(g)] = true
+						}
+						if !allowed[strings.ToLower(groupStr)] {
+							continue
+						}
+					}
+
 					userInfo.Groups = append(userInfo.Groups, groupStr)
 				}
 			}
@@ -624,6 +716,16 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 		if roles, ok := claims[mapping.RolesClaim].([]interface{}); ok {
 			for _, role := range roles {
 				if roleStr, ok := role.(string); ok {
+					// Enforce allowlist if configured — drop roles not in the set.
+					if len(mapping.AllowedRoles) > 0 {
+						allowed := make(map[string]bool, len(mapping.AllowedRoles))
+						for _, r := range mapping.AllowedRoles {
+							allowed[strings.ToLower(r)] = true
+						}
+						if !allowed[strings.ToLower(roleStr)] {
+							continue
+						}
+					}
 					userInfo.Roles = append(userInfo.Roles, roleStr)
 				}
 			}

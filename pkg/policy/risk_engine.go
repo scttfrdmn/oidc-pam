@@ -330,17 +330,21 @@ func (re *RiskEngine) assessBehavioralRisk(ctx *AuthContext) RiskFactor {
 		score += 15.0
 		description = "No login history available"
 	} else {
-		// Check for rapid successive logins
-		recentLogins := 0
+		// Check for rapid successive logins from the same source address.
+		// Only same-IP attempts indicate suspicious owner behaviour; rapid attempts
+		// from different IPs indicate an external brute-force attack and must not
+		// penalise the account owner's own risk score.
+		sameIPLogins := 0
 		for _, login := range ctx.LoginHistory {
-			if time.Since(login.Timestamp) < 5*time.Minute {
-				recentLogins++
+			if time.Since(login.Timestamp) < 5*time.Minute &&
+				login.RemoteAddr == ctx.RemoteAddr {
+				sameIPLogins++
 			}
 		}
 
-		if recentLogins > 5 {
+		if sameIPLogins > 5 {
 			score += 30.0
-			description = "Rapid successive login attempts"
+			description = "Rapid successive login attempts from same address"
 		}
 
 		// Check failure rate

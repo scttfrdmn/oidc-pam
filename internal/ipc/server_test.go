@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -484,6 +485,9 @@ func TestServerHandleRevokeSession(t *testing.T) {
 }
 
 func TestServerRejectsPathTraversal(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("verifyPeerCredentials is Linux-only; skipping path traversal test on non-Linux")
+	}
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -623,6 +627,9 @@ func sendRequestOverSocket(t *testing.T, socketPath string, req *Request) *Respo
 }
 
 func TestServerRateLimitOverSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("verifyPeerCredentials is Linux-only; skipping rate limit socket test on non-Linux")
+	}
 	tempDir, err := os.MkdirTemp("", "ipc-ratelimit-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)

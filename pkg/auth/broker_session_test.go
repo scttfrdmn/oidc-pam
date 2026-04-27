@@ -37,7 +37,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 	}
 
 	// Test CheckSession with non-existent session
-	session, err := broker.CheckSession("non-existent-session")
+	session, err := broker.CheckSession("non-existent-session", "test-user")
 	if err != nil {
 		t.Logf("CheckSession returned error for non-existent session: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 	}
 
 	// Test RefreshSession with non-existent session
-	refreshedSession, err := broker.RefreshSession("non-existent-session")
+	refreshedSession, err := broker.RefreshSession("non-existent-session", "test-user")
 	if err != nil {
 		t.Logf("RefreshSession returned error for non-existent session: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 	}
 
 	// Test RevokeSession with non-existent session
-	err = broker.RevokeSession("non-existent-session")
+	err = broker.RevokeSession("non-existent-session", "test-user")
 	if err == nil {
 		t.Error("Expected error for non-existent session")
 	}
@@ -85,7 +85,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 	broker.setSession(testSession)
 
 	// Test CheckSession with existing session
-	session, err = broker.CheckSession("test-session-methods")
+	session, err = broker.CheckSession("test-session-methods", "test-user-methods")
 	if err != nil {
 		t.Logf("CheckSession returned error for existing session: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 	broker.removeSession("test-session-methods")
 
 	// Verify session was removed
-	session, err = broker.CheckSession("test-session-methods")
+	session, err = broker.CheckSession("test-session-methods", "test-user-methods")
 	if err != nil {
 		t.Logf("CheckSession returned error after session removal: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 	}
 	broker.setSession(session)
 
-	resp, err := broker.RefreshSession("refresh-test")
+	resp, err := broker.RefreshSession("refresh-test", "test-user")
 	if err != nil {
 		t.Fatalf("RefreshSession returned unexpected error: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestBrokerRefreshSessionNoRefreshToken(t *testing.T) {
 	}
 	broker.setSession(session)
 
-	resp, err := broker.RefreshSession("no-refresh-token-session")
+	resp, err := broker.RefreshSession("no-refresh-token-session", "test-user")
 	if err != nil {
 		t.Fatalf("RefreshSession returned unexpected error: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestBrokerRefreshSessionNotCloseToExpiry(t *testing.T) {
 	}
 	broker.setSession(session)
 
-	resp, err := broker.RefreshSession("fresh-session")
+	resp, err := broker.RefreshSession("fresh-session", "test-user")
 	if err != nil {
 		t.Fatalf("RefreshSession returned unexpected error: %v", err)
 	}

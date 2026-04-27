@@ -22,9 +22,11 @@ type LocationEntry struct {
 // LocationHistory is a thread-safe, per-user store of login locations used by
 // the policy engine to detect unusual-location risk signals.
 type LocationHistory struct {
-	cfg     config.LocationHistoryConfig
-	mu      sync.RWMutex
-	entries map[string][]LocationEntry // userID → recorded locations
+	cfg      config.LocationHistoryConfig
+	mu       sync.RWMutex
+	entries  map[string][]LocationEntry // userID → recorded locations
+	persistMu sync.Mutex               // serializes concurrent disk writes
+	wg        sync.WaitGroup           // tracks in-flight persistAsync goroutines
 }
 
 // NewLocationHistory creates a LocationHistory using cfg.  If cfg.PersistPath
@@ -69,10 +71,12 @@ func subnetKey(ipStr string) string {
 // matches either the /24 subnet or the country code.  Returns false (not
 // unusual) when the user has no recorded history at all.
 func (lh *LocationHistory) IsUnusual(userID, ip, country string) bool {
+	// Hold RLock for the entire read: releasing it before ranging over the slice
+	// would leave the backing array exposed to concurrent writes in RecordLocation.
 	lh.mu.RLock()
-	entries := lh.entries[userID]
-	lh.mu.RUnlock()
+	defer lh.mu.RUnlock()
 
+	entries := lh.entries[userID]
 	if len(entries) == 0 {
 		return false // first login — not unusual by definition
 	}
@@ -178,19 +182,36 @@ func (lh *LocationHistory) persistAsync() {
 	if lh.cfg.PersistPath == "" {
 		return
 	}
-	// Copy under lock before releasing it in the goroutine.
-	snapshot := make(map[string][]LocationEntry, len(lh.entries))
-	for k, v := range lh.entries {
-		cp := make([]LocationEntry, len(v))
-		copy(cp, v)
-		snapshot[k] = cp
-	}
 	path := lh.cfg.PersistPath
+	lh.wg.Add(1)
 	go func() {
+		defer lh.wg.Done()
+		// Serialize concurrent writes so two rapid RecordLocation calls don't
+		// race on the same .tmp file.  Re-capture the snapshot at write time
+		// (under RLock) rather than at launch time: whichever goroutine runs
+		// last will always write the most current state, preventing a
+		// stale goroutine from overwriting a newer one.
+		lh.persistMu.Lock()
+		defer lh.persistMu.Unlock()
+		lh.mu.RLock()
+		snapshot := make(map[string][]LocationEntry, len(lh.entries))
+		for k, v := range lh.entries {
+			cp := make([]LocationEntry, len(v))
+			copy(cp, v)
+			snapshot[k] = cp
+		}
+		lh.mu.RUnlock()
 		if err := saveLocationHistoryJSON(path, snapshot); err != nil {
 			log.Warn().Err(err).Str("path", path).Msg("Failed to persist location history")
 		}
 	}()
+}
+
+// Close waits for any in-flight asynchronous persistence goroutines to finish.
+// Call this in tests (via t.Cleanup) or on graceful shutdown to avoid goroutine
+// leaks and races against the temp-dir cleanup.
+func (lh *LocationHistory) Close() {
+	lh.wg.Wait()
 }
 
 func (lh *LocationHistory) load(path string) error {

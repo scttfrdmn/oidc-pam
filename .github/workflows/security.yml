@@ -120,7 +120,9 @@ jobs:
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pin to v1.1.4 — the latest version requires Go ≥1.25.0 which exceeds
+        # the Go 1.24 toolchain in this workflow.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck
         run: govulncheck ./...
