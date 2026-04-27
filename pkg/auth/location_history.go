@@ -22,11 +22,11 @@ type LocationEntry struct {
 // LocationHistory is a thread-safe, per-user store of login locations used by
 // the policy engine to detect unusual-location risk signals.
 type LocationHistory struct {
-	cfg      config.LocationHistoryConfig
-	mu       sync.RWMutex
-	entries  map[string][]LocationEntry // userID → recorded locations
-	persistMu sync.Mutex               // serializes concurrent disk writes
-	wg        sync.WaitGroup           // tracks in-flight persistAsync goroutines
+	cfg       config.LocationHistoryConfig
+	mu        sync.RWMutex
+	entries   map[string][]LocationEntry // userID → recorded locations
+	persistMu sync.Mutex                 // serializes concurrent disk writes
+	wg        sync.WaitGroup             // tracks in-flight persistAsync goroutines
 }
 
 // NewLocationHistory creates a LocationHistory using cfg.  If cfg.PersistPath

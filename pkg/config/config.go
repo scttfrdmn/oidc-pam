@@ -42,23 +42,23 @@ type OIDCConfig struct {
 
 // OIDCProvider represents a single OIDC provider configuration
 type OIDCProvider struct {
-	Name             string            `mapstructure:"name"`
-	Issuer           string            `mapstructure:"issuer"`
-	ClientID         string            `mapstructure:"client_id"`
-	ClientSecret     string            `mapstructure:"client_secret"`
-	Scopes           []string          `mapstructure:"scopes"`
-	DeviceEndpoint   string            `mapstructure:"device_endpoint"`
-	TokenEndpoint    string            `mapstructure:"token_endpoint"`
-	UserInfoEndpoint string            `mapstructure:"userinfo_endpoint"`
-	CustomEndpoints  map[string]string `mapstructure:"custom_endpoints"`
-	UserMapping      UserMapping       `mapstructure:"user_mapping"`
-	ResearchPolicies ResearchPolicies  `mapstructure:"research_policies"`
-	Priority         int               `mapstructure:"priority"`
-	UserType         string            `mapstructure:"user_type"`
-	EnabledForLogin  bool              `mapstructure:"enabled_for_login"`
-	VerificationOnly bool              `mapstructure:"verification_only"`
-	RequirePKCE      bool              `mapstructure:"require_pkce"`
-	AllowMissingNonce bool             `mapstructure:"allow_missing_nonce"`
+	Name              string            `mapstructure:"name"`
+	Issuer            string            `mapstructure:"issuer"`
+	ClientID          string            `mapstructure:"client_id"`
+	ClientSecret      string            `mapstructure:"client_secret"`
+	Scopes            []string          `mapstructure:"scopes"`
+	DeviceEndpoint    string            `mapstructure:"device_endpoint"`
+	TokenEndpoint     string            `mapstructure:"token_endpoint"`
+	UserInfoEndpoint  string            `mapstructure:"userinfo_endpoint"`
+	CustomEndpoints   map[string]string `mapstructure:"custom_endpoints"`
+	UserMapping       UserMapping       `mapstructure:"user_mapping"`
+	ResearchPolicies  ResearchPolicies  `mapstructure:"research_policies"`
+	Priority          int               `mapstructure:"priority"`
+	UserType          string            `mapstructure:"user_type"`
+	EnabledForLogin   bool              `mapstructure:"enabled_for_login"`
+	VerificationOnly  bool              `mapstructure:"verification_only"`
+	RequirePKCE       bool              `mapstructure:"require_pkce"`
+	AllowMissingNonce bool              `mapstructure:"allow_missing_nonce"`
 }
 
 // UserMapping defines how to map OIDC claims to user attributes

@@ -96,7 +96,6 @@ type Token struct {
 	Claims       map[string]interface{}
 }
 
-
 // NewOIDCProvider creates a new OIDC provider
 func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfig) (*OIDCProvider, error) {
 	// PKCE (RFC 7636) is not defined for the device authorization grant (RFC 8628).
