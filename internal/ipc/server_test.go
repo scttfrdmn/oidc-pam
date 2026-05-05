@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,16 @@ import (
 func createTestBroker(t *testing.T) *auth.Broker {
 	// Return nil for simple tests since the IPC server should handle nil broker gracefully
 	return nil
+}
+
+// skipIfNotRootOnLinux skips the test when running on Linux as a non-root user.
+// The IPC server's verifyPeerCredentials unconditionally requires UID 0 on Linux,
+// so any test that connects to the socket will be rejected when run as non-root.
+func skipIfNotRootOnLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "linux" && os.Getuid() != 0 {
+		t.Skip("verifyPeerCredentials requires UID 0 on Linux; skipping on non-root runner")
+	}
 }
 
 func TestNewServer(t *testing.T) {
@@ -86,6 +97,7 @@ func TestServerLifecycle(t *testing.T) {
 }
 
 func TestServerConnection(t *testing.T) {
+	skipIfNotRootOnLinux(t)
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -129,6 +141,7 @@ func TestServerConnection(t *testing.T) {
 }
 
 func TestServerMultipleConnections(t *testing.T) {
+	skipIfNotRootOnLinux(t)
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -249,6 +262,7 @@ func TestServerDoubleStop(t *testing.T) {
 }
 
 func TestServerConnectionHandling(t *testing.T) {
+	skipIfNotRootOnLinux(t)
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -484,6 +498,9 @@ func TestServerHandleRevokeSession(t *testing.T) {
 }
 
 func TestServerRejectsPathTraversal(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Getuid() != 0 {
+		t.Skip("verifyPeerCredentials requires Linux + root; skipping path traversal test")
+	}
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -623,6 +640,9 @@ func sendRequestOverSocket(t *testing.T, socketPath string, req *Request) *Respo
 }
 
 func TestServerRateLimitOverSocket(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Getuid() != 0 {
+		t.Skip("verifyPeerCredentials requires Linux + root; skipping rate limit socket test")
+	}
 	tempDir, err := os.MkdirTemp("", "ipc-ratelimit-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -668,6 +688,7 @@ func TestServerRateLimitOverSocket(t *testing.T) {
 }
 
 func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
+	skipIfNotRootOnLinux(t)
 	tempDir, err := os.MkdirTemp("", "ipc-authlimit-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)

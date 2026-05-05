@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -93,8 +94,12 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
-	// Create Unix socket listener
+	// Set umask to 0117 before creating the socket so it is created with
+	// permissions 0660 (owner+group rw) from the start, closing the window
+	// between creation and the os.Chmod call below.
+	oldMask := syscall.Umask(0117)
 	listener, err := net.Listen("unix", s.socketPath)
+	syscall.Umask(oldMask)
 	if err != nil {
 		return fmt.Errorf("failed to create Unix socket listener: %w", err)
 	}
@@ -216,6 +221,13 @@ func (s *Server) acceptConnections(ctx context.Context) {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer func() { _ = conn.Close() }()
+
+	// Verify peer is root — PAM modules always run as root
+	if err := verifyPeerCredentials(conn); err != nil {
+		log.Warn().Err(err).Msg("Rejected IPC connection from non-root peer")
+		s.sendErrorResponse(conn, "PERMISSION_DENIED", "Connection rejected")
+		return
+	}
 
 	// Set connection timeout
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -392,7 +404,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 
 // handleCheckSession handles session check requests
 func (s *Server) handleCheckSession(request *Request) *Response {
-	authResponse, err := s.broker.CheckSession(request.SessionID)
+	authResponse, err := s.broker.CheckSession(request.SessionID, request.UserID)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -425,7 +437,7 @@ func (s *Server) handleCheckSession(request *Request) *Response {
 
 // handleRefreshSession handles session refresh requests
 func (s *Server) handleRefreshSession(request *Request) *Response {
-	authResponse, err := s.broker.RefreshSession(request.SessionID)
+	authResponse, err := s.broker.RefreshSession(request.SessionID, request.UserID)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -456,7 +468,7 @@ func (s *Server) handleRefreshSession(request *Request) *Response {
 
 // handleRevokeSession handles session revocation requests
 func (s *Server) handleRevokeSession(request *Request) *Response {
-	err := s.broker.RevokeSession(request.SessionID)
+	err := s.broker.RevokeSession(request.SessionID, request.UserID)
 	if err != nil {
 		log.Error().
 			Err(err).

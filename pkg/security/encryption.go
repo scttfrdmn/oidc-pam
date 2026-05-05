@@ -17,7 +17,13 @@ type Encryption struct {
 	key []byte
 }
 
-// NewEncryption creates a new encryption instance
+// NewEncryption creates a new encryption instance.
+//
+// If keyString is a base64-encoded 32-byte value (as produced by GenerateKey),
+// those bytes are used directly — no derivation is applied, preserving full
+// entropy. Otherwise SHA-256 of the string is used as a fallback for backward
+// compatibility, but a warning is emitted because this provides no key
+// stretching for weak inputs. Use GenerateKey() to produce a proper key.
 func NewEncryption(keyString string) (*Encryption, error) {
 	if keyString == "" {
 		return nil, fmt.Errorf("encryption key cannot be empty")
