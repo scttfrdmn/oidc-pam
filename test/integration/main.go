@@ -216,7 +216,7 @@ func (s *IntegrationTestSuite) TestSessionManagement() error {
 	}
 
 	// Test session check
-	response, err := s.broker.CheckSession("test-session-1")
+	response, err := s.broker.CheckSession("test-session-1", "")
 	if err != nil {
 		return fmt.Errorf("session check failed: %w", err)
 	}

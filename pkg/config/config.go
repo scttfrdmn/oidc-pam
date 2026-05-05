@@ -42,21 +42,23 @@ type OIDCConfig struct {
 
 // OIDCProvider represents a single OIDC provider configuration
 type OIDCProvider struct {
-	Name             string            `mapstructure:"name"`
-	Issuer           string            `mapstructure:"issuer"`
-	ClientID         string            `mapstructure:"client_id"`
-	ClientSecret     string            `mapstructure:"client_secret"`
-	Scopes           []string          `mapstructure:"scopes"`
-	DeviceEndpoint   string            `mapstructure:"device_endpoint"`
-	TokenEndpoint    string            `mapstructure:"token_endpoint"`
-	UserInfoEndpoint string            `mapstructure:"userinfo_endpoint"`
-	CustomEndpoints  map[string]string `mapstructure:"custom_endpoints"`
-	UserMapping      UserMapping       `mapstructure:"user_mapping"`
-	ResearchPolicies ResearchPolicies  `mapstructure:"research_policies"`
-	Priority         int               `mapstructure:"priority"`
-	UserType         string            `mapstructure:"user_type"`
-	EnabledForLogin  bool              `mapstructure:"enabled_for_login"`
-	VerificationOnly bool              `mapstructure:"verification_only"`
+	Name              string            `mapstructure:"name"`
+	Issuer            string            `mapstructure:"issuer"`
+	ClientID          string            `mapstructure:"client_id"`
+	ClientSecret      string            `mapstructure:"client_secret"`
+	Scopes            []string          `mapstructure:"scopes"`
+	DeviceEndpoint    string            `mapstructure:"device_endpoint"`
+	TokenEndpoint     string            `mapstructure:"token_endpoint"`
+	UserInfoEndpoint  string            `mapstructure:"userinfo_endpoint"`
+	CustomEndpoints   map[string]string `mapstructure:"custom_endpoints"`
+	UserMapping       UserMapping       `mapstructure:"user_mapping"`
+	ResearchPolicies  ResearchPolicies  `mapstructure:"research_policies"`
+	Priority          int               `mapstructure:"priority"`
+	UserType          string            `mapstructure:"user_type"`
+	EnabledForLogin   bool              `mapstructure:"enabled_for_login"`
+	VerificationOnly  bool              `mapstructure:"verification_only"`
+	RequirePKCE       bool              `mapstructure:"require_pkce"`
+	AllowMissingNonce bool              `mapstructure:"allow_missing_nonce"`
 }
 
 // UserMapping defines how to map OIDC claims to user attributes
@@ -74,6 +76,8 @@ type UserMapping struct {
 	DisplayNameTemplate string            `mapstructure:"display_name_template"`
 	GroupPrefix         string            `mapstructure:"group_prefix"`
 	GroupMappings       map[string]string `mapstructure:"group_mappings"`
+	AllowedGroups       []string          `mapstructure:"allowed_groups"`
+	AllowedRoles        []string          `mapstructure:"allowed_roles"`
 }
 
 // ResearchPolicies contains research computing specific policies
@@ -107,6 +111,7 @@ type AuthenticationConfig struct {
 	TokenLifetime         time.Duration                   `mapstructure:"token_lifetime"`
 	RefreshThreshold      time.Duration                   `mapstructure:"refresh_threshold"`
 	MaxConcurrentSessions int                             `mapstructure:"max_concurrent_sessions"`
+	IdleTimeout           time.Duration                   `mapstructure:"idle_timeout"`
 	RequireGroups         []string                        `mapstructure:"require_groups"`
 	Policies              map[string]AuthenticationPolicy `mapstructure:"policies"`
 	NetworkRequirements   NetworkRequirements             `mapstructure:"network_requirements"`
@@ -482,6 +487,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Authentication.MaxConcurrentSessions <= 0 {
 		return fmt.Errorf("authentication.max_concurrent_sessions must be positive")
+	}
+	if c.Authentication.RefreshThreshold >= c.Authentication.TokenLifetime {
+		return fmt.Errorf("authentication.refresh_threshold (%v) must be less than token_lifetime (%v)",
+			c.Authentication.RefreshThreshold, c.Authentication.TokenLifetime)
 	}
 
 	return nil

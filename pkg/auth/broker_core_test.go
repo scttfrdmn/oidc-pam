@@ -171,7 +171,7 @@ func TestTokenManagerCore(t *testing.T) {
 	}
 
 	// Test ValidateToken
-	isValid, err := tokenManager.ValidateToken("test-fingerprint")
+	isValid, err := tokenManager.ValidateToken("test-fingerprint", "test-user")
 	if err != nil {
 		t.Logf("ValidateToken returned error: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestSessionManagementCore(t *testing.T) {
 	}
 
 	// Test CheckSession with non-existent session
-	response, err := broker.CheckSession("non-existent")
+	response, err := broker.CheckSession("non-existent", "test-user")
 	if err != nil {
 		t.Logf("CheckSession returned error: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestSessionManagementCore(t *testing.T) {
 	}
 
 	// Test RefreshSession with non-existent session
-	refreshResponse, err := broker.RefreshSession("non-existent")
+	refreshResponse, err := broker.RefreshSession("non-existent", "test-user")
 	if err != nil {
 		t.Logf("RefreshSession returned error: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestSessionManagementCore(t *testing.T) {
 	}
 
 	// Test RevokeSession with non-existent session
-	err = broker.RevokeSession("non-existent")
+	err = broker.RevokeSession("non-existent", "test-user")
 	if err == nil {
 		t.Error("Expected error for non-existent session")
 	}

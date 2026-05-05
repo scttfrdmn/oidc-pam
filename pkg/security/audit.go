@@ -29,7 +29,9 @@ type AuditLogger struct {
 	wg            sync.WaitGroup
 	droppedEvents atomic.Int64 // total events dropped due to full channel
 	lastDropLog   atomic.Int64 // Unix second of last drop error log (rate limiter)
-	syncMu        sync.Mutex   // serialises direct writeEvent calls for "sync" strategy
+	// writeMu serializes all writes to outputs so that synchronous critical-event
+	// writes (from any goroutine) don't race with the async processEvents goroutine.
+	writeMu sync.Mutex
 }
 
 // DroppedEvents returns the cumulative number of audit events dropped because
@@ -189,17 +191,21 @@ func (al *AuditLogger) LogAuthEvent(event AuditEvent) {
 		event.ComplianceFrameworks = al.config.ComplianceFrameworks
 	}
 
-	// Dispatch according to the configured overflow strategy.
+	// Critical events are always written synchronously to preserve audit trail integrity.
+	if isCriticalEvent(event) {
+		al.writeEventSync(event)
+		return
+	}
+
+	// Non-critical events are dispatched according to the configured overflow strategy.
 	switch al.config.OverflowStrategy {
 	case "block":
 		// Apply backpressure: block the caller until the channel has room.
 		al.eventChan <- event
 	case "sync":
-		// Bypass the async channel and write directly, serialised by syncMu so
+		// Bypass the async channel and write directly, serialised by writeMu so
 		// concurrent callers do not interleave partial writes.
-		al.syncMu.Lock()
-		al.writeEvent(event)
-		al.syncMu.Unlock()
+		al.writeEventSync(event)
 	default: // "drop" (and any unrecognised value)
 		select {
 		case al.eventChan <- event:
@@ -234,12 +240,15 @@ func (al *AuditLogger) processEvents(ctx context.Context) {
 		case <-al.stopChan:
 			return
 		case event := <-al.eventChan:
+			al.writeMu.Lock()
 			al.writeEvent(event)
+			al.writeMu.Unlock()
 		}
 	}
 }
 
-// writeEvent writes an event to all configured outputs
+// writeEvent writes an event to all configured outputs.
+// Callers must hold writeMu.
 func (al *AuditLogger) writeEvent(event AuditEvent) {
 	for _, output := range al.outputs {
 		if err := output.Write(event); err != nil {
@@ -250,6 +259,26 @@ func (al *AuditLogger) writeEvent(event AuditEvent) {
 				Msg("Failed to write audit event")
 		}
 	}
+}
+
+// writeEventSync writes a critical event synchronously to all outputs, bypassing
+// the async channel. Safe to call from any goroutine.
+func (al *AuditLogger) writeEventSync(event AuditEvent) {
+	al.writeMu.Lock()
+	defer al.writeMu.Unlock()
+	al.writeEvent(event)
+}
+
+// isCriticalEvent returns true for events that must never be dropped.
+// These are written synchronously rather than through the async channel.
+func isCriticalEvent(event AuditEvent) bool {
+	switch event.EventType {
+	case "authentication_successful", "session_revoked", "token_refresh_failed",
+		"device_authorization_failed":
+		return true
+	}
+	// Any security rejection is critical regardless of event type.
+	return !event.Success && event.ErrorCode != ""
 }
 
 // Helper functions

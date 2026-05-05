@@ -102,7 +102,7 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 	}
 
 	// Test ValidateToken
-	isValid, err := tm.ValidateToken("test-token-id")
+	isValid, err := tm.ValidateToken("test-token-id", "test-user")
 	if err != nil {
 		t.Logf("ValidateToken returned error: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestTokenManagerRefresh(t *testing.T) {
 	}
 
 	// Test RefreshToken
-	newToken, err := tm.RefreshToken("test-token-id")
+	newToken, err := tm.RefreshToken("test-token-id", "test-user")
 	if err != nil {
 		t.Logf("RefreshToken returned error: %v", err)
 	}
@@ -197,8 +197,8 @@ func TestTokenManagerInternalMethods(t *testing.T) {
 	if tokenID == "" {
 		t.Error("Expected non-empty token ID")
 	}
-	if len(tokenID) != 32 {
-		t.Errorf("Expected 32-char hex token ID, got %d chars", len(tokenID))
+	if len(tokenID) != 64 {
+		t.Errorf("Expected 64-char hex token ID, got %d chars", len(tokenID))
 	}
 
 	// Test multiple token ID generation for uniqueness
@@ -283,7 +283,7 @@ func TestTokenManagerConcurrency(t *testing.T) {
 
 			// Test concurrent operations
 			_, _ = tm.GetToken(tokenID)
-			_, _ = tm.ValidateToken(tokenID)
+			_, _ = tm.ValidateToken(tokenID, fmt.Sprintf("user-%d", i))
 			_ = tm.RevokeToken(tokenID)
 		}(i)
 	}
@@ -330,7 +330,7 @@ func TestValidateTokenConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				storedToken, err := tm.ValidateToken("concurrent-fp")
+				storedToken, err := tm.ValidateToken("concurrent-fp", "user1")
 				if err != nil {
 					t.Errorf("ValidateToken failed: %v", err)
 					return
@@ -498,7 +498,7 @@ func TestValidateTokenO1(t *testing.T) {
 		}
 	}
 
-	st, err := tm.ValidateToken(targetFP)
+	st, err := tm.ValidateToken(targetFP, "user1")
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	}
@@ -567,7 +567,7 @@ func BenchmarkValidateToken(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			fp := fps[i%storeSize]
-			if _, err := tm.ValidateToken(fp); err != nil {
+			if _, err := tm.ValidateToken(fp, "user"); err != nil {
 				b.Errorf("ValidateToken(%q): %v", fp, err)
 			}
 			i++
@@ -608,7 +608,7 @@ func BenchmarkValidateTokenSerial(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		fp := fps[i%storeSize]
-		if _, err := tm.ValidateToken(fp); err != nil {
+		if _, err := tm.ValidateToken(fp, "user"); err != nil {
 			b.Errorf("ValidateToken(%q): %v", fp, err)
 		}
 	}
