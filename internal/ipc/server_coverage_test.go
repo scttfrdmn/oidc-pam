@@ -154,8 +154,10 @@ func TestServerConnectionWithMalformedJSON(t *testing.T) {
 	if response.Success {
 		t.Error("Expected malformed JSON to result in failure")
 	}
-	if response.ErrorCode != "INVALID_REQUEST" {
-		t.Errorf("Expected INVALID_REQUEST, got %s", response.ErrorCode)
+	// On non-Linux platforms peer credential verification rejects the connection
+	// before JSON parsing, so PERMISSION_DENIED is also acceptable here.
+	if response.ErrorCode != "INVALID_REQUEST" && response.ErrorCode != "PERMISSION_DENIED" {
+		t.Errorf("Expected INVALID_REQUEST or PERMISSION_DENIED, got %s", response.ErrorCode)
 	}
 }
 

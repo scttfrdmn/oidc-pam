@@ -47,6 +47,9 @@ func NewAuthorizedKeysManager(baseDir string) *AuthorizedKeysManager {
 
 // AddPublicKey adds a public key to a user's authorized_keys file
 func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -105,6 +108,9 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 
 // RemovePublicKey removes a public key from a user's authorized_keys file
 func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []byte) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -240,6 +246,9 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 
 // ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file
 func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, fmt.Errorf("invalid username: %w", err)
+	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -270,6 +279,9 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 
 // BackupAuthorizedKeys creates a backup of the authorized_keys file
 func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -300,6 +312,9 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 
 // RestoreAuthorizedKeys restores the authorized_keys file from backup
 func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")

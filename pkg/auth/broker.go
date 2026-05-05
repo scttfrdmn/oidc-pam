@@ -2,9 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -28,6 +32,7 @@ type Broker struct {
 	stopChan              chan struct{}
 	wg                    sync.WaitGroup
 	metrics               *oidcmetrics.Metrics // nil when metrics are disabled
+	pendingFlows          int64                // atomic counter of in-progress device authorization goroutines
 }
 
 // SetMetrics attaches a Metrics instance to the broker and its policy engine.
@@ -239,6 +244,16 @@ func (b *Broker) Stop() error {
 
 // Authenticate handles authentication requests
 func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
+	// Validate field lengths to prevent log flooding and memory exhaustion.
+	if len(req.UserID) > 256 || len(req.SourceIP) > 45 ||
+		len(req.TargetHost) > 253 || len(req.LoginType) > 16 {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "INVALID_REQUEST",
+			ErrorMessage: "request field exceeds maximum length",
+		}, nil
+	}
+
 	log.Debug().
 		Str("user_id", req.UserID).
 		Str("source_ip", req.SourceIP).
@@ -246,13 +261,10 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		Str("login_type", req.LoginType).
 		Msg("Processing authentication request")
 
-	// Check for existing session
-	if session := b.getSession(req.SessionID); session != nil {
-		if session.IsActive && session.ExpiresAt.After(time.Now()) {
-			return b.createSuccessResponse(session), nil
-		}
-		// Session expired, clean it up
-		b.removeSession(req.SessionID)
+	// Check for existing session — atomically return valid sessions or remove expired ones.
+	// Pass req.UserID so the helper rejects sessions belonging to other users (prevents hijacking).
+	if session, valid := b.getAndRemoveIfExpiredSession(req.SessionID, req.UserID); valid {
+		return b.createSuccessResponse(session), nil
 	}
 
 	// Check per-user session limit
@@ -327,7 +339,7 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "DEVICE_FLOW_FAILED",
-			ErrorMessage: "Device authorization flow failed",
+			ErrorMessage: sanitizeErrorForClient(err),
 		}, nil
 	}
 
@@ -338,13 +350,12 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		qrCode = "" // Continue without QR code
 	}
 
-	// Generate server-side session ID to prevent session fixation attacks
-	sessionID, err := security.GenerateNonce()
+	// Create pending session — always generate the session ID server-side;
+	// never trust the client-supplied value to prevent session fixation/hijacking.
+	sessionID, err := generateSessionID()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate session ID: %w", err)
 	}
-
-	// Create pending session
 	session := &Session{
 		ID:               sessionID,
 		UserID:           req.UserID,
@@ -362,6 +373,18 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	}
 
 	b.setSession(session)
+
+	// Enforce a cap on concurrent device-flow goroutines to prevent goroutine exhaustion DoS.
+	const maxPendingFlows = 100
+	if atomic.AddInt64(&b.pendingFlows, 1) > maxPendingFlows {
+		atomic.AddInt64(&b.pendingFlows, -1)
+		b.removeSession(session.ID)
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "RATE_LIMITED",
+			ErrorMessage: "too many pending device authorization flows; try again later",
+		}, nil
+	}
 
 	// Start polling for device authorization in background
 	b.wg.Add(1)
@@ -383,14 +406,23 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	}, nil
 }
 
-// CheckSession checks the status of an authentication session
-func (b *Broker) CheckSession(sessionID string) (*AuthResponse, error) {
+// CheckSession checks the status of an authentication session.
+// userID must match the session owner — cross-user session access is rejected.
+func (b *Broker) CheckSession(sessionID, userID string) (*AuthResponse, error) {
 	session := b.getSession(sessionID)
 	if session == nil {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "SESSION_NOT_FOUND",
 			ErrorMessage: "Session not found",
+		}, nil
+	}
+
+	if session.UserID != userID {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "FORBIDDEN",
+			ErrorMessage: "session does not belong to requesting user",
 		}, nil
 	}
 
@@ -416,17 +448,33 @@ func (b *Broker) CheckSession(sessionID string) (*AuthResponse, error) {
 		}, nil
 	}
 
+	// Clone before mutation to avoid a data race: getSession returns the raw
+	// pointer stored in the map, so writing to it without a lock races with
+	// any concurrent reader that also holds that pointer.
+	updated := *session
+	updated.LastAccessed = time.Now()
+	b.setSession(&updated)
+
 	return b.createSuccessResponse(session), nil
 }
 
-// RefreshSession refreshes an authentication session
-func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
+// RefreshSession refreshes an authentication session.
+// userID must match the session owner — cross-user session refreshes are rejected.
+func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error) {
 	session := b.getSession(sessionID)
 	if session == nil {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "SESSION_NOT_FOUND",
 			ErrorMessage: "Session not found",
+		}, nil
+	}
+
+	if session.UserID != userID {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "FORBIDDEN",
+			ErrorMessage: "session does not belong to requesting user",
 		}, nil
 	}
 
@@ -470,7 +518,7 @@ func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "REFRESH_FAILED",
-			ErrorMessage: "Token refresh failed",
+			ErrorMessage: sanitizeErrorForClient(err),
 		}, nil
 	}
 
@@ -493,11 +541,16 @@ func (b *Broker) RefreshSession(sessionID string) (*AuthResponse, error) {
 	return b.createSuccessResponse(session), nil
 }
 
-// RevokeSession revokes an authentication session
-func (b *Broker) RevokeSession(sessionID string) error {
+// RevokeSession revokes an authentication session.
+// userID must match the session owner — cross-user revocation is rejected.
+func (b *Broker) RevokeSession(sessionID, userID string) error {
 	session := b.getSession(sessionID)
 	if session == nil {
 		return fmt.Errorf("session not found")
+	}
+
+	if session.UserID != userID {
+		return fmt.Errorf("session does not belong to requesting user")
 	}
 
 	// Revoke SSH key if present
@@ -532,6 +585,28 @@ func (b *Broker) getSession(sessionID string) *Session {
 	b.sessionMutex.RLock()
 	defer b.sessionMutex.RUnlock()
 	return b.sessions[sessionID]
+}
+
+// getAndRemoveIfExpiredSession atomically checks a session and removes it if it
+// is expired or inactive. Returns (session, true) only if the session is valid,
+// active, and owned by userID. Returns (nil, false) if the session doesn't
+// exist, belongs to a different user, or was expired/inactive (and is removed).
+func (b *Broker) getAndRemoveIfExpiredSession(sessionID, userID string) (*Session, bool) {
+	b.sessionMutex.Lock()
+	defer b.sessionMutex.Unlock()
+	session, ok := b.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	// Reject sessions belonging to a different user (prevents cross-user session hijacking).
+	if session.UserID != userID {
+		return nil, false
+	}
+	if session.IsActive && session.ExpiresAt.After(time.Now()) {
+		return session, true // valid — do not remove
+	}
+	delete(b.sessions, sessionID) // expired/inactive — remove atomically
+	return nil, false
 }
 
 func (b *Broker) setSession(session *Session) {
@@ -597,6 +672,7 @@ func (b *Broker) selectProvider(req *AuthRequest, policyResult *PolicyResult) *O
 
 func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow) {
 	defer b.wg.Done()
+	defer atomic.AddInt64(&b.pendingFlows, -1)
 
 	ticker := time.NewTicker(time.Duration(deviceFlow.PollingInterval) * time.Second)
 	defer ticker.Stop()
@@ -652,29 +728,31 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				return
 			}
 
-			// Update session with user info
-			session.Email = userInfo.Email
-			session.Groups = userInfo.Groups
-			session.TokenFingerprint = token.Fingerprint
-			session.RefreshToken = token.RefreshToken
-			session.IsActive = true
-			session.DeviceTrusted = userInfo.DeviceTrusted
+			// Clone before mutation: getSession returns the raw pointer stored in
+			// the map; writing to it without a lock races with concurrent readers.
+			updated := *session
+			updated.Email = userInfo.Email
+			updated.Groups = userInfo.Groups
+			updated.TokenFingerprint = token.Fingerprint
+			updated.RefreshToken = token.RefreshToken
+			updated.IsActive = true
+			updated.DeviceTrusted = userInfo.DeviceTrusted
 
 			// Generate SSH key if needed
-			if session.SSHKeyID == "" {
-				sshKey, err := b.generateSSHKey(session)
+			if updated.SSHKeyID == "" {
+				sshKey, err := b.generateSSHKey(&updated)
 				if err != nil {
 					log.Error().
 						Err(err).
-						Str("session_id", session.ID).
+						Str("session_id", updated.ID).
 						Msg("Failed to generate SSH key")
 				} else {
-					session.SSHKeyID = sshKey.ID
-					session.SSHPublicKey = sshKey.PublicKey
+					updated.SSHKeyID = sshKey.ID
+					updated.SSHPublicKey = sshKey.PublicKey
 				}
 			}
 
-			b.setSession(session)
+			b.setSession(&updated)
 
 			if b.metrics != nil {
 				b.metrics.RecordAuth(provider.Name, "success", "")
@@ -720,9 +798,11 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 			// Atomically collect and remove expired sessions under a single write lock
 			// to avoid TOCTOU race between identifying and removing sessions.
 			var expiredSessions []*Session
+			idleTimeout := b.config.Authentication.IdleTimeout
 			b.sessionMutex.Lock()
 			for id, session := range b.sessions {
-				if session.ExpiresAt.Before(now) {
+				idleExpired := idleTimeout > 0 && time.Since(session.LastAccessed) > idleTimeout
+				if session.ExpiresAt.Before(now) || idleExpired {
 					expiredSessions = append(expiredSessions, session)
 					delete(b.sessions, id)
 				}
@@ -751,11 +831,11 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 				}
 
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
-					EventType: "session_revoked",
+					EventType: "session_expired",
 					UserID:    session.UserID,
 					SessionID: session.ID,
 					Success:   true,
-					Timestamp: time.Now(),
+					Timestamp: now,
 				})
 			}
 
@@ -862,6 +942,37 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 	}
 
 	return nil
+}
+
+// generateSessionID returns a cryptographically random 64-character hex session ID.
+// It returns an error rather than degrading to a predictable fallback — a crypto/rand
+// failure indicates a serious system problem that must not be silently ignored.
+func generateSessionID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate session ID: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// sanitizeErrorForClient logs the full internal error and returns a generic
+// message safe to surface to PAM / end users (avoids leaking OIDC internals).
+func sanitizeErrorForClient(err error) string {
+	log.Debug().Err(err).Msg("internal auth error")
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "authorization_pending"):
+		return "authorization pending"
+	case strings.Contains(msg, "slow_down"):
+		return "authorization pending"
+	case strings.Contains(msg, "access_denied"):
+		return "access denied by identity provider"
+	case strings.Contains(msg, "expired_token"):
+		return "device code expired"
+	default:
+		return "authentication failed"
+	}
 }
 
 // SSHKey represents an SSH key

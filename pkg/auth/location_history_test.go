@@ -15,7 +15,9 @@ import (
 
 func newLH(t *testing.T, cfg config.LocationHistoryConfig) *LocationHistory {
 	t.Helper()
-	return NewLocationHistory(cfg)
+	lh := NewLocationHistory(cfg)
+	t.Cleanup(lh.Close) // drain async persist goroutines before temp dir is removed
+	return lh
 }
 
 func defaultLH(t *testing.T) *LocationHistory {
@@ -198,7 +200,8 @@ func TestLocationHistoryPersistence(t *testing.T) {
 	lh1.RecordLocation("alice", "1.2.3.4", "US")
 	lh1.RecordLocation("alice", "10.0.0.1", "US")
 
-	// Wait for async persistence goroutine.
+	// Drain all async persist goroutines before reading the file back.
+	lh1.Close()
 	waitForFile(t, path, 2*time.Second)
 
 	// Load into a fresh instance.

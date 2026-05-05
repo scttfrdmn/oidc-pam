@@ -138,18 +138,16 @@ int send_auth_request(int sock, const char *username, const char *service, const
     
     log_pam_message(LOG_DEBUG, "Sending auth request: %s", request_str);
     
-    // Send request
-    ssize_t sent = send(sock, request_str, request_len, 0);
-    if (sent == -1) {
-        log_pam_message(LOG_ERR, "Failed to send request: %s", strerror(errno));
-        json_object_put(request);
-        return -1;
-    }
-    
-    if (sent != (ssize_t)request_len) {
-        log_pam_message(LOG_ERR, "Partial send: sent %zd of %zu bytes", sent, request_len);
-        json_object_put(request);
-        return -1;
+    // Send request — retry until all bytes are sent
+    ssize_t total_sent = 0;
+    while (total_sent < (ssize_t)request_len) {
+        ssize_t sent = send(sock, request_str + total_sent, request_len - total_sent, 0);
+        if (sent == -1) {
+            log_pam_message(LOG_ERR, "Failed to send request: %s", strerror(errno));
+            json_object_put(request);
+            return -1;
+        }
+        total_sent += sent;
     }
     
     json_object_put(request);
@@ -334,7 +332,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
             // Display instructions to user
             if (json_object_object_get_ex(response_obj, "instructions", &instructions_obj)) {
                 instructions = json_object_get_string(instructions_obj);
-                display_message(pamh, instructions);
+                if (instructions != NULL) {
+                    display_message(pamh, instructions);
+                }
                 
                 // For device flow, we need to poll for completion
                 // This is a simplified implementation - in practice, we'd need

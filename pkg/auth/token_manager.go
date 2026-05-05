@@ -239,11 +239,12 @@ func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
 	return token, nil
 }
 
-// ValidateToken validates a token by fingerprint in O(1) using the fingerprint
-// index.
-func (tm *TokenManager) ValidateToken(tokenFingerprint string) (*StoredToken, error) {
-	tm.tokenStore.mutex.Lock()
-	defer tm.tokenStore.mutex.Unlock()
+// ValidateToken validates a token fingerprint and verifies it belongs to the given user.
+// Both fingerprint and userID must match to prevent token hijacking across users.
+// Uses the O(1) fingerprint index for lookup.
+func (tm *TokenManager) ValidateToken(tokenFingerprint, userID string) (*StoredToken, error) {
+	tm.tokenStore.mutex.RLock()
+	defer tm.tokenStore.mutex.RUnlock()
 
 	tokenID, ok := tm.tokenStore.fingerprintIndex[tokenFingerprint]
 	if !ok {
@@ -252,23 +253,29 @@ func (tm *TokenManager) ValidateToken(tokenFingerprint string) (*StoredToken, er
 
 	storedToken, ok := tm.tokenStore.tokens[tokenID]
 	if !ok {
-		// Index is out of sync (should not happen); clean up the stale entry.
-		delete(tm.tokenStore.fingerprintIndex, tokenFingerprint)
+		// Index is out of sync (should not happen); treat as not found.
 		return nil, fmt.Errorf("token not found")
+	}
+
+	if storedToken.UserID != userID {
+		return nil, fmt.Errorf("token does not belong to requesting user")
 	}
 
 	if storedToken.ExpiresAt.Before(time.Now()) {
 		return nil, fmt.Errorf("token expired")
 	}
 
-	storedToken.LastUsed = time.Now()
+	// LastUsed is intentionally not updated here: writing through a pointer
+	// under RLock races with concurrent ValidateToken callers. LastUsed is not
+	// used for any security decision, so it is only updated under write lock
+	// paths (StoreToken, performCleanup).
 	return storedToken, nil
 }
 
-// RefreshToken refreshes a token
-func (tm *TokenManager) RefreshToken(tokenFingerprint string) (*Token, error) {
+// RefreshToken refreshes a token. userID must match the token owner.
+func (tm *TokenManager) RefreshToken(tokenFingerprint, userID string) (*Token, error) {
 	// Find stored token
-	storedToken, err := tm.ValidateToken(tokenFingerprint)
+	storedToken, err := tm.ValidateToken(tokenFingerprint, userID)
 	if err != nil {
 		return nil, fmt.Errorf("token validation failed: %w", err)
 	}
@@ -391,7 +398,7 @@ func (tm *TokenManager) GetTokenStats() map[string]interface{} {
 // Helper methods
 
 func (tm *TokenManager) generateTokenID() (string, error) {
-	randomBytes := make([]byte, 16)
+	randomBytes := make([]byte, 32)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", fmt.Errorf("failed to generate token ID: %w", err)
 	}

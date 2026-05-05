@@ -25,12 +25,31 @@ type KeyManager struct {
 }
 
 // SSHKey represents an SSH key pair
+// TODO(L-3): Key expiry is currently carried in the SSH public key comment field
+// (e.g. "oidc-pam:expires=<unix-timestamp>"). This is fragile because comment
+// fields are user-visible and may be stripped by some authorized_keys parsers.
+// A future refactor should store expiry in a separate metadata file alongside
+// the key, keyed by the same identifier.
 type SSHKey struct {
 	PrivateKey []byte
 	PublicKey  []byte
 	Comment    string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
+}
+
+// validateUsername rejects usernames that could be used for path traversal attacks.
+func validateUsername(username string) error {
+	if username == "" {
+		return fmt.Errorf("username cannot be empty")
+	}
+	if strings.ContainsAny(username, "/\\\x00") {
+		return fmt.Errorf("username contains invalid characters")
+	}
+	if strings.Contains(username, "..") {
+		return fmt.Errorf("username cannot contain '..'")
+	}
+	return nil
 }
 
 // NewKeyManager creates a new SSH key manager
@@ -114,6 +133,9 @@ func (km *KeyManager) GenerateKey(username string) (*SSHKey, error) {
 
 // SaveKey saves an SSH key pair to disk
 func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userDir := filepath.Join(km.baseDir, username)
 	if err := os.MkdirAll(userDir, 0700); err != nil {
 		return fmt.Errorf("failed to create user directory: %w", err)
@@ -152,6 +174,9 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 
 // LoadKey loads an SSH key pair from disk
 func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, fmt.Errorf("invalid username: %w", err)
+	}
 	userDir := filepath.Join(km.baseDir, username)
 
 	// Load private key
@@ -201,6 +226,9 @@ func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
 
 // DeleteKey removes an SSH key pair from disk
 func (km *KeyManager) DeleteKey(username string) error {
+	if err := validateUsername(username); err != nil {
+		return fmt.Errorf("invalid username: %w", err)
+	}
 	userDir := filepath.Join(km.baseDir, username)
 
 	// Remove all key files
@@ -235,11 +263,17 @@ func (km *KeyManager) IsKeyExpired(key *SSHKey) bool {
 
 // GetKeyPath returns the path to the SSH key for a user
 func (km *KeyManager) GetKeyPath(username string) string {
+	if validateUsername(username) != nil {
+		return ""
+	}
 	return filepath.Join(km.baseDir, username, "id_rsa")
 }
 
 // GetPublicKeyPath returns the path to the SSH public key for a user
 func (km *KeyManager) GetPublicKeyPath(username string) string {
+	if validateUsername(username) != nil {
+		return ""
+	}
 	return filepath.Join(km.baseDir, username, "id_rsa.pub")
 }
 
