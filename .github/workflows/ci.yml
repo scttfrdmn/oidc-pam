@@ -91,12 +91,10 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin latest
+        uses: golangci/golangci-lint-action@v6
+        with:
           # Lint only non-PAM packages (PAM packages require CGO and PAM development libraries)
-          $(go env GOPATH)/bin/golangci-lint run --timeout=5m \
-            ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... \
-            ./internal/... ./cmd/broker/... ./cmd/oidc-admin/...
+          args: --timeout=5m ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... ./internal/... ./cmd/broker/... ./cmd/oidc-admin/...
 
   validate:
     name: Validate
