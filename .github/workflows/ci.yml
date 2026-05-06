@@ -22,7 +22,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: Verify dependencies
@@ -56,7 +56,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: Install PAM development libraries
@@ -87,13 +87,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: golangci-lint
         run: |
-          # Download and run golangci-lint (v1.64.2+ supports Go 1.24, built with Go 1.24)
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.2
+          # Download and run golangci-lint (v1.65.0+ supports Go 1.25)
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.65.0
           # Lint only non-PAM packages (PAM packages require CGO and PAM development libraries)
           $(go env GOPATH)/bin/golangci-lint run --timeout=5m \
             ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... \
@@ -110,7 +110,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: Check formatting
