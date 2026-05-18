@@ -1,10 +1,10 @@
 module github.com/scttfrdmn/oidc-pam
 
-go 1.24.0
+go 1.25.0
 
 require (
-	github.com/coreos/go-oidc/v3 v3.17.0
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
@@ -13,7 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/crypto v0.47.0
-	golang.org/x/oauth2 v0.35.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.40.0
 )
 
