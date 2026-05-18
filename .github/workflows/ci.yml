@@ -22,7 +22,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25'
+          go-version: '1.24'
           cache: true
 
       - name: Verify dependencies
@@ -56,7 +56,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25'
+          go-version: '1.24'
           cache: true
 
       - name: Install PAM development libraries
@@ -87,14 +87,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25'
+          go-version: '1.24'
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
+        run: |
+          # v1.64.2 is the last release built with Go 1.24 (newer versions require Go ≥1.25)
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.64.2
           # Lint only non-PAM packages (PAM packages require CGO and PAM development libraries)
-          args: --timeout=5m ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... ./internal/... ./cmd/broker/... ./cmd/oidc-admin/...
+          $(go env GOPATH)/bin/golangci-lint run --timeout=5m \
+            ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... \
+            ./internal/... ./cmd/broker/... ./cmd/oidc-admin/...
 
   validate:
     name: Validate
@@ -107,7 +110,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25'
+          go-version: '1.24'
           cache: true
 
       - name: Check formatting
