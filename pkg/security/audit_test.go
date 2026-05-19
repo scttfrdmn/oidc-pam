@@ -304,7 +304,7 @@ func TestSyslogAuditOutput(t *testing.T) {
 		// Syslog may not be available in all test environments (e.g. CI containers).
 		t.Skipf("Skipping syslog test: syslog not available: %v", err)
 	}
-	defer output.Close()
+	defer func() { _ = output.Close() }()
 
 	event := AuditEvent{
 		EventType:  "test_syslog",

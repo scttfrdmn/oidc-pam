@@ -38,10 +38,10 @@ func FormatDeviceInstructions(deviceURL, userCode, qrCode string) string {
 	}
 
 	instructions.WriteString("📱 Option 2: Visit the following URL on your mobile device:\n")
-	instructions.WriteString(fmt.Sprintf("🔗 %s\n\n", deviceURL))
+	fmt.Fprintf(&instructions, "🔗 %s\n\n", deviceURL)
 
 	instructions.WriteString("🔑 Enter this code when prompted:\n")
-	instructions.WriteString(fmt.Sprintf("   %s\n\n", userCode))
+	fmt.Fprintf(&instructions, "   %s\n\n", userCode)
 
 	instructions.WriteString("⏳ Waiting for authentication...\n")
 	instructions.WriteString("   (This will complete automatically once you authenticate)\n\n")
@@ -127,8 +127,8 @@ func FormatAuthenticationSuccess(userEmail, sessionDuration string) string {
 
 	success.WriteString("✅ Authentication Successful!\n")
 	success.WriteString("═══════════════════════════════════════════════════════════════\n")
-	success.WriteString(fmt.Sprintf("👤 Authenticated as: %s\n", userEmail))
-	success.WriteString(fmt.Sprintf("⏰ Session duration: %s\n", sessionDuration))
+	fmt.Fprintf(&success, "👤 Authenticated as: %s\n", userEmail)
+	fmt.Fprintf(&success, "⏰ Session duration: %s\n", sessionDuration)
 	success.WriteString("🔑 SSH key provisioned automatically\n")
 	success.WriteString("🛡️  All access logged for security compliance\n\n")
 
@@ -141,7 +141,7 @@ func FormatAuthenticationError(errorMsg string) string {
 
 	errorStr.WriteString("❌ Authentication Failed\n")
 	errorStr.WriteString("═══════════════════════════════════════════════════════════════\n")
-	errorStr.WriteString(fmt.Sprintf("Error: %s\n\n", errorMsg))
+	fmt.Fprintf(&errorStr, "Error: %s\n\n", errorMsg)
 
 	errorStr.WriteString("Please try again or contact your system administrator.\n")
 

@@ -81,7 +81,7 @@ func TestBuildTLSConfigCABundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HTTPS request with custom CA bundle failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildTLSConfigCABundleInvalidPath expects an error when the CA bundle
@@ -138,7 +138,7 @@ func TestBuildTLSConfigCertPinSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected success with matching pin, got: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildTLSConfigCertPinFailure verifies that a connection is rejected when
@@ -209,7 +209,7 @@ func TestBuildTLSConfigCertPinColonFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected success with colon-separated pin, got: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildTLSConfigCertPinUppercase verifies that uppercase hex fingerprints
@@ -240,7 +240,7 @@ func TestBuildTLSConfigCertPinUppercase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected success with uppercase pin, got: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // TestBuildTLSConfigCertPinMultiple verifies that a connection succeeds when
@@ -272,7 +272,7 @@ func TestBuildTLSConfigCertPinMultiple(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected success when one of multiple pins matches: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 // helpers
@@ -293,6 +293,6 @@ func writeTempFile(t *testing.T, data []byte) string {
 	if _, err := f.Write(data); err != nil {
 		t.Fatalf("Failed to write temp file: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 	return f.Name()
 }

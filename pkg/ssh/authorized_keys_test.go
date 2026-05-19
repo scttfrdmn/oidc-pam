@@ -28,7 +28,7 @@ func TestAddPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -79,7 +79,7 @@ func TestAddPublicKeyWithExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -126,7 +126,7 @@ func TestRemovePublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -163,7 +163,7 @@ func TestRemovePublicKeyNonExistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -182,7 +182,7 @@ func TestRemovePublicKeyNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -220,7 +220,7 @@ func TestListOIDCKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -271,7 +271,7 @@ func TestListOIDCKeysNonExistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -293,7 +293,7 @@ func TestBackupAuthorizedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -336,7 +336,7 @@ func TestBackupAuthorizedKeysNonExistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -354,7 +354,7 @@ func TestRestoreAuthorizedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -404,7 +404,7 @@ func TestRestoreAuthorizedKeysNoBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -460,7 +460,7 @@ func TestRemoveExpiredKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -527,7 +527,7 @@ func TestAddPublicKeyConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"
@@ -572,7 +572,7 @@ func TestRemoveExpiredKeysNonExistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	akm := NewAuthorizedKeysManager(tmpDir)
 	username := "testuser"

@@ -529,7 +529,7 @@ func (hao *HTTPAuditOutput) Write(event AuditEvent) error {
 				Msg("Audit HTTP POST failed, retrying")
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
