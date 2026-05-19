@@ -70,8 +70,8 @@ jobs:
 
       - name: Run Gosec Security Scanner
         run: |
-          # Install gosec
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+          # Install gosec v2.26.1 (Go 1.25 compatible)
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
 
           # Run gosec with SARIF output for GitHub integration
           gosec -fmt sarif -out gosec-results.sarif -exclude-dir=test ./...
