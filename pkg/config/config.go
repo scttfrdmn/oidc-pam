@@ -50,6 +50,8 @@ type OIDCProvider struct {
 	DeviceEndpoint    string            `mapstructure:"device_endpoint"`
 	TokenEndpoint     string            `mapstructure:"token_endpoint"`
 	UserInfoEndpoint  string            `mapstructure:"userinfo_endpoint"`
+	JWKSUri           string            `mapstructure:"jwks_uri"`
+	SkipDiscovery     bool              `mapstructure:"skip_discovery"`
 	CustomEndpoints   map[string]string `mapstructure:"custom_endpoints"`
 	UserMapping       UserMapping       `mapstructure:"user_mapping"`
 	ResearchPolicies  ResearchPolicies  `mapstructure:"research_policies"`

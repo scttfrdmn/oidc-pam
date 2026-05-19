@@ -1,0 +1,46 @@
+# AWS IAM Identity Center OIDC provider configuration for oidc-pam
+# Used by Gauss cluster for SSH authentication via device flow
+#
+# Setup (already done via API):
+#   - Application ARN: arn:aws:sso::640928554303:application/ssoins-6684bf5da3e86cc6/apl-668462cc38d0ddad
+#   - Registered via: aws sso-oidc register-client --client-type public
+#     --grant-types urn:ietf:params:oauth:grant-type:device_code
+#   - Credentials stored in SSM: /gauss/auth/oidc/client-id, /gauss/auth/oidc/client-secret
+#   - client_secret expires ~90 days — rotate with: aws sso-oidc register-client (re-run)
+#
+# IAM Identity Center OIDC endpoints (us-east-2):
+#   Issuer:        https://oidc.us-east-2.amazonaws.com
+#   Device auth:   https://oidc.us-east-2.amazonaws.com/device_authorization
+#   Token:         https://oidc.us-east-2.amazonaws.com/token
+#   Discovery:     https://oidc.us-east-2.amazonaws.com/.well-known/openid-configuration
+
+name: aws-identity-center
+issuer: https://oidc.us-east-2.amazonaws.com
+client_id: "env:OIDC_CLIENT_ID"
+client_secret: "env:OIDC_CLIENT_SECRET"
+
+# IAM Identity Center does not expose a public /.well-known/openid-configuration.
+# skip_discovery bypasses oidc.NewProvider() and uses the explicit endpoints below.
+skip_discovery: true
+device_endpoint: https://oidc.us-east-2.amazonaws.com/device_authorization
+token_endpoint: https://oidc.us-east-2.amazonaws.com/token
+userinfo_endpoint: https://oidc.us-east-2.amazonaws.com/userInfo
+jwks_uri: https://oidc.us-east-2.amazonaws.com/.well-known/jwks.json
+
+scopes:
+  - openid
+  - email
+  - profile
+
+# AWS Identity Center returns preferred_username matching the Identity Center username,
+# which should match the local Linux username on Gauss cluster nodes.
+user_mapping:
+  username_claim: preferred_username
+  email_claim: email
+  name_claim: name
+
+priority: 1
+enabled_for_login: true
+verification_only: false
+require_pkce: false  # Device flow (RFC 8628) does not use PKCE
+allow_missing_nonce: true  # Device flow does not include nonce in ID token

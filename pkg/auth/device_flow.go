@@ -126,24 +126,56 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 	// /.well-known/openid-configuration fetch as well.
 	ctx := oidc.ClientContext(context.Background(), httpClient)
 
-	provider, err := oidc.NewProvider(ctx, providerCfg.Issuer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
-	}
+	var provider *oidc.Provider
+	var verifier *oidc.IDTokenVerifier
+	var oauth2Config *oauth2.Config
 
-	// Create ID token verifier
-	verifier := provider.Verifier(&oidc.Config{
-		ClientID:             providerCfg.ClientID,
-		SkipClientIDCheck:    !secCfg.VerifyAudience,
-		SupportedSigningAlgs: []string{"RS256", "ES256"},
-	})
+	if providerCfg.SkipDiscovery {
+		// Manual provider construction — used for providers without a public
+		// /.well-known/openid-configuration (e.g. AWS IAM Identity Center).
+		// Requires jwks_uri and token_endpoint to be explicitly configured.
+		if providerCfg.JWKSUri == "" {
+			return nil, fmt.Errorf("skip_discovery requires jwks_uri to be set")
+		}
+		if providerCfg.TokenEndpoint == "" {
+			return nil, fmt.Errorf("skip_discovery requires token_endpoint to be set")
+		}
 
-	// Create OAuth2 config
-	oauth2Config := &oauth2.Config{
-		ClientID:    providerCfg.ClientID,
-		Endpoint:    provider.Endpoint(),
-		Scopes:      providerCfg.Scopes,
-		RedirectURL: "", // Not used for device flow
+		provCfg := &oidc.ProviderConfig{
+			IssuerURL:     providerCfg.Issuer,
+			TokenURL:      providerCfg.TokenEndpoint,
+			DeviceAuthURL: providerCfg.DeviceEndpoint,
+			UserInfoURL:   providerCfg.UserInfoEndpoint,
+			JWKSURL:       providerCfg.JWKSUri,
+		}
+		provider = provCfg.NewProvider(ctx)
+		verifier = provider.Verifier(&oidc.Config{
+			ClientID:             providerCfg.ClientID,
+			SkipClientIDCheck:    !secCfg.VerifyAudience,
+			SupportedSigningAlgs: []string{"RS256", "ES256"},
+		})
+		oauth2Config = &oauth2.Config{
+			ClientID: providerCfg.ClientID,
+			Endpoint: provider.Endpoint(),
+			Scopes:   providerCfg.Scopes,
+		}
+	} else {
+		var err error
+		provider, err = oidc.NewProvider(ctx, providerCfg.Issuer)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OIDC provider: %w", err)
+		}
+
+		verifier = provider.Verifier(&oidc.Config{
+			ClientID:             providerCfg.ClientID,
+			SkipClientIDCheck:    !secCfg.VerifyAudience,
+			SupportedSigningAlgs: []string{"RS256", "ES256"},
+		})
+		oauth2Config = &oauth2.Config{
+			ClientID: providerCfg.ClientID,
+			Endpoint: provider.Endpoint(),
+			Scopes:   providerCfg.Scopes,
+		}
 	}
 
 	return &OIDCProvider{
