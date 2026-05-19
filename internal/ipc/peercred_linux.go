@@ -20,7 +20,7 @@ func getPeerCredentials(conn net.Conn) (uid, gid uint32, err error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get file descriptor: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	cred, err := syscall.GetsockoptUcred(int(f.Fd()), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	if err != nil {

@@ -22,7 +22,7 @@ func TestGetPeerCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	// Connect to the socket
 	connCh := make(chan net.Conn, 1)
@@ -40,12 +40,12 @@ func TestGetPeerCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Get the server-side connection
 	select {
 	case serverConn := <-connCh:
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
 
 		uid, gid, err := getPeerCredentials(serverConn)
 		if err != nil {
@@ -79,7 +79,7 @@ func TestGetPeerCredentialsNonUnixConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create TCP listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	connCh := make(chan net.Conn, 1)
 	errCh := make(chan error, 1)
@@ -96,11 +96,11 @@ func TestGetPeerCredentialsNonUnixConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	select {
 	case serverConn := <-connCh:
-		defer serverConn.Close()
+		defer func() { _ = serverConn.Close() }()
 
 		_, _, err := getPeerCredentials(serverConn)
 		// On Linux, macOS, and FreeBSD, this should fail because it's not a Unix socket
