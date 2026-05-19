@@ -28,6 +28,7 @@ Choose your provider and follow the specific setup guide:
 - **Keycloak** - See `providers/keycloak.yaml`
 - **Azure AD** - See `providers/azure-ad.yaml`
 - **Okta** - See `providers/okta.yaml`
+- **AWS IAM Identity Center** - See `providers/aws-identity-center.yaml`
 
 ### 3. Basic Setup Steps
 
@@ -233,6 +234,74 @@ oidc:
       client_id: "your-okta-client-id"
       client_secret: "your-okta-client-secret"
 ```
+
+### AWS IAM Identity Center Setup
+
+AWS IAM Identity Center does not expose a public `/.well-known/openid-configuration` endpoint. The standard OIDC discovery call returns `403 Forbidden`, so the broker must be configured with `skip_discovery: true` and all endpoints supplied explicitly.
+
+1. **Register a public client:**
+   ```bash
+   aws sso-oidc register-client \
+     --client-type public \
+     --client-name oidc-pam \
+     --grant-types urn:ietf:params:oauth:grant-type:device_code \
+     --region us-east-2
+   ```
+   Note the `clientId` and `clientSecret` from the response. The secret expires after ~90 days; re-run `register-client` to rotate it.
+
+2. **Store credentials securely** (AWS SSM example):
+   ```bash
+   aws ssm put-parameter --name /oidc-pam/client-id     --value "<clientId>"     --type SecureString
+   aws ssm put-parameter --name /oidc-pam/client-secret --value "<clientSecret>" --type SecureString
+   ```
+
+3. **Configure the broker** — replace `us-east-2` with your IAM Identity Center region:
+
+```yaml
+oidc:
+  providers:
+    - name: aws-identity-center
+      issuer: "https://oidc.us-east-2.amazonaws.com"
+
+      # IAM Identity Center returns 403 on /.well-known/openid-configuration.
+      # skip_discovery bypasses OIDC discovery; all endpoints must be explicit.
+      skip_discovery: true
+      device_endpoint:   "https://oidc.us-east-2.amazonaws.com/device_authorization"
+      token_endpoint:    "https://oidc.us-east-2.amazonaws.com/token"
+      userinfo_endpoint: "https://oidc.us-east-2.amazonaws.com/userInfo"
+      jwks_uri:          "https://oidc.us-east-2.amazonaws.com/.well-known/jwks.json"
+
+      client_id:     "env:OIDC_CLIENT_ID"
+      client_secret: "env:OIDC_CLIENT_SECRET"
+      scopes: [openid, email, profile]
+
+      allow_missing_nonce: true  # Device flow does not include nonce in ID token
+      require_pkce: false        # RFC 8628 device flow does not use PKCE
+
+      user_mapping:
+        username_claim: preferred_username
+        email_claim: email
+        name_claim: name
+
+      priority: 1
+      enabled_for_login: true
+```
+
+See `providers/aws-identity-center.yaml` for a ready-to-use template.
+
+### The `skip_discovery` Option
+
+Any provider that lacks a publicly accessible `/.well-known/openid-configuration` can use `skip_discovery`:
+
+| Field | Required when `skip_discovery: true` | Description |
+|---|---|---|
+| `skip_discovery` | — | Set to `true` to bypass OIDC discovery |
+| `jwks_uri` | **required** | URL of the provider's public key set |
+| `token_endpoint` | **required** | OAuth2 token endpoint |
+| `device_endpoint` | recommended | RFC 8628 device authorization endpoint |
+| `userinfo_endpoint` | optional | OpenID Connect UserInfo endpoint |
+
+When `skip_discovery: true` is set, the broker constructs the OIDC provider from these fields directly using `oidc.ProviderConfig` — no network call is made to the discovery endpoint at startup.
 
 ## Security Best Practices
 

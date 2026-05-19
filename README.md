@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.21-blue)](https://golang.org/)
-[![Version](https://img.shields.io/badge/Version-0.1.0--alpha-red)](https://github.com/scttfrdmn/oidc-pam/releases)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
 A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH, console, and GUI logins with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
@@ -11,7 +11,7 @@ A comprehensive Linux authentication solution using OpenID Connect (OIDC) that m
 - **Modern Authentication**: Replace SSH keys with OIDC + Passkeys
 - **Universal PAM Integration**: Works with SSH, console, and GUI logins
 - **Automatic SSH Key Management**: Generate, rotate, and revoke SSH keys automatically
-- **Enterprise Identity Integration**: Support for Okta, Azure AD, Auth0, Google Workspace, and any OIDC provider
+- **Enterprise Identity Integration**: Support for Okta, Azure AD, Auth0, Google Workspace, AWS IAM Identity Center, and any OIDC provider
 - **Mobile-First UX**: Authenticate via QR codes and mobile passkeys
 - **Comprehensive Audit**: Complete access trails for compliance (SOC 2, PCI, HIPAA)
 - **Cloud-Native**: Auto-configuration for AWS, Azure, and GCP
@@ -55,7 +55,7 @@ OIDC PAM provides a modern, secure, and user-friendly alternative.
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.25 or higher
 - PAM development libraries
 - systemd (for service management)
 
@@ -102,6 +102,25 @@ authentication:
 security:
   audit_enabled: true
 ```
+
+Providers that do not expose a public `/.well-known/openid-configuration` endpoint (such as AWS IAM Identity Center) can use `skip_discovery: true` to bypass OIDC discovery and supply endpoints directly:
+
+```yaml
+oidc:
+  providers:
+    - name: aws-identity-center
+      issuer: "https://oidc.us-east-2.amazonaws.com"
+      skip_discovery: true
+      device_endpoint: "https://oidc.us-east-2.amazonaws.com/device_authorization"
+      token_endpoint:  "https://oidc.us-east-2.amazonaws.com/token"
+      userinfo_endpoint: "https://oidc.us-east-2.amazonaws.com/userInfo"
+      jwks_uri: "https://oidc.us-east-2.amazonaws.com/.well-known/jwks.json"
+      client_id: "env:OIDC_CLIENT_ID"
+      client_secret: "env:OIDC_CLIENT_SECRET"
+      scopes: [openid, email, profile]
+```
+
+See `configs/providers/aws-identity-center.yaml` for a complete example.
 
 ### Usage
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-19
+
+### Added
+- `skip_discovery` provider option for OIDC providers without a public `/.well-known/openid-configuration` endpoint (e.g. AWS IAM Identity Center)
+- `jwks_uri` provider field for use with `skip_discovery: true`
+- `configs/providers/aws-identity-center.yaml` reference configuration
+- AWS IAM Identity Center setup guide in `configs/CONFIGURATION-GUIDE.md`
+
 ## [0.3.0] - 2026-05-19
 
 ### Added
