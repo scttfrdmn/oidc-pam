@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -37,11 +38,16 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libpam0g-dev libjson-c-dev
           if [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64 libjson-c-dev:arm64 || \
-            sudo apt-get install -y gcc-aarch64-linux-gnu
+            sudo dpkg --add-architecture arm64
+            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64 libjson-c-dev:arm64
+          else
+            sudo apt-get update
+            sudo apt-get install -y libpam0g-dev libjson-c-dev
           fi
 
       - name: Set build variables
