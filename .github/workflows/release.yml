@@ -11,20 +11,16 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs_on }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
-            goarch: amd64
-            cc: gcc
-            pkg_arch: amd64
+            runs_on: ubuntu-latest
           - arch: arm64
-            goarch: arm64
-            cc: aarch64-linux-gnu-gcc
-            pkg_arch: arm64
+            runs_on: ubuntu-24.04-arm
 
     steps:
       - name: Checkout code
@@ -38,17 +34,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo dpkg --add-architecture arm64
-            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-            sudo apt-get update
-            sudo apt-get install -y gcc-aarch64-linux-gnu libpam0g-dev:arm64 libjson-c-dev:arm64
-          else
-            sudo apt-get update
-            sudo apt-get install -y libpam0g-dev libjson-c-dev
-          fi
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libjson-c-dev
 
       - name: Set build variables
         id: vars
@@ -63,7 +50,7 @@ jobs:
       - name: Build broker (pure Go)
         env:
           GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
           go build -trimpath -ldflags="${{ steps.vars.outputs.ldflags }}" \
@@ -73,7 +60,7 @@ jobs:
       - name: Build admin CLI (pure Go)
         env:
           GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
           go build -trimpath -ldflags="${{ steps.vars.outputs.ldflags }}" \
@@ -83,9 +70,8 @@ jobs:
       - name: Build PAM module (CGO)
         env:
           GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
         run: |
           go build -buildmode=c-shared -trimpath -ldflags="${{ steps.vars.outputs.ldflags }}" \
             -o bin/pam_oidc.so-linux-${{ matrix.arch }} \
@@ -95,9 +81,8 @@ jobs:
       - name: Build PAM helper (CGO)
         env:
           GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
         run: |
           go build -trimpath -ldflags="${{ steps.vars.outputs.ldflags }}" \
             -o bin/oidc-pam-helper-linux-${{ matrix.arch }} \
