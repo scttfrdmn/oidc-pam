@@ -104,7 +104,7 @@ jobs:
           sha256sum ${DIR}.tar.gz > ${DIR}.tar.gz.sha256
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.arch }}
           path: |
