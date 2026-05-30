@@ -21,6 +21,8 @@ import (
 // (in a user-controlled .ssh directory) cannot redirect the open to another
 // file (see ensureSecureSSHDir for the surrounding symlink defenses).
 func withFileLock(lockPath string, fn func() error) error {
+	// #nosec G304 -- lockPath is under the validated .ssh dir; O_NOFOLLOW prevents
+	// following a planted symlink at the lock path.
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open lock file: %w", err)
@@ -89,6 +91,9 @@ func openAuthorizedKeysForAppend(path string) (*os.File, error) {
 	if err := rejectIfSymlink(path); err != nil {
 		return nil, err
 	}
+	// #nosec G304 -- path is built from an allowlisted username (validateUsername)
+	// under the broker's base dir; the final component is symlink-checked above
+	// and opened with O_NOFOLLOW so a planted symlink cannot redirect the write.
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 }
 
@@ -103,6 +108,8 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
 	}
 	tmpPath := filepath.Join(sshDir, fmt.Sprintf(".authorized_keys.tmp.%d", os.Getpid()))
 	_ = os.Remove(tmpPath) // clear any stale temp from a prior crash
+	// #nosec G304 -- tmpPath is under the validated .ssh dir and opened with
+	// O_EXCL|O_NOFOLLOW, so it cannot follow or clobber a pre-existing symlink.
 	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp authorized_keys: %w", err)
@@ -285,6 +292,7 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 		if err := rejectIfSymlink(authorizedKeysPath); err != nil {
 			return err
 		}
+		// #nosec G304 -- validated username path; symlink-checked above and opened O_NOFOLLOW.
 		file, err := os.OpenFile(authorizedKeysPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -407,6 +415,7 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	if err := rejectIfSymlink(backupPath); err != nil {
 		return err
 	}
+	// #nosec G304 -- validated username path; symlink-checked above and opened O_NOFOLLOW.
 	bf, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
