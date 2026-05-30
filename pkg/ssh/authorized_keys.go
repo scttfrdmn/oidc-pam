@@ -309,7 +309,13 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			// Check if this is an OIDC PAM key
+			// L-14: expiry is read from the (broker-written) key comment. A
+			// malformed/forged comment simply causes the key to be retained
+			// (fail-safe for cleanup: it is never removed early), and the keys are
+			// broker-generated so the comment is not attacker-controlled in the
+			// supported flow. Authoritative expiry lives in the broker session;
+			// this cleanup is best-effort. See TODO(L-3) in keys.go for moving
+			// expiry to a separate metadata file.
 			if strings.Contains(line, "@oidc-pam-") {
 				// Extract timestamp from comment
 				parts := strings.Fields(line)

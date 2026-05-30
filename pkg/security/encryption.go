@@ -108,7 +108,29 @@ func (e *Encryption) Decrypt(ciphertext string) (string, error) {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
 
-	return string(plaintext), nil
+	// Best-effort: zero the transient plaintext buffer after copying to a string.
+	// Go strings are immutable and may be copied by the GC, so this cannot fully
+	// scrub the secret, but it minimizes the window the raw bytes live in the heap
+	// buffer we control (L-16).
+	out := string(plaintext)
+	Zero(plaintext)
+	return out, nil
+}
+
+// Zero overwrites b with zeros. Used to scrub key material and transient
+// plaintext buffers (L-16). Note: this cannot scrub data already copied into Go
+// strings, which are immutable.
+func Zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// Destroy zeroes the derived encryption key. After Destroy the Encryption value
+// must not be used again. Call when the broker shuts down to limit how long key
+// material persists in memory (L-16).
+func (e *Encryption) Destroy() {
+	Zero(e.key)
 }
 
 // EncryptBytes encrypts the given byte slice

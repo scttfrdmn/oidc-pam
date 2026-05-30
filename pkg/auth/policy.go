@@ -465,6 +465,12 @@ func (pe *PolicyEngine) evaluateRiskCondition(condition string, req *AuthRequest
 	case "untrusted_network":
 		return !pe.isPrivateIP(req.SourceIP)
 	default:
+		// L-7: an unrecognized condition silently evaluates to "does not fire",
+		// which means a misconfigured DENY policy would never apply. Log loudly so
+		// the misconfiguration is visible rather than failing open silently.
+		log.Warn().
+			Str("condition", condition).
+			Msg("Unknown risk policy condition; it will not match. Check policy configuration")
 		return false
 	}
 }
