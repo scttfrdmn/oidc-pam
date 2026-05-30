@@ -100,6 +100,10 @@ jobs:
           cp bin/oidc-pam-helper-linux-${ARCH}    ${DIR}/oidc-pam-helper
           cp -r configs                            ${DIR}/configs
           cp README.md DEPLOYMENT.md LICENSE       ${DIR}/
+          # Ship the release installer at the archive root as install.sh so
+          # consumers have a canonical entrypoint (see scripts/install-release.sh).
+          cp scripts/install-release.sh            ${DIR}/install.sh
+          chmod +x                                 ${DIR}/install.sh
           tar czf ${DIR}.tar.gz ${DIR}
           sha256sum ${DIR}.tar.gz > ${DIR}.tar.gz.sha256
 
