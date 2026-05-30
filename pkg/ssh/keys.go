@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,16 +39,22 @@ type SSHKey struct {
 	ExpiresAt  time.Time
 }
 
-// validateUsername rejects usernames that could be used for path traversal attacks.
+// usernamePattern is a strict allowlist for POSIX-style login names: a leading
+// lowercase letter or underscore, followed by lowercase letters, digits,
+// underscores, or hyphens, with an optional trailing '$'. Anchored and length
+// bounded. This is a positive allowlist (M-7) rather than a denylist, so it also
+// rejects "..", path separators, leading dots, and other traversal tricks.
+var usernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}\$?$`)
+
+// validateUsername rejects usernames that are not valid POSIX login names,
+// which also prevents path-traversal when usernames are joined into filesystem
+// paths under the broker's base directory.
 func validateUsername(username string) error {
 	if username == "" {
 		return fmt.Errorf("username cannot be empty")
 	}
-	if strings.ContainsAny(username, "/\\\x00") {
-		return fmt.Errorf("username contains invalid characters")
-	}
-	if strings.Contains(username, "..") {
-		return fmt.Errorf("username cannot contain '..'")
+	if !usernamePattern.MatchString(username) {
+		return fmt.Errorf("username %q is not a valid POSIX login name", username)
 	}
 	return nil
 }
