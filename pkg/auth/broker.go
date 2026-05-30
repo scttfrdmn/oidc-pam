@@ -728,6 +728,60 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				return
 			}
 
+			// SECURITY (C-1): bind the authenticated OIDC identity to the local
+			// username this login was requested for. Without this, any IdP user
+			// could authenticate as any local account (including root). Fail
+			// closed on any mismatch or misconfiguration.
+			if err := b.verifyIdentityBinding(provider, userInfo, session.UserID); err != nil {
+				log.Warn().
+					Err(err).
+					Str("session_id", session.ID).
+					Str("requested_user", session.UserID).
+					Str("oidc_subject", userInfo.Subject).
+					Msg("Rejected authentication: OIDC identity does not match requested local user")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "IDENTITY_MISMATCH")
+				}
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType:    "authentication_denied",
+					UserID:       session.UserID,
+					Email:        userInfo.Email,
+					SessionID:    session.ID,
+					Success:      false,
+					ErrorCode:    "IDENTITY_MISMATCH",
+					ErrorMessage: err.Error(),
+					Timestamp:    time.Now(),
+				})
+				b.removeSession(session.ID)
+				return
+			}
+
+			// SECURITY (H-1): enforce required group membership. RequiredGroups
+			// was previously collected by the policy engine but never checked.
+			if err := b.verifyRequiredGroups(userInfo.Groups); err != nil {
+				log.Warn().
+					Err(err).
+					Str("session_id", session.ID).
+					Str("requested_user", session.UserID).
+					Msg("Rejected authentication: required group membership not satisfied")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "GROUP_DENIED")
+				}
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType:    "authentication_denied",
+					UserID:       session.UserID,
+					Email:        userInfo.Email,
+					Groups:       userInfo.Groups,
+					SessionID:    session.ID,
+					Success:      false,
+					ErrorCode:    "GROUP_DENIED",
+					ErrorMessage: err.Error(),
+					Timestamp:    time.Now(),
+				})
+				b.removeSession(session.ID)
+				return
+			}
+
 			// Clone before mutation: getSession returns the raw pointer stored in
 			// the map; writing to it without a lock races with concurrent readers.
 			updated := *session
@@ -973,6 +1027,101 @@ func sanitizeErrorForClient(err error) string {
 	default:
 		return "authentication failed"
 	}
+}
+
+// verifyIdentityBinding ensures the authenticated OIDC identity actually maps
+// to the local username the login was requested for (requestedUser). This is
+// the authn->authz boundary: it prevents an IdP user from logging in as an
+// arbitrary local account. It fails closed — any misconfiguration or mismatch
+// returns an error rather than allowing the login.
+//
+// The expected local username is resolved from the configured username_claim
+// (falling back to the standard "preferred_username" claim). Comparison is
+// case-insensitive on the local-part, matching typical POSIX/login behavior.
+func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInfo, requestedUser string) error {
+	if userInfo == nil {
+		return fmt.Errorf("no user info available")
+	}
+	requested := strings.TrimSpace(strings.ToLower(requestedUser))
+	if requested == "" {
+		return fmt.Errorf("requested username is empty")
+	}
+
+	claimName := strings.TrimSpace(provider.Config.UserMapping.UsernameClaim)
+	if claimName == "" {
+		// Fail closed: without an explicit mapping we will not guess which
+		// claim authorizes a local login.
+		return fmt.Errorf("username_claim is not configured for provider %q; refusing to bind identity", provider.Config.Name)
+	}
+
+	mapped, err := claimToUsername(userInfo, claimName)
+	if err != nil {
+		return err
+	}
+	mapped = strings.TrimSpace(strings.ToLower(mapped))
+	if mapped == "" {
+		return fmt.Errorf("username_claim %q produced an empty username", claimName)
+	}
+
+	// If the claim is an email (e.g. preferred_username/email), allow matching
+	// either the full value or its local-part against the requested user.
+	if mapped == requested {
+		return nil
+	}
+	if local, _, found := strings.Cut(mapped, "@"); found && local == requested {
+		return nil
+	}
+	return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q", mapped, claimName, requested)
+}
+
+// claimToUsername extracts a string username from the resolved claims using the
+// configured claim name, with sensible fallbacks to well-known UserInfo fields.
+func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
+	if userInfo.Claims != nil {
+		if v, ok := userInfo.Claims[claimName]; ok {
+			if s, ok := v.(string); ok {
+				return s, nil
+			}
+			return "", fmt.Errorf("username_claim %q is not a string", claimName)
+		}
+	}
+	// Fallbacks for the common standard claims even if not present in the raw map.
+	switch claimName {
+	case "preferred_username", "sub":
+		if userInfo.Subject != "" {
+			return userInfo.Subject, nil
+		}
+	case "email":
+		if userInfo.Email != "" {
+			return userInfo.Email, nil
+		}
+	}
+	return "", fmt.Errorf("username_claim %q not present in token claims", claimName)
+}
+
+// verifyRequiredGroups enforces that the authenticated user is a member of all
+// globally required groups (Authentication.RequireGroups). Returns nil when no
+// groups are required. Comparison is exact and case-sensitive (group names are
+// provider-defined identifiers).
+func (b *Broker) verifyRequiredGroups(userGroups []string) error {
+	required := b.config.Authentication.RequireGroups
+	if len(required) == 0 {
+		return nil
+	}
+	have := make(map[string]struct{}, len(userGroups))
+	for _, g := range userGroups {
+		have[g] = struct{}{}
+	}
+	var missing []string
+	for _, r := range required {
+		if _, ok := have[r]; !ok {
+			missing = append(missing, r)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("user is not a member of required group(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // SSHKey represents an SSH key
