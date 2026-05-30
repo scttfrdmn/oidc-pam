@@ -313,7 +313,7 @@ func TestDeviceFlowPollingMethod(t *testing.T) {
 		PollingInterval: 5,
 	}
 
-	token, err := provider.PollDeviceAuthorization(context.Background(), deviceFlow.DeviceCode)
+	token, err := provider.PollDeviceAuthorization(context.Background(), deviceFlow.DeviceCode, deviceFlow.Nonce)
 	if err != nil {
 		t.Logf("PollDeviceAuthorization failed as expected: %v", err)
 	}

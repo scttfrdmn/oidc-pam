@@ -333,7 +333,7 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 
 // PollDeviceAuthorization polls for device authorization completion.
 // ctx is used for ID token verification so callers can apply deadlines.
-func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode string) (*Token, error) {
+func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, expectedNonce string) (*Token, error) {
 	// Get token endpoint
 	tokenEndpoint := p.Provider.Endpoint().TokenURL
 
@@ -372,6 +372,20 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode s
 		idToken, err := p.Verifier.Verify(ctx, tokenResp.IDToken)
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify ID token: %w", err)
+		}
+
+		// Validate the nonce to prevent ID token replay (RFC 8628 / OIDC core).
+		// The nonce sent in StartDeviceFlow must be echoed back in the ID token.
+		// AllowMissingNonce permits providers (some device-flow IdPs) that do not
+		// return a nonce claim — but a present-and-wrong nonce is always rejected.
+		if expectedNonce != "" {
+			if idToken.Nonce == "" {
+				if !p.Config.AllowMissingNonce {
+					return nil, fmt.Errorf("ID token is missing the nonce claim (set allow_missing_nonce to permit this provider)")
+				}
+			} else if idToken.Nonce != expectedNonce {
+				return nil, fmt.Errorf("ID token nonce mismatch (possible replay)")
+			}
 		}
 
 		if err := idToken.Claims(&claims); err != nil {

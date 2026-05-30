@@ -19,20 +19,17 @@ type Encryption struct {
 
 // NewEncryption creates a new encryption instance.
 //
-// If keyString is a base64-encoded 32-byte value (as produced by GenerateKey),
-// those bytes are used directly — no derivation is applied, preserving full
-// entropy. Otherwise SHA-256 of the string is used as a fallback for backward
-// compatibility, but a warning is emitted because this provides no key
-// stretching for weak inputs. Use GenerateKey() to produce a proper key.
+// The 32-byte AES key is derived from keyString using PBKDF2-HMAC-SHA256
+// (600,000 iterations) with a fixed application-level salt. keyString is
+// expected to be a high-entropy secret — config validation requires 32+ bytes,
+// and GenerateKey() produces a suitable base64 value. The static salt is an
+// accepted trade-off given that assumption; its purpose is computational cost
+// against brute force, not per-deployment uniqueness.
 func NewEncryption(keyString string) (*Encryption, error) {
 	if keyString == "" {
 		return nil, fmt.Errorf("encryption key cannot be empty")
 	}
 
-	// Derive a 32-byte key using PBKDF2 with a fixed application-level salt.
-	// The key string is expected to be a high-entropy secret (config validation
-	// requires 32+ bytes), so the static salt is acceptable — the primary benefit
-	// is computational cost against brute force.
 	salt := []byte("oidc-pam-token-encryption-v1")
 	key := pbkdf2.Key([]byte(keyString), salt, 600000, 32, sha256.New)
 

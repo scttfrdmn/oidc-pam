@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -26,6 +27,12 @@ func NewServer(addr string, reg prometheus.Gatherer) *Server {
 		srv: &http.Server{
 			Addr:    addr,
 			Handler: mux,
+			// Bound request phases so a slow client cannot tie up the endpoint
+			// (Slowloris). ReadHeaderTimeout is the key mitigation.
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		},
 	}
 }

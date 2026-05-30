@@ -3,14 +3,14 @@
 package ipc
 
 import (
+	"fmt"
 	"net"
-
-	"github.com/rs/zerolog/log"
 )
 
-// getPeerCredentials is a no-op stub for non-Linux platforms where SO_PEERCRED is not available.
-// It returns uid=0, gid=0, nil to allow connections (peer auth verification is skipped).
+// getPeerCredentials is a stub for platforms with no supported peer-credential
+// mechanism. It FAILS CLOSED: returning an error ensures an unverifiable peer is
+// rejected rather than being treated as root (uid 0). Never return (0, 0, nil)
+// here — that would silently authorize every connection on an unsupported port.
 func getPeerCredentials(conn net.Conn) (uid, gid uint32, err error) {
-	log.Warn().Msg("Peer credential verification is not available on this platform")
-	return 0, 0, nil
+	return 0, 0, fmt.Errorf("peer credential verification is not supported on this platform; deploy on Linux")
 }

@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **High (#92):** Enforce `require_groups` — required group membership is now checked against the authenticated user's groups instead of being silently ignored.
 - **(#95) M-7:** `validateUsername` is now a strict POSIX login-name allowlist and is applied in `RemoveExpiredKeys` (previously skipped).
 - **(#95) M-8:** Reject SSH public keys containing embedded newlines (authorized_keys injection); `ValidateKeyFormat` now enforces this and is wired into `AddPublicKey`.
+- **High (#93):** Validate the OIDC nonce in the device flow — `PollDeviceAuthorization` now rejects an ID token whose nonce does not match the one issued (replay protection); honors `allow_missing_nonce`.
+- **High (#94):** Fix PAM module response framing — `receive_auth_response` now reads until the newline delimiter (looped `recv` with a poll-based timeout) instead of a single `recv`, preventing truncation of large broker responses; Go and C response buffers unified at 8192 bytes (L-12).
+- **(#95) M-5:** Device-flow polling errors are mapped to a bounded error-code enum for the Prometheus `error_code` label instead of the raw error string (cardinality-DoS / info-leak fix).
+- **(#95) M-6:** Metrics HTTP server now sets Read/ReadHeader/Write/Idle timeouts (Slowloris mitigation).
+- **(#95) L-8:** Config validation requires OIDC issuer/endpoints (and provider endpoints) to use HTTPS; `http://` allowed only in development mode.
+- **(#95) L-1:** Non-Linux peer-credential stub now fails closed (returns an error) instead of returning uid 0.
+- **(#95) L-3:** Broker aborts startup if it cannot set the IPC socket permissions (was a non-fatal warning).
+- **(#95) M-2:** Corrected the `NewEncryption` doc comment to match the actual PBKDF2 derivation; **L-17:** guarded `truncateString` against a panic when `maxLen < 3`.
 
 ### Added
 - DEPLOYMENT.md: "Identity vs. Authentication" guidance explaining that oidc-pam is an authentication layer (use SSSD/a directory for NSS identity and consistent cluster UIDs), why no `libnss_oidc.so` module is shipped, and the provision-on-first-login pattern for directory-less environments
