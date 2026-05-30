@@ -691,16 +691,18 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 		case <-ticker.C:
 			// Poll for authorization using a per-attempt context with timeout.
 			pollCtx, pollCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			token, err := provider.PollDeviceAuthorization(pollCtx, deviceFlow.DeviceCode)
+			token, err := provider.PollDeviceAuthorization(pollCtx, deviceFlow.DeviceCode, deviceFlow.Nonce)
 			pollCancel()
 			if err != nil {
 				// Handle specific error types
 				if err.Error() == "authorization_pending" {
 					continue // Keep polling
 				}
-				// Other errors mean failure
+				// Other errors mean failure. Use a bounded error-code enum for the
+				// metric label (never the raw error string) to avoid Prometheus
+				// cardinality explosion and leaking transient infra detail.
 				if b.metrics != nil {
-					b.metrics.RecordAuth(provider.Name, "failure", err.Error())
+					b.metrics.RecordAuth(provider.Name, "failure", classifyPollError(err))
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "device_authorization_failed",
@@ -1097,6 +1099,34 @@ func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("username_claim %q not present in token claims", claimName)
+}
+
+// classifyPollError maps a device-authorization polling error to a small, fixed
+// set of metric label values. Raw error strings must never be used as metric
+// labels (unbounded cardinality + info leak).
+func classifyPollError(err error) string {
+	if err == nil {
+		return "OK"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "nonce"):
+		return "NONCE_INVALID"
+	case strings.Contains(msg, "verify id token"), strings.Contains(msg, "claim validation"):
+		return "ID_TOKEN_INVALID"
+	case strings.Contains(msg, "token error"):
+		return "TOKEN_ERROR"
+	case strings.Contains(msg, "access_denied"):
+		return "ACCESS_DENIED"
+	case strings.Contains(msg, "expired"):
+		return "EXPIRED"
+	case strings.Contains(msg, "decode"):
+		return "DECODE_ERROR"
+	case strings.Contains(msg, "failed to poll"), strings.Contains(msg, "connection"), strings.Contains(msg, "timeout"):
+		return "NETWORK_ERROR"
+	default:
+		return "POLL_FAILED"
+	}
 }
 
 // verifyRequiredGroups enforces that the authenticated user is a member of all

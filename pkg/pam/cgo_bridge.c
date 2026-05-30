@@ -2,7 +2,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <time.h>
+#include <poll.h>
 #include <json-c/json.h>
+
+// Total time budget for reading a complete broker response, in milliseconds.
+#define RESPONSE_READ_TIMEOUT_MS 30000
 
 // Global variables
 static int debug_enabled = 0;
@@ -154,22 +158,71 @@ int send_auth_request(int sock, const char *username, const char *service, const
     return 0;
 }
 
-// Receive authentication response from broker
+// Receive authentication response from broker.
+//
+// The broker writes a single newline-delimited JSON object (json.Encoder.Encode
+// appends '\n'). A single recv() can return only the first TCP segment, which
+// truncates large responses and breaks JSON parsing. Loop on recv() until the
+// newline delimiter is seen, the buffer is full, or the connection closes,
+// bounded by a total read timeout so a stalled/hostile broker cannot hang the
+// PAM stack.
 int receive_auth_response(int sock, char *response, size_t response_size) {
-    ssize_t received = recv(sock, response, response_size - 1, 0);
-    if (received == -1) {
-        log_pam_message(LOG_ERR, "Failed to receive response: %s", strerror(errno));
+    if (response_size == 0) {
         return -1;
     }
-    
-    if (received == 0) {
-        log_pam_message(LOG_ERR, "Connection closed by broker");
+
+    size_t total = 0;
+    const size_t cap = response_size - 1; // reserve space for NUL
+
+    while (total < cap) {
+        struct pollfd pfd;
+        pfd.fd = sock;
+        pfd.events = POLLIN;
+
+        int pr = poll(&pfd, 1, RESPONSE_READ_TIMEOUT_MS);
+        if (pr == 0) {
+            log_pam_message(LOG_ERR, "Timed out waiting for broker response");
+            return -1;
+        }
+        if (pr < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            log_pam_message(LOG_ERR, "poll() failed waiting for response: %s", strerror(errno));
+            return -1;
+        }
+
+        ssize_t received = recv(sock, response + total, cap - total, 0);
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            log_pam_message(LOG_ERR, "Failed to receive response: %s", strerror(errno));
+            return -1;
+        }
+        if (received == 0) {
+            // Connection closed by broker. Accept whatever we have if it forms a
+            // complete line; otherwise treat as an error.
+            break;
+        }
+
+        total += (size_t)received;
+        response[total] = '\0';
+
+        // Stop as soon as we have a complete newline-delimited message.
+        if (memchr(response, '\n', total) != NULL) {
+            break;
+        }
+    }
+
+    if (total == 0) {
+        log_pam_message(LOG_ERR, "Connection closed by broker before any response");
         return -1;
     }
-    
-    response[received] = '\0';
+
+    response[total] = '\0';
     log_pam_message(LOG_DEBUG, "Received response: %s", response);
-    
+
     return 0;
 }
 

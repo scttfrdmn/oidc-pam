@@ -106,12 +106,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.listener = listener
 
-	// Set socket permissions
+	// Set socket permissions. Fail closed: if we cannot enforce the intended
+	// mode we must not keep serving on a socket with unknown permissions.
 	if err := os.Chmod(s.socketPath, s.socketMode); err != nil {
-		log.Warn().
-			Err(err).
-			Str("socket_path", s.socketPath).
-			Msg("Failed to set socket permissions")
+		_ = listener.Close()
+		return fmt.Errorf("failed to set socket permissions on %s: %w", s.socketPath, err)
 	}
 
 	// Set socket group ownership if configured

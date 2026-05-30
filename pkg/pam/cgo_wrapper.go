@@ -75,9 +75,10 @@ func SendAuthRequest(sock int, username, service, rhost, tty string) error {
 
 // ReceiveAuthResponse receives an authentication response from the broker
 func ReceiveAuthResponse(sock int) (*AuthResponse, error) {
-	var response [4096]C.char
+	// Buffer matches the C module's MAX_RESPONSE_SIZE (8192).
+	var response [8192]C.char
 
-	result := C.receive_auth_response(C.int(sock), &response[0], 4096)
+	result := C.receive_auth_response(C.int(sock), &response[0], C.size_t(len(response)))
 	if result != 0 {
 		return nil, fmt.Errorf("failed to receive authentication response")
 	}

@@ -102,9 +102,10 @@ func (p *PAMModule) AuthenticateUser(username, service, rhost, tty string) error
 		return fmt.Errorf("failed to send authentication request")
 	}
 
-	// Receive and parse the broker response
-	var response [4096]C.char
-	if C.receive_auth_response(sock, &response[0], 4096) != 0 {
+	// Receive and parse the broker response. Buffer matches the C module's
+	// MAX_RESPONSE_SIZE (8192) so large success responses are not truncated.
+	var response [8192]C.char
+	if C.receive_auth_response(sock, &response[0], C.size_t(len(response))) != 0 {
 		return fmt.Errorf("failed to receive authentication response")
 	}
 

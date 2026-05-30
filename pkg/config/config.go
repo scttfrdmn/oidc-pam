@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -460,6 +461,19 @@ func (c *Config) Validate() error {
 		if provider.Issuer == "" {
 			return fmt.Errorf("provider[%d].issuer is required", i)
 		}
+		// Endpoints must be HTTPS so tokens and codes are never sent in clear.
+		// http:// (and localhost) is permitted only in development mode.
+		for label, endpoint := range map[string]string{
+			"issuer":            provider.Issuer,
+			"device_endpoint":   provider.DeviceEndpoint,
+			"token_endpoint":    provider.TokenEndpoint,
+			"userinfo_endpoint": provider.UserInfoEndpoint,
+			"jwks_uri":          provider.JWKSUri,
+		} {
+			if err := validateHTTPSEndpoint(endpoint); err != nil {
+				return fmt.Errorf("provider[%d].%s: %w", i, label, err)
+			}
+		}
 		if provider.ClientID == "" {
 			return fmt.Errorf("provider[%d].client_id is required", i)
 		}
@@ -496,6 +510,26 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// validateHTTPSEndpoint ensures a configured OIDC endpoint URL uses HTTPS.
+// Empty values are allowed (the field is optional). In development mode
+// (OIDC_AUTH_DEV) http:// and localhost are tolerated to ease local testing.
+func validateHTTPSEndpoint(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q: %w", raw, err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if isDevelopmentMode() {
+		return nil
+	}
+	return fmt.Errorf("must use https (got %q); set OIDC_AUTH_DEV=true to override for development", u.Scheme)
 }
 
 // isDevelopmentMode checks if development mode is enabled via OIDC_AUTH_DEV environment variable.
