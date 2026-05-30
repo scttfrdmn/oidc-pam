@@ -47,6 +47,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	// L-6: when running privileged (EUID 0), ignore caller-supplied -config and
+	// -socket and force the compiled defaults. Otherwise a privileged invocation
+	// with attacker-controlled argv could point the helper at a rogue broker
+	// socket (which could answer success) or a rogue config.
+	const (
+		defaultConfigPath = "/etc/oidc-auth/pam.conf"
+		defaultSocketPath = "/var/run/oidc-auth/broker.sock"
+	)
+	if os.Geteuid() == 0 {
+		if *configFile != defaultConfigPath {
+			log.Warn().Str("ignored", *configFile).Msg("Ignoring caller-supplied -config while running as root; using default")
+			*configFile = defaultConfigPath
+		}
+		if *socketPath != defaultSocketPath {
+			log.Warn().Str("ignored", *socketPath).Msg("Ignoring caller-supplied -socket while running as root; using default")
+			*socketPath = defaultSocketPath
+		}
+	}
+
 	// Set up logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	if *debug {

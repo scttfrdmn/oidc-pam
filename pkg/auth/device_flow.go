@@ -130,6 +130,15 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 	var verifier *oidc.IDTokenVerifier
 	var oauth2Config *oauth2.Config
 
+	// M-3: only skip audience (client_id) verification when explicitly disabled
+	// AND running in development mode. In production the aud check is always on,
+	// regardless of verify_audience, matching the authorization-code flow which
+	// never skips it.
+	skipAudience := !secCfg.VerifyAudience && config.IsDevelopmentMode()
+	if !secCfg.VerifyAudience && !config.IsDevelopmentMode() {
+		log.Warn().Str("provider", providerCfg.Name).Msg("verify_audience is disabled but ignored outside development mode; audience will be verified")
+	}
+
 	if providerCfg.SkipDiscovery {
 		// Manual provider construction — used for providers without a public
 		// /.well-known/openid-configuration (e.g. AWS IAM Identity Center).
@@ -151,7 +160,7 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		provider = provCfg.NewProvider(ctx)
 		verifier = provider.Verifier(&oidc.Config{
 			ClientID:             providerCfg.ClientID,
-			SkipClientIDCheck:    !secCfg.VerifyAudience,
+			SkipClientIDCheck:    skipAudience,
 			SupportedSigningAlgs: []string{"RS256", "ES256"},
 		})
 		oauth2Config = &oauth2.Config{
@@ -168,7 +177,7 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 
 		verifier = provider.Verifier(&oidc.Config{
 			ClientID:             providerCfg.ClientID,
-			SkipClientIDCheck:    !secCfg.VerifyAudience,
+			SkipClientIDCheck:    skipAudience,
 			SupportedSigningAlgs: []string{"RS256", "ES256"},
 		})
 		oauth2Config = &oauth2.Config{
@@ -643,19 +652,28 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 		return deviceEndpoint, nil
 	}
 
+	// M-4: the fallback endpoint is run through the same validateEndpoint checks
+	// (HTTPS + issuer-host match) as discovered/configured endpoints, so a
+	// discovery failure cannot cause requests to be sent to an unvalidated URL.
+	fallback := func() (string, error) {
+		guessed := p.Config.Issuer + "/protocol/openid-connect/auth/device"
+		if err := validateEndpoint(guessed); err != nil {
+			return "", fmt.Errorf("device authorization endpoint could not be discovered and the fallback was rejected: %w", err)
+		}
+		return guessed, nil
+	}
+
 	// Try to discover from provider metadata
 	discoveryURL := p.Config.Issuer + "/.well-known/openid-configuration"
 
 	resp, err := p.httpClient.Get(discoveryURL)
 	if err != nil {
-		// Fallback to common endpoint patterns
-		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+		return fallback()
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		// Fallback to common endpoint patterns
-		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+		return fallback()
 	}
 
 	var discoveryResp struct {
@@ -663,8 +681,7 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&discoveryResp); err != nil {
-		// Fallback to common endpoint patterns
-		return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+		return fallback()
 	}
 
 	if discoveryResp.DeviceAuthorizationEndpoint != "" {
@@ -674,8 +691,7 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 		return discoveryResp.DeviceAuthorizationEndpoint, nil
 	}
 
-	// Fallback to common endpoint patterns
-	return p.Config.Issuer + "/protocol/openid-connect/auth/device", nil
+	return fallback()
 }
 
 // generateNonce returns a cryptographically random 16-byte hex nonce.

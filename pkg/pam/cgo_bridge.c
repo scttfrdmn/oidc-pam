@@ -107,32 +107,32 @@ int send_auth_request(int sock, const char *username, const char *service, const
     json_object *request = json_object_new_object();
     json_object *type = json_object_new_string("authenticate");
     json_object *user_id = json_object_new_string(username);
-    json_object *login_type = json_object_new_string("unknown");
     json_object *target_host = json_object_new_string(rhost);
     json_object *metadata = json_object_new_object();
     json_object *service_obj = json_object_new_string(service);
     json_object *tty_obj = json_object_new_string(tty);
-    
-    // Determine login type based on service and TTY
+
+    // Determine login type based on service and TTY.
+    const char *login_type_str = "unknown";
     if (strcmp(service, "sshd") == 0) {
-        json_object_object_del(request, "login_type");
-        json_object_object_add(request, "login_type", json_object_new_string("ssh"));
+        login_type_str = "ssh";
     } else if (strstr(tty, "tty") != NULL) {
-        json_object_object_del(request, "login_type");
-        json_object_object_add(request, "login_type", json_object_new_string("console"));
+        login_type_str = "console";
     } else if (strstr(service, "gdm") != NULL || strstr(service, "lightdm") != NULL) {
-        json_object_object_del(request, "login_type");
-        json_object_object_add(request, "login_type", json_object_new_string("gui"));
+        login_type_str = "gui";
     }
-    
+
     // Add metadata
     json_object_object_add(metadata, "service", service_obj);
     json_object_object_add(metadata, "tty", tty_obj);
     json_object_object_add(metadata, "pid", json_object_new_int(getpid()));
-    
-    // Build request
+
+    // Build request. Each value is added exactly once and owned by the tree, so
+    // a single json_object_put(request) frees everything (L-11: previously the
+    // login_type object was allocated but never attached, leaking each call).
     json_object_object_add(request, "type", type);
     json_object_object_add(request, "user_id", user_id);
+    json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
     json_object_object_add(request, "target_host", target_host);
     json_object_object_add(request, "metadata", metadata);
     
@@ -434,9 +434,12 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const c
     }
     
     log_pam_message(LOG_DEBUG, "Account management check for user: %s", username);
-    
-    // For OIDC authentication, account management is handled by the identity provider
-    // We could add additional checks here if needed
+
+    // L-5: Authorization is enforced entirely in the auth phase (pam_sm_authenticate
+    // -> broker: identity binding, group checks, risk policy). This module does NOT
+    // implement account-phase (acct_mgmt) authorization, so deployments MUST NOT
+    // rely on the PAM `account` stack with pam_oidc as the sole gate. Returning
+    // PAM_SUCCESS here is intentional and documented; see DEPLOYMENT.md.
     return PAM_SUCCESS;
 }
 

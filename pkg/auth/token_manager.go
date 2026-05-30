@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -257,7 +258,9 @@ func (tm *TokenManager) ValidateToken(tokenFingerprint, userID string) (*StoredT
 		return nil, fmt.Errorf("token not found")
 	}
 
-	if storedToken.UserID != userID {
+	// Constant-time comparison so validation timing does not leak which user a
+	// stored token belongs to (L-15).
+	if subtle.ConstantTimeCompare([]byte(storedToken.UserID), []byte(userID)) != 1 {
 		return nil, fmt.Errorf("token does not belong to requesting user")
 	}
 

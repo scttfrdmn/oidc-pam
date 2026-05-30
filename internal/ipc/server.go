@@ -30,7 +30,12 @@ type Server struct {
 	stopChan        chan struct{}
 	wg              sync.WaitGroup
 	stopOnce        sync.Once
+	connSem         chan struct{} // bounds concurrent in-flight connections (L-4)
 }
+
+// maxConcurrentConnections caps the number of simultaneously handled IPC
+// connections so a peer cannot exhaust goroutines/FDs by opening many at once.
+const maxConcurrentConnections = 128
 
 // Request represents a request from PAM module
 type Request struct {
@@ -78,6 +83,7 @@ func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, s
 		broker:          broker,
 		rateLimiter:     NewRateLimiter(maxRequestsPerMinute, maxConcurrentAuths),
 		stopChan:        make(chan struct{}),
+		connSem:         make(chan struct{}, maxConcurrentConnections),
 	}, nil
 }
 
@@ -209,6 +215,17 @@ func (s *Server) acceptConnections(ctx context.Context) {
 				}
 			}
 
+			// Bound concurrent connections (L-4): if at capacity, reject rather
+			// than spawning an unbounded number of handler goroutines.
+			select {
+			case s.connSem <- struct{}{}:
+			default:
+				log.Warn().Msg("Connection rejected: at maximum concurrent connections")
+				s.sendErrorResponse(conn, "SERVER_BUSY", "Server at capacity, try again")
+				_ = conn.Close()
+				continue
+			}
+
 			// Handle connection in goroutine
 			s.wg.Add(1)
 			go s.handleConnection(conn)
@@ -219,6 +236,7 @@ func (s *Server) acceptConnections(ctx context.Context) {
 // handleConnection handles a single IPC connection
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
+	defer func() { <-s.connSem }() // release the concurrency slot (L-4)
 	defer func() { _ = conn.Close() }()
 
 	// Verify peer is root — PAM modules always run as root

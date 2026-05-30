@@ -291,9 +291,10 @@ type AuditConfig struct {
 	BufferSize int `mapstructure:"buffer_size"`
 	// OverflowStrategy controls what happens when the event buffer is full.
 	// Valid values:
-	//   "drop"  – discard the event and increment the dropped counter (default)
-	//   "block" – block the caller until buffer space is available (backpressure)
+	//   "block" – block the caller until buffer space is available (backpressure) (default)
 	//   "sync"  – bypass the channel and write the event synchronously
+	//   "drop"  – discard the event and increment the dropped counter (must be
+	//             explicitly opted into; audit records can be lost under load)
 	OverflowStrategy string `mapstructure:"overflow_strategy"`
 }
 
@@ -536,6 +537,13 @@ func validateHTTPSEndpoint(raw string) error {
 func isDevelopmentMode() bool {
 	val := strings.ToLower(os.Getenv("OIDC_AUTH_DEV"))
 	return val == "true" || val == "1" || val == "yes"
+}
+
+// IsDevelopmentMode reports whether development mode is enabled (OIDC_AUTH_DEV).
+// Security-relaxing options (e.g. skipping audience verification) must only take
+// effect when this returns true.
+func IsDevelopmentMode() bool {
+	return isDevelopmentMode()
 }
 
 // bindSafeEnvironmentVariables binds only non-security-critical config keys to environment variables.

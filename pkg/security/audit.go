@@ -28,6 +28,7 @@ type AuditLogger struct {
 	stopChan      chan struct{}
 	wg            sync.WaitGroup
 	droppedEvents atomic.Int64 // total events dropped due to full channel
+	failedWrites  atomic.Int64 // total events that failed to write to an output (L-10)
 	lastDropLog   atomic.Int64 // Unix second of last drop error log (rate limiter)
 	// writeMu serializes all writes to outputs so that synchronous critical-event
 	// writes (from any goroutine) don't race with the async processEvents goroutine.
@@ -38,6 +39,14 @@ type AuditLogger struct {
 // the event channel was full and the overflow strategy is "drop" (the default).
 func (al *AuditLogger) DroppedEvents() int64 {
 	return al.droppedEvents.Load()
+}
+
+// FailedWrites returns the cumulative number of audit events that could not be
+// written to an output (e.g. disk full, sink unreachable). Surfacing this lets
+// operators alert on audit-pipeline failures rather than silently losing
+// records (L-10).
+func (al *AuditLogger) FailedWrites() int64 {
+	return al.failedWrites.Load()
 }
 
 // AuditEvent represents a security audit event
@@ -197,16 +206,18 @@ func (al *AuditLogger) LogAuthEvent(event AuditEvent) {
 		return
 	}
 
-	// Non-critical events are dispatched according to the configured overflow strategy.
+	// Non-critical events are dispatched according to the configured overflow
+	// strategy. The default (unset) is "block" so audit records are not silently
+	// lost under load (L-9); operators must explicitly opt into "drop".
 	switch al.config.OverflowStrategy {
-	case "block":
+	case "", "block":
 		// Apply backpressure: block the caller until the channel has room.
 		al.eventChan <- event
 	case "sync":
 		// Bypass the async channel and write directly, serialised by writeMu so
 		// concurrent callers do not interleave partial writes.
 		al.writeEventSync(event)
-	default: // "drop" (and any unrecognised value)
+	default: // "drop" (explicitly configured) or any unrecognised value
 		select {
 		case al.eventChan <- event:
 		default:
@@ -252,10 +263,12 @@ func (al *AuditLogger) processEvents(ctx context.Context) {
 func (al *AuditLogger) writeEvent(event AuditEvent) {
 	for _, output := range al.outputs {
 		if err := output.Write(event); err != nil {
+			al.failedWrites.Add(1)
 			log.Error().
 				Err(err).
 				Str("event_type", event.EventType).
 				Str("event_id", event.EventID).
+				Int64("total_failed_writes", al.failedWrites.Load()).
 				Msg("Failed to write audit event")
 		}
 	}

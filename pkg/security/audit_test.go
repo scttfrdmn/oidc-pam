@@ -519,14 +519,16 @@ func TestAuditLoggerDropCounter(t *testing.T) {
 	}
 }
 
-// TestAuditLoggerDropCounterDefault verifies the same behaviour when
-// OverflowStrategy is empty (should default to "drop").
-func TestAuditLoggerDropCounterDefault(t *testing.T) {
+// TestAuditLoggerDefaultDoesNotDrop verifies the L-9 fix: an unset overflow
+// strategy now defaults to "block" (backpressure) rather than silently dropping
+// audit records. With processEvents running to drain the channel, no events are
+// dropped.
+func TestAuditLoggerDefaultDoesNotDrop(t *testing.T) {
 	out := &captureOutput{}
 	cfg := config.AuditConfig{
 		Enabled:          true,
-		BufferSize:       1,
-		OverflowStrategy: "", // empty → drop
+		BufferSize:       4,
+		OverflowStrategy: "", // empty → block (default)
 	}
 	logger, err := NewAuditLogger(cfg)
 	if err != nil {
@@ -534,13 +536,18 @@ func TestAuditLoggerDropCounterDefault(t *testing.T) {
 	}
 	logger.outputs = []AuditOutput{out}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger.wg.Add(1)
+	go logger.processEvents(ctx)
+
 	event := AuditEvent{EventType: "test", UserID: "u1", Success: true}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 20; i++ {
 		logger.LogAuthEvent(event)
 	}
 
-	if dropped := logger.DroppedEvents(); dropped != 2 {
-		t.Errorf("Expected 2 dropped events (buffer=1, sent=3), got %d", dropped)
+	if dropped := logger.DroppedEvents(); dropped != 0 {
+		t.Errorf("Expected 0 dropped events with default (block) strategy, got %d", dropped)
 	}
 }
 

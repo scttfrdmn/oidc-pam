@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(#95) L-1:** Non-Linux peer-credential stub now fails closed (returns an error) instead of returning uid 0.
 - **(#95) L-3:** Broker aborts startup if it cannot set the IPC socket permissions (was a non-fatal warning).
 - **(#95) M-2:** Corrected the `NewEncryption` doc comment to match the actual PBKDF2 derivation; **L-17:** guarded `truncateString` against a panic when `maxLen < 3`.
+- **(#95) M-3:** Audience (client_id) verification is now only skippable in development mode; production always verifies regardless of `verify_audience`, consistent with the auth-code flow.
+- **(#95) M-4:** The device-authorization discovery fallback endpoint is now run through the same scheme/host validation as discovered endpoints instead of being used unvalidated.
+- **(#95) L-2:** Darwin/FreeBSD peer-credential checks now reject an unexpected `Xucred` version (avoids misreading an unpopulated struct as uid 0).
+- **(#95) L-4:** IPC server caps concurrent connections (bounded semaphore) so a peer cannot exhaust goroutines/FDs.
+- **(#95) L-5:** Documented that `pam_sm_acct_mgmt` performs no authorization (auth phase is authoritative); deployments must not rely on the PAM `account` stack as the sole gate.
+- **(#95) L-6:** `pam-helper` ignores caller-supplied `-config`/`-socket` when running as root, preventing redirection to a rogue broker.
+- **(#95) L-7:** Unknown risk-policy conditions now log a warning instead of silently evaluating to false (visible misconfiguration).
+- **(#95) L-9:** Audit overflow strategy defaults to `block` (backpressure) instead of silently dropping; `drop` must be explicitly opted into.
+- **(#95) L-10:** Audit write failures are counted and exposed via `FailedWrites()` for alerting.
+- **(#95) L-11:** Fixed a per-authentication json-c object leak in the PAM module's request builder.
+- **(#95) L-14:** Documented that authorized_keys expiry parsing is best-effort and fail-safe (forged/malformed comments retain the key).
+- **(#95) L-15:** Token-ownership comparison in `ValidateToken` is now constant-time.
+- **(#95) L-16:** Added best-effort zeroization of the derived encryption key (`Encryption.Destroy`) and transient decrypt buffers.
 
 ### Added
 - DEPLOYMENT.md: "Identity vs. Authentication" guidance explaining that oidc-pam is an authentication layer (use SSSD/a directory for NSS identity and consistent cluster UIDs), why no `libnss_oidc.so` module is shipped, and the provision-on-first-login pattern for directory-less environments
