@@ -43,10 +43,13 @@ Choose your provider and follow the specific setup guide:
    sudo nano /etc/oidc-auth/broker.yaml
    ```
 
-3. **Generate encryption key:**
+3. **Generate encryption key** (base64-encoded 32-byte / AES-256 key):
    ```bash
-   openssl rand -base64 32
+   oidc-admin gen-key        # or: openssl rand -base64 32
    ```
+   The value is used directly as the AES-256 key — it must be a base64 32-byte
+   key, not a passphrase. A wrong-length or non-base64 value is rejected at
+   startup.
 
 4. **Update configuration with your settings:**
    - OIDC provider URL
@@ -87,7 +90,8 @@ oidc:
       scopes: ["openid", "email", "profile", "groups"]
 
 security:
-  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  # base64-encoded 32-byte key from `oidc-admin gen-key`
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
 
 authentication:
   require_groups: ["linux-users"]

@@ -4,13 +4,13 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
-
-	"golang.org/x/crypto/pbkdf2"
 )
+
+// KeyBytes is the required raw key length for AES-256 (32 bytes).
+const KeyBytes = 32
 
 // Encryption handles encryption and decryption of sensitive data
 type Encryption struct {
@@ -19,23 +19,52 @@ type Encryption struct {
 
 // NewEncryption creates a new encryption instance.
 //
-// The 32-byte AES key is derived from keyString using PBKDF2-HMAC-SHA256
-// (600,000 iterations) with a fixed application-level salt. keyString is
-// expected to be a high-entropy secret — config validation requires 32+ bytes,
-// and GenerateKey() produces a suitable base64 value. The static salt is an
-// accepted trade-off given that assumption; its purpose is computational cost
-// against brute force, not per-deployment uniqueness.
+// keyString MUST be a base64-encoded 32-byte (256-bit) key, exactly as produced
+// by GenerateKey(). The decoded bytes are used directly as the AES-256-GCM key —
+// no password-based derivation is performed, so the key must already be full
+// entropy. A passphrase, short string, or wrong-length key is rejected.
+//
+// BREAKING CHANGE (v0.4.0): earlier versions accepted an arbitrary passphrase
+// and stretched it with PBKDF2 + a static salt. Operators must now supply a
+// machine-generated key (see `oidc-admin`/GenerateKey). The static-salt
+// derivation has been removed.
 func NewEncryption(keyString string) (*Encryption, error) {
 	if keyString == "" {
 		return nil, fmt.Errorf("encryption key cannot be empty")
 	}
 
-	salt := []byte("oidc-pam-token-encryption-v1")
-	key := pbkdf2.Key([]byte(keyString), salt, 600000, 32, sha256.New)
+	key, err := decodeKey(keyString)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Encryption{
 		key: key,
 	}, nil
+}
+
+// decodeKey base64-decodes keyString and validates it is exactly KeyBytes long.
+// It accepts both standard and raw (unpadded) base64 for operator convenience.
+func decodeKey(keyString string) ([]byte, error) {
+	var key []byte
+	var err error
+	if key, err = base64.StdEncoding.DecodeString(keyString); err != nil {
+		if key, err = base64.RawStdEncoding.DecodeString(keyString); err != nil {
+			return nil, fmt.Errorf("encryption key must be base64-encoded: %w", err)
+		}
+	}
+	if len(key) != KeyBytes {
+		return nil, fmt.Errorf("encryption key must decode to exactly %d bytes, got %d (generate one with `oidc-admin` or GenerateKey)", KeyBytes, len(key))
+	}
+	return key, nil
+}
+
+// ValidateKeyString reports whether keyString is a valid base64-encoded 32-byte
+// key, without constructing an Encryption. Used by config validation so a bad
+// key is caught at startup rather than first use.
+func ValidateKeyString(keyString string) error {
+	_, err := decodeKey(keyString)
+	return err
 }
 
 // Encrypt encrypts the given plaintext

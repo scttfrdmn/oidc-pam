@@ -40,7 +40,7 @@ func TestNewBroker(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			AuditEnabled:       true,
 		},
 		Audit: config.AuditConfig{

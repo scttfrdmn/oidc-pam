@@ -106,8 +106,11 @@ security:
   max_token_age: "24h"
   clock_skew_tolerance: "5m"
   
-  # Token encryption (generate with: openssl rand -base64 32)
-  token_encryption_key: "your-32-byte-base64-encoded-key-here"
+  # Token encryption key — MUST be a base64-encoded 32-byte (256-bit) key.
+  # Generate with:  oidc-admin gen-key   (or: openssl rand -base64 32)
+  # The value is used directly as the AES-256 key (no passphrase stretching);
+  # a passphrase or wrong-length value is rejected at startup.
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
   
   # TLS verification
   tls_verification:

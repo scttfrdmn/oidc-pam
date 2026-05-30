@@ -59,8 +59,10 @@ security:
   max_token_age: "24h"
   clock_skew_tolerance: "5m"
   
-  # REQUIRED: Generate with: openssl rand -base64 32
-  token_encryption_key: "CHANGE-THIS-TO-A-SECURE-32-BYTE-KEY"
+  # REQUIRED: base64-encoded 32-byte key. Generate with:
+  #   oidc-admin gen-key    (or: openssl rand -base64 32)
+  # Used directly as the AES-256 key; a passphrase/wrong length is rejected.
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
   
   # Rate limiting
   rate_limiting:

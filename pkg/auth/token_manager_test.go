@@ -16,7 +16,7 @@ func TestTokenManagerCreation(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -36,7 +36,7 @@ func TestTokenManagerStartStop(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -67,7 +67,7 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -121,7 +121,7 @@ func TestTokenManagerRevocation(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -155,7 +155,7 @@ func TestTokenManagerRefresh(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -180,7 +180,7 @@ func TestTokenManagerInternalMethods(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -221,7 +221,7 @@ func TestTokenManagerCleanup(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -254,7 +254,7 @@ func TestTokenManagerConcurrency(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -299,7 +299,7 @@ func TestValidateTokenConcurrent(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -352,7 +352,7 @@ func newTMForTest(t *testing.T) *TokenManager {
 	tm, err := NewTokenManager(&config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	})
 	if err != nil {
@@ -621,7 +621,7 @@ func TestTokenManagerAlwaysEncrypts(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 

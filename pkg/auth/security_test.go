@@ -78,7 +78,7 @@ func TestBrokerSecurityValidation(t *testing.T) {
 					},
 				},
 				Security: config.SecurityConfig{
-					TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+					TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 				},
 			},
 			expectedError: "provider",
@@ -101,7 +101,7 @@ func TestBrokerSecurityValidation(t *testing.T) {
 					},
 				},
 				Security: config.SecurityConfig{
-					TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+					TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 				},
 			},
 			expectedError: "openid",
@@ -240,7 +240,7 @@ func TestBrokerAuditingSecurity(t *testing.T) {
 func TestBrokerTokenSecurity(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			SecureTokenStorage: true,
 			VerifyAudience:     true,
 			RequireAuthTime:    true,

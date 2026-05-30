@@ -115,13 +115,14 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		return nil, fmt.Errorf("at least one OIDC provider must be configured")
 	}
 
-	// Validate security configuration
+	// Validate security configuration. The key must be a base64-encoded 32-byte
+	// value (as produced by GenerateKey); it is used directly as the AES-256 key
+	// with no passphrase stretching.
 	if cfg.Security.TokenEncryptionKey == "" {
 		return nil, fmt.Errorf("token encryption key is required for security")
 	}
-
-	if len(cfg.Security.TokenEncryptionKey) < 32 {
-		return nil, fmt.Errorf("token encryption key must be at least 32 bytes for security")
+	if err := security.ValidateKeyString(cfg.Security.TokenEncryptionKey); err != nil {
+		return nil, fmt.Errorf("invalid token_encryption_key: %w", err)
 	}
 
 	// Validate OIDC provider security
