@@ -19,7 +19,7 @@ func TestBrokerInternalMethods(t *testing.T) {
 	broker := &Broker{
 		config: &config.Config{
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		sessions: make(map[string]*Session),
@@ -75,7 +75,7 @@ func TestBrokerSessionHelpers(t *testing.T) {
 				MaxConcurrentSessions: 10,
 			},
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		sessions:     make(map[string]*Session),
@@ -149,7 +149,7 @@ func TestBrokerFieldInitialization(t *testing.T) {
 				MaxConcurrentSessions: 10,
 			},
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		sessions:     make(map[string]*Session),
@@ -311,7 +311,7 @@ func TestBrokerSSHKeyMethods(t *testing.T) {
 	broker := &Broker{
 		config: &config.Config{
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		keyManager:            sshpkg.NewKeyManager(keyDir),
@@ -410,7 +410,7 @@ func TestBrokerStartStopIntegration(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -457,7 +457,7 @@ func TestBrokerAuthenticateScenarios(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -534,7 +534,7 @@ func TestBrokerPollDeviceAuthorization(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 

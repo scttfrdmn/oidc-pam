@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"github.com/scttfrdmn/oidc-pam/pkg/security"
 	"github.com/spf13/cobra"
 )
 
@@ -97,11 +98,28 @@ var adminKeysCmd = &cobra.Command{
 	},
 }
 
+var adminGenKeyCmd = &cobra.Command{
+	Use:   "gen-key",
+	Short: "Generate a token encryption key",
+	Long: `Generate a new base64-encoded 32-byte (AES-256) key suitable for
+security.token_encryption_key in broker.yaml. The output is the value to set;
+keep it secret and supply it via the config file or an env:/file: reference.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		key, err := security.GenerateKey()
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to generate key")
+			os.Exit(1)
+		}
+		fmt.Println(key)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(adminStatusCmd)
 	rootCmd.AddCommand(adminHealthCmd)
 	rootCmd.AddCommand(adminSessionsCmd)
 	rootCmd.AddCommand(adminKeysCmd)
+	rootCmd.AddCommand(adminGenKeyCmd)
 }
 
 // System status

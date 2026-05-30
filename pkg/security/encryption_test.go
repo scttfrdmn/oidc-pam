@@ -6,9 +6,15 @@ import (
 	"testing"
 )
 
+// Valid base64-encoded 32-byte keys for tests (Option B requires real keys).
+var (
+	testKey1 = base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	testKey2 = base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
+)
+
 func TestNewEncryption(t *testing.T) {
 	// Test with valid key
-	enc, err := NewEncryption("test-key")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -27,7 +33,7 @@ func TestNewEncryption(t *testing.T) {
 }
 
 func TestEncryptDecrypt(t *testing.T) {
-	enc, err := NewEncryption("test-key-for-encryption")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -78,7 +84,7 @@ func TestEncryptDecrypt(t *testing.T) {
 }
 
 func TestEncryptDecryptBytes(t *testing.T) {
-	enc, err := NewEncryption("test-key-for-bytes")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -129,7 +135,7 @@ func TestEncryptDecryptBytes(t *testing.T) {
 }
 
 func TestDecryptInvalidData(t *testing.T) {
-	enc, err := NewEncryption("test-key")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -177,7 +183,7 @@ func TestDecryptInvalidData(t *testing.T) {
 }
 
 func TestDecryptBytesInvalidData(t *testing.T) {
-	enc, err := NewEncryption("test-key")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -287,12 +293,12 @@ func TestGenerateKey(t *testing.T) {
 
 func TestEncryptionWithDifferentKeys(t *testing.T) {
 	// Create two different encryption instances
-	enc1, err := NewEncryption("key1")
+	enc1, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption 1: %v", err)
 	}
 
-	enc2, err := NewEncryption("key2")
+	enc2, err := NewEncryption(testKey2)
 	if err != nil {
 		t.Fatalf("Failed to create encryption 2: %v", err)
 	}
@@ -324,7 +330,7 @@ func TestEncryptionWithDifferentKeys(t *testing.T) {
 }
 
 func TestEncryptionConsistency(t *testing.T) {
-	enc, err := NewEncryption("consistent-key")
+	enc, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption: %v", err)
 	}
@@ -352,12 +358,12 @@ func TestEncryptionConsistency(t *testing.T) {
 
 func TestEncryptionKeyDerivation(t *testing.T) {
 	// Same key string should produce same encryption key
-	enc1, err := NewEncryption("same-key")
+	enc1, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption 1: %v", err)
 	}
 
-	enc2, err := NewEncryption("same-key")
+	enc2, err := NewEncryption(testKey1)
 	if err != nil {
 		t.Fatalf("Failed to create encryption 2: %v", err)
 	}

@@ -27,7 +27,7 @@ func TestBrokerSessionMethods(t *testing.T) {
 				MaxConcurrentSessions: 10,
 			},
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		sessions:     make(map[string]*Session),
@@ -122,7 +122,7 @@ func TestBrokerSessionCleanup(t *testing.T) {
 				MaxConcurrentSessions: 10,
 			},
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		sessions:     make(map[string]*Session),
@@ -226,7 +226,7 @@ func TestBrokerStartStop(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 

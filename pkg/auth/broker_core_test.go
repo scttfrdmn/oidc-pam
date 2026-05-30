@@ -28,7 +28,7 @@ func TestBrokerCoreAuthenticate(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -92,7 +92,7 @@ func TestPolicyEngineEvaluateCore(t *testing.T) {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -144,7 +144,7 @@ func TestPolicyEngineEvaluateCore(t *testing.T) {
 func TestTokenManagerCore(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	}
 
@@ -243,7 +243,7 @@ func TestSessionManagementCore(t *testing.T) {
 				MaxConcurrentSessions: 10,
 			},
 			Security: config.SecurityConfig{
-				TokenEncryptionKey: "test-key-that-is-long-enough-for-security",
+				TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			},
 		},
 		providers: make(map[string]*OIDCProvider),

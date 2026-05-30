@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.4] - 2026-05-30
+## [0.4.0] - 2026-05-30
+
+### Changed (BREAKING)
+- **(#95 M-1) `token_encryption_key` must now be a base64-encoded 32-byte key.**
+  The key is used directly as the AES-256-GCM key; the previous PBKDF2 + static
+  salt derivation has been removed (the static salt was shared across all
+  deployments). A passphrase or wrong-length value is now rejected at startup.
+  - **Migration:** generate a key with `oidc-admin gen-key` (or
+    `openssl rand -base64 32`) and set it as `security.token_encryption_key`.
+    The token store is in-memory only, so there is no persisted ciphertext to
+    migrate — existing sessions simply re-authenticate after restart.
+
+### Added
+- `oidc-admin gen-key` subcommand that prints a new base64-encoded 32-byte
+  encryption key.
+- `security.ValidateKeyString` for startup key validation.
 
 ### Security
 - **Critical (#90):** Bind the authenticated OIDC identity to the requested local username via `username_claim` before activating a session; previously any IdP user could log in as any local account (including root). Fails closed when `username_claim` is unset.
