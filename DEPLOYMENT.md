@@ -45,6 +45,67 @@ deployments:
   `oidc-auth-broker`, `oidc-pam-helper`, `oidc-admin`, and `pam_oidc.so`. There
   is no standalone `oidc-pam` binary.
 
+### Identity vs. Authentication: where oidc-pam fits
+
+oidc-pam is an **authentication** layer, not an **identity** (name service)
+layer. These are two distinct responsibilities, and on most deployments they
+are owned by two different components:
+
+| Concern | Question it answers | Owned by |
+|---------|---------------------|----------|
+| **Identity / NSS** | Does user `alice` exist? What UID/GID/home/shell/groups? | Your name service: local `/etc/passwd`, **SSSD**, LDAP/AD, directory sync |
+| **Authentication / PAM** | Can the person logging in as `alice` *prove* they are allowed to? | **oidc-pam** (OIDC device flow + SSH-key provisioning + audit) |
+
+The recommended architecture is to **let SSSD (or your existing directory) own
+identity, and let oidc-pam own authentication.** Each tool stays in its lane:
+
+- SSSD + an LDAP/AD/AWS Identity Store backend provides NSS (so `getpwnam`,
+  `id`, `ls -l`, `sudo`, file ownership, and quotas all work) and — critically
+  for clusters — **consistent UIDs/GIDs across every node**, which shared
+  filesystems (NFS/Lustre/EFS) require to avoid silent ownership corruption.
+- oidc-pam provides the modern login experience (passkey/device-flow auth,
+  automatic SSH key lifecycle, MFA/risk policy, audit trails) on top of those
+  already-resolved accounts.
+
+If you already have an identity provider for OIDC (Entra ID, Okta, AWS IAM
+Identity Center, Keycloak), you almost always also have a directory backend
+SSSD can consume for POSIX attributes. Use it for identity; point oidc-pam at
+the same IdP for authentication.
+
+#### Why oidc-pam does not ship an NSS module
+
+An OIDC-backed `libnss_oidc.so` is deliberately **not** provided, because NSS is
+a poor fit for OIDC:
+
+- **Blast radius.** An NSS module is loaded into *every* process that resolves a
+  name (sshd, sudo, systemd, login, even `ls`). A hang or crash degrades the
+  whole host. NSS modules must be fast, non-blocking, and flawless.
+- **NSS cannot do network I/O; OIDC is inherently network-bound.** `getpwnam`
+  is synchronous and called constantly — you cannot run a device flow or token
+  validation inside it. Any NSS module would have to serve from a locally
+  materialized cache, which means you *still* need a provisioning/sync step.
+  That undercuts the main reason to want NSS in the first place.
+- **UID allocation is the hard part, and OIDC does not solve it.** OIDC tokens
+  carry no POSIX UID unless you configure POSIX attributes in the directory
+  (e.g. the AWS Identity Store). Inventing UIDs (hashing `sub`) risks collisions
+  and instability; a central allocator needs shared state — which is precisely
+  what LDAP/SSSD already provide.
+
+This is the same conclusion reached by comparable systems (e.g. Google OS Login
+ships an NSS module **plus** a guest agent that materializes a cache with
+directory-assigned UIDs — even there, live lookups are not done in NSS).
+
+#### When you have no directory at all
+
+For pure-OIDC environments with no directory and ephemeral cloud nodes where you
+will not run SSSD, the supported pattern is **provision-on-first-login**:
+have the broker (or a front-end such as Open OnDemand) create the local account
+with a deterministic UID before the PAM session, then let standard
+`/etc/passwd` + `pam_mkhomedir` take over. The account then genuinely exists, so
+`getpwnam` and all UID-dependent tooling work normally — without an in-process
+NSS failure surface. oidc-pam itself does not perform this provisioning; wire it
+into your boot/login automation.
+
 ## Prerequisites
 
 ### System Requirements
