@@ -15,6 +15,36 @@ The OIDC PAM authentication system consists of:
 3. **OIDC Provider**: External identity provider (Keycloak, Auth0, etc.)
 4. **Supporting Infrastructure**: Logging, monitoring, backup systems
 
+## Integration Model & Scope
+
+Understand the following before integrating oidc-pam, especially in automated
+deployments:
+
+- **PAM-only.** oidc-pam integrates exclusively through PAM. There is **no NSS
+  module** (no `libnss_oidc.so`) — oidc-pam does not provide UID/username
+  resolution through `nsswitch.conf`. UID/GID resolution must come from your
+  existing name service (local `/etc/passwd`, SSSD, LDAP, directory sync, etc.).
+
+- **Local accounts must already exist.** oidc-pam authenticates and provisions
+  SSH keys for an account that is already present on the system; it does **not**
+  create local users. Provision accounts separately (directory sync, `useradd`,
+  SSSD, cloud-init, configuration management, etc.) before or alongside
+  authentication.
+
+- **Username flows *in*, not out.** PAM supplies the requested local username
+  (from SSH, the console, or a front-end such as Apache/Open OnDemand). The
+  broker then authenticates that identity via the OIDC device flow and uses the
+  provider's `username_claim` to verify the authenticated OIDC identity is
+  allowed to log in as that local user. oidc-pam does **not** resolve an OIDC
+  identity into a local username, so there is no "user map" command. Front-ends
+  that expect an OIDC→username mapping helper (for example Open OnDemand's
+  `user_map_cmd`) should perform that mapping in their own layer; do not point
+  it at an oidc-pam binary.
+
+- **Shipped binaries.** A release provides exactly four artifacts:
+  `oidc-auth-broker`, `oidc-pam-helper`, `oidc-admin`, and `pam_oidc.so`. There
+  is no standalone `oidc-pam` binary.
+
 ## Prerequisites
 
 ### System Requirements
@@ -82,20 +112,41 @@ wget https://github.com/yourusername/oidc-pam/releases/latest/download/oidc-pam-
 sudo rpm -ivh oidc-pam-1.0.0-alpha.x86_64.rpm
 ```
 
-### Method 2: Binary Installation
+### Method 2: Binary Installation (Recommended)
+
+Release tarballs are named `oidc-pam-<version>-linux-<arch>.tar.gz` (with a
+matching `.sha256`) and are published for `amd64` and `arm64`. Each archive
+extracts to a versioned directory containing the four binaries, a `configs/`
+tree, the docs, and an `install.sh` entrypoint.
 
 ```bash
-# Download binary distribution
-wget https://github.com/yourusername/oidc-pam/releases/latest/download/oidc-pam-linux-amd64.tar.gz
-tar -xzf oidc-pam-linux-amd64.tar.gz
-cd oidc-pam-linux-amd64
+VERSION=v0.3.2
+ARCH=amd64   # or arm64
 
-# Run installation script
-sudo ./install.sh
+# Download the archive and its checksum
+curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
+curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz.sha256
+
+# Verify integrity
+sha256sum -c oidc-pam-${VERSION}-linux-${ARCH}.tar.gz.sha256
+
+# Extract and install
+tar -xzf oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
+cd oidc-pam-${VERSION}-linux-${ARCH}
+
+# Installs binaries, example config, and the systemd unit.
+# PAM is left untouched unless you pass --configure-pam.
+sudo ./install.sh                 # add --configure-pam to wire pam_oidc.so into sshd
 
 # Verify installation
 systemctl status oidc-auth-broker
 ```
+
+The bundled `install.sh` places `oidc-auth-broker`, `oidc-pam-helper`, and
+`oidc-admin` in `/usr/local/bin`, `pam_oidc.so` in `/lib/security`, an example
+config in `/etc/oidc-auth/broker.yaml`, and the systemd unit in
+`/etc/systemd/system`. It does **not** start the broker or modify PAM unless
+`--configure-pam` is supplied, so it cannot lock you out on its own.
 
 ### Method 3: Source Compilation
 
