@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-05-30
+
 ### Security
 - **Critical (#90):** Bind the authenticated OIDC identity to the requested local username via `username_claim` before activating a session; previously any IdP user could log in as any local account (including root). Fails closed when `username_claim` is unset.
 - **Critical (#91):** Harden authorized_keys writes against symlink/TOCTOU attacks — the root broker now refuses symlinked `.ssh`/`authorized_keys`, opens files with `O_NOFOLLOW`, and replaces files atomically (temp+rename) instead of following/truncating user-planted links.
