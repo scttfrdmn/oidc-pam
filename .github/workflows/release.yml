@@ -9,9 +9,40 @@ permissions:
   contents: write
 
 jobs:
+  verify-version:
+    name: Verify version sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check README badge and CHANGELOG match the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          fail=0
+
+          # README version badge must equal the tag.
+          badge=$(grep -oE 'badge/Version-[^-]+(\.[^-]+)*-blue' README.md | sed -E 's#badge/Version-(.*)-blue#\1#' | head -1)
+          if [ "$badge" != "$VERSION" ]; then
+            echo "::error::README version badge is '$badge' but the tag is '$VERSION'. Use scripts/release.sh to cut releases."
+            fail=1
+          fi
+
+          # CHANGELOG must have a section header for this version.
+          if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${VERSION}]' section. Use scripts/release.sh to cut releases."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Version $VERSION is consistent across the tag, README badge, and CHANGELOG."
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runs_on }}
+    needs: verify-version
 
     strategy:
       fail-fast: false

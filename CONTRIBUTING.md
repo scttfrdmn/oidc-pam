@@ -233,15 +233,31 @@ This project follows [Semantic Versioning](https://semver.org/) (SemVer):
 - **Release Candidate**: Production-ready candidates (0.x.x-rc.x)
 - **Stable**: Production releases (x.x.x)
 
+### Cutting a release
+
+Use the release script — it is the single source of truth and keeps the README
+version badge and CHANGELOG in sync with the tag automatically:
+
+```bash
+# 1. Land all changes for the release on main, with entries under
+#    "## [Unreleased]" in CHANGELOG.md.
+# 2. From a clean checkout of main:
+scripts/release.sh 0.4.2        # leading 'v' optional
+```
+
+The script stamps the README badge, rolls `## [Unreleased]` into a dated
+`## [0.4.2]` section, commits `chore(release): v0.4.2`, creates the annotated tag,
+and (after confirmation) pushes both. Pushing the tag triggers the Release
+workflow, which **verifies** the tag, README badge, and CHANGELOG agree before
+building and publishing multi-arch artifacts. A manual tag whose docs are out of
+sync will fail that check.
+
 ### Release Checklist
 
-- [ ] All tests pass
-- [ ] Documentation updated
-- [ ] CHANGELOG.md updated
-- [ ] Version bumped in relevant files
-- [ ] Git tag created
-- [ ] GitHub release created
-- [ ] Artifacts built and published
+- [ ] All changes merged to `main` with entries under `## [Unreleased]`
+- [ ] All tests pass on `main`
+- [ ] `scripts/release.sh <version>` run (stamps README + CHANGELOG, tags, pushes)
+- [ ] Release workflow green; GitHub release and artifacts published
 
 ## Community
 
