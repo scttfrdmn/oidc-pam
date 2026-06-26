@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
 A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH, console, and GUI logins with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
