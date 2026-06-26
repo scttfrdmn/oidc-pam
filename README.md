@@ -1,8 +1,8 @@
 # OIDC PAM: Modern Authentication for Linux Systems
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.21-blue)](https://golang.org/)
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
 A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH, console, and GUI logins with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
@@ -13,6 +13,7 @@ A comprehensive Linux authentication solution using OpenID Connect (OIDC) that m
 - **Automatic SSH Key Management**: Generate, rotate, and revoke SSH keys automatically
 - **Enterprise Identity Integration**: Support for Okta, Azure AD, Auth0, Google Workspace, AWS IAM Identity Center, and any OIDC provider
 - **Mobile-First UX**: Authenticate via QR codes and mobile passkeys
+- **Strong Authorization**: Binds the OIDC identity to the requested local user and enforces `require_groups`
 - **Comprehensive Audit**: Complete access trails for compliance (SOC 2, PCI, HIPAA)
 - **Cloud-Native**: Auto-configuration for AWS, Azure, and GCP
 - **Research Computing**: Special features for academic and scientific computing
@@ -61,27 +62,41 @@ OIDC PAM provides a modern, secure, and user-friendly alternative.
 
 ### Installation
 
-#### Ubuntu/Debian
-```bash
-sudo apt update
-sudo apt install -y golang libpam0g-dev build-essential
+#### From a release (recommended)
 
-# One-line installation
-curl -sSL https://raw.githubusercontent.com/scttfrdmn/oidc-pam/main/scripts/install.sh | \
-  OIDC_PROVIDER="https://your-provider.com" \
-  OIDC_CLIENT_ID="your-client-id" \
-  bash
+Download the latest `linux/amd64` or `linux/arm64` tarball, verify it, and run the
+bundled installer. The installer places the binaries, an example config, and the
+systemd unit; it does **not** modify PAM unless you pass `--configure-pam`.
+
+```bash
+VERSION=v0.4.0
+ARCH=amd64   # or arm64
+
+curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
+curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz.sha256
+sha256sum -c oidc-pam-${VERSION}-linux-${ARCH}.tar.gz.sha256
+
+tar -xzf oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
+cd oidc-pam-${VERSION}-linux-${ARCH}
+sudo ./install.sh            # add --configure-pam to wire pam_oidc.so into sshd
 ```
 
-#### RHEL/CentOS/Fedora
-```bash
-sudo dnf install -y golang pam-devel gcc make
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full deployment guide (including the
+identity model and prerequisites).
 
-# One-line installation
-curl -sSL https://raw.githubusercontent.com/scttfrdmn/oidc-pam/main/scripts/install.sh | \
-  OIDC_PROVIDER="https://your-provider.com" \
-  OIDC_CLIENT_ID="your-client-id" \
-  bash
+#### From source
+
+```bash
+# Ubuntu/Debian
+sudo apt update && sudo apt install -y golang libpam0g-dev libjson-c-dev build-essential
+
+# RHEL/CentOS/Fedora
+sudo dnf install -y golang pam-devel json-c-devel gcc make
+
+git clone https://github.com/scttfrdmn/oidc-pam.git
+cd oidc-pam
+make build
+sudo make install-dev
 ```
 
 ### Configuration
@@ -94,14 +109,26 @@ oidc:
       issuer: "https://company.okta.com"
       client_id: "your-client-id"
       scopes: ["openid", "email", "groups"]
+      # Required: the claim whose value must match the local username being
+      # logged into. The broker refuses to activate a session if it does not
+      # match, preventing an IdP user from logging in as another local account.
+      user_mapping:
+        username_claim: "preferred_username"
 
 authentication:
   token_lifetime: "8h"
-  require_groups: ["linux-users"]
-  
+  require_groups: ["linux-users"]    # enforced against the user's OIDC groups
+
 security:
   audit_enabled: true
+  # Required: base64-encoded 32-byte key. Generate with `oidc-admin gen-key`.
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
 ```
+
+> **Security note:** `token_encryption_key` must be a base64-encoded 32-byte key
+> (generate with `oidc-admin gen-key`), and `username_claim` must be set — both
+> are validated at startup. See [SECURITY.md](SECURITY.md) and
+> [configs/CONFIGURATION-GUIDE.md](configs/CONFIGURATION-GUIDE.md).
 
 Providers that do not expose a public `/.well-known/openid-configuration` endpoint (such as AWS IAM Identity Center) can use `skip_discovery: true` to bypass OIDC discovery and supply endpoints directly:
 
@@ -140,12 +167,12 @@ ssh user@server.company.com
 
 ## 📚 Documentation
 
-- [Installation Guide](docs/installation.md)
-- [Configuration Reference](docs/configuration.md)
-- [OIDC Provider Setup](docs/providers.md)
-- [Cloud Deployment](docs/cloud-deployment.md)
-- [Research Computing](docs/research-computing.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Quick Start](QUICK-START.md)
+- [Deployment Guide](DEPLOYMENT.md) — installation, identity model, prerequisites
+- [Configuration Guide](configs/CONFIGURATION-GUIDE.md) — provider setup, security best practices, troubleshooting
+- [Requirements](REQUIREMENTS.md)
+- [Security Policy](SECURITY.md)
+- Provider examples: [`configs/providers/`](configs/providers/) (Okta, Azure AD, Keycloak, AWS IAM Identity Center)
 
 ## 🔧 Development
 
@@ -182,30 +209,23 @@ make test-e2e
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-- [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Development Setup](docs/development/setup.md)
-- [Architecture Overview](docs/development/architecture.md)
-
 ## 📋 Roadmap
 
-### v0.1.0 (Alpha) - Foundation
-- [x] Basic OIDC Device Flow implementation
-- [x] Core PAM module
-- [x] SSH key lifecycle management
-- [ ] Basic audit logging
-- [ ] Installation scripts
+### Delivered (through v0.4.0)
+- [x] OIDC device flow with nonce replay protection
+- [x] PAM module + helper (CGO) and authentication broker
+- [x] SSH key lifecycle management with symlink-safe `authorized_keys` writes
+- [x] Multi-provider support (Okta, Azure AD, Keycloak, AWS IAM Identity Center, generic OIDC)
+- [x] `skip_discovery` for providers without a public discovery endpoint
+- [x] Identity binding (OIDC identity → local username) and `require_groups` enforcement
+- [x] Risk-based policy engine and comprehensive audit logging
+- [x] Prometheus metrics, multi-arch release artifacts (amd64/arm64)
+- [x] Security-audited: AES-256-GCM token encryption, hardened IPC trust boundary
 
-### v0.2.0 (Beta) - Enterprise Features
-- [ ] Multi-provider support
-- [ ] Cloud metadata integration
-- [ ] Advanced policy engine
-- [ ] Comprehensive audit trails
-
-### v1.0.0 (GA) - Production Ready
-- [ ] High availability
-- [ ] Performance optimization
-- [ ] Complete documentation
-- [ ] Enterprise certifications
+### Planned
+- [ ] High availability / multiple broker instances
+- [ ] Performance optimization and scale testing
+- [ ] Expanded provider and platform test coverage
 
 ## 📊 Supported Platforms
 
@@ -220,9 +240,10 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 🛡️ Security
 
-- **Modern Cryptography**: Uses current OIDC and OAuth2 standards
-- **Secure Token Storage**: Encrypted tokens with secure key management
-- **Audit Logging**: Complete access trails for compliance
+- **Modern Cryptography**: AES-256-GCM token encryption with a base64 32-byte key (`oidc-admin gen-key`); ID token signature, issuer, audience, and nonce all verified
+- **Hardened Trust Boundary**: Root-only Unix-socket IPC with `SO_PEERCRED` verification; symlink-safe, `O_NOFOLLOW` `authorized_keys` writes
+- **Authorization**: OIDC identity bound to the local username; group membership enforced
+- **Audit Logging**: Complete access trails for compliance, with backpressure rather than silent drops
 - **Zero Trust**: No implicit trust, every access verified
 
 For security issues, please see our [Security Policy](SECURITY.md).
@@ -240,9 +261,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📈 Status
 
-**Current Status**: Alpha - Under active development
+**Current Status**: Pre-1.0 (v0.4.0) - Under active development
 
-This project is in early development. While functional, it's not yet recommended for production use. Please test thoroughly in non-production environments.
+Core functionality is implemented and the codebase has undergone a full security
+audit (all findings remediated). It is not yet recommended for unattended
+production use without your own validation. Always test thoroughly in a
+non-production environment and keep an emergency access path while configuring PAM.
 
 ## 💬 Community
 
