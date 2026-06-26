@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped Go toolchain pin from 1.25.10 to 1.25.11, resolving two Go standard-library advisories reported by govulncheck: GO-2026-5039 (net/textproto) and GO-2026-5037 (crypto/x509).
+
 ## [0.4.0] - 2026-05-30
 
 ### Changed (BREAKING)
