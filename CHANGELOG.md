@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-09
+
 ### Security
 - Bumped Go toolchain pin from 1.25.11 to 1.25.12 (latest patch release).
 - Bumped `golang.org/x/crypto` to 0.54.0 (pulls `golang.org/x/sys` 0.47.0, `golang.org/x/text` 0.40.0). govulncheck reports no called vulnerabilities.
