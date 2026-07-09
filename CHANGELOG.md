@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bumped Go toolchain pin from 1.25.11 to 1.25.12 (latest patch release).
+- Bumped `golang.org/x/crypto` to 0.54.0 (pulls `golang.org/x/sys` 0.47.0, `golang.org/x/text` 0.40.0). govulncheck reports no called vulnerabilities.
+- Refreshed SECURITY.md: supported versions now 0.4.x, replaced stale "alpha / not audited" language with the pre-1.0 / internally-audited status, corrected the security-scanner list and documentation links, and documented identity binding + AES-256-GCM key handling.
+
 ## [0.4.1] - 2026-06-26
 
 ### Security
