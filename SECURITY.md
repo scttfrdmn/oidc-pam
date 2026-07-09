@@ -6,10 +6,10 @@ We release security patches for the following versions:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1.0 | :x:                |
+| 0.4.x   | :white_check_mark: |
+| < 0.4.0 | :x:                |
 
-**Note:** OIDC PAM is currently in alpha. We strongly recommend thorough testing before deploying to production environments.
+**Note:** OIDC PAM is pre-1.0 and under active development. Always test thoroughly before deploying to production, and keep an emergency access path when configuring PAM.
 
 ## Reporting a Vulnerability
 
@@ -92,7 +92,8 @@ When deploying OIDC PAM, follow these security recommendations:
 
 OIDC PAM includes several security features:
 
-- **Encrypted Token Storage**: AES-256 encryption for stored tokens
+- **Encrypted Token Storage**: AES-256-GCM authenticated encryption (base64 32-byte key; no passphrase stretching)
+- **Identity Binding**: The authenticated OIDC identity is bound to the requested local username, and `require_groups` is enforced
 - **Comprehensive Audit Logging**: All authentication events logged
 - **Risk-Based Policy Engine**: Geographic and temporal access controls
 - **Automatic Key Rotation**: SSH key lifecycle management
@@ -105,10 +106,9 @@ This project uses automated security scanning:
 
 - **gosec**: Go security vulnerability scanner
 - **govulncheck**: Official Go vulnerability database checker
-- **CodeQL**: Semantic code analysis
-- **Trivy**: Container and dependency scanner
+- **CodeQL**: Semantic code analysis (security-extended + security-and-quality)
 - **Semgrep**: OWASP Top 10 and CWE Top 25 checks
-- **TruffleHog**: Secret detection
+- **Dependency Review**: Flags vulnerable/denied-license dependencies on PRs
 - **OpenSSF Scorecard**: Supply chain security assessment
 
 Security scans run automatically on:
@@ -118,11 +118,12 @@ Security scans run automatically on:
 
 ## Known Security Considerations
 
-### Alpha Release
-This is an **alpha release**. While we follow security best practices:
-- The code has not undergone independent security audit
-- Breaking changes may occur in future versions
-- Not recommended for high-security production environments without thorough testing
+### Pre-1.0 Release
+This is a **pre-1.0 release**. While the codebase has undergone an internal
+security audit (all findings remediated as of v0.4.x):
+- It has not undergone an independent third-party security audit
+- Breaking changes may occur before 1.0
+- Validate thoroughly for your own environment before high-security production use
 
 ### PAM Integration
 - PAM modules run with elevated privileges
@@ -139,7 +140,7 @@ This is an **alpha release**. While we follow security best practices:
 ## Security Updates
 
 Security updates will be:
-- Released as patch versions (e.g., 0.1.0 → 0.1.1)
+- Released as patch versions (e.g., 0.4.1 → 0.4.2)
 - Documented in CHANGELOG.md
 - Announced via GitHub Security Advisories
 - Tagged with `security` label
@@ -158,8 +159,8 @@ However, **you are responsible** for ensuring your deployment meets compliance r
 
 If you have questions about security but not a vulnerability to report:
 - Open a GitHub Discussion
-- Review existing documentation in `/docs/`
-- Check the security configuration examples in `/configs/security/`
+- Review [DEPLOYMENT.md](DEPLOYMENT.md) and [configs/CONFIGURATION-GUIDE.md](configs/CONFIGURATION-GUIDE.md)
+- Check the security configuration examples in [`configs/security/`](configs/security/)
 
 ## Acknowledgments
 
