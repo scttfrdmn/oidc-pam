@@ -157,6 +157,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#142)** `.golangci.yml` and `.golangci-version`. There was no lint
+  configuration, so the linter set was whatever the installed binary defaulted to
+  — decided by the tool version rather than by this repository, which is how a
+  contributor on a different version sees different results and how a tool upgrade
+  silently adds or drops a check. The standard set (errcheck, govet, ineffassign,
+  staticcheck, unused) is now declared explicitly; it changes nothing today, which
+  is the point. The version is single-sourced in `.golangci-version`, read by the
+  CI Lint job, `test/docker/Dockerfile.verify` and `make lint` — which warns if
+  the locally installed version differs, rather than reporting a clean run that
+  CI will not reproduce.
 - **(#140)** `scripts/verify-pam-module.sh` — the gate that would have caught the
   empty module. It asserts a built `.so` exports all six `pam_sm_*` entry points
   and links `libpam` and `libjson-c`, and it runs everywhere a shipped module is
@@ -283,6 +293,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#142)** An unchecked `f.Close()` in `internal/ipc/peercred_darwin.go`, which
+  its Linux twin handles explicitly. It went unnoticed because the file is
+  `//go:build darwin` and CI lints on Linux only — a reminder that the platform CI
+  runs on decides which code gets checked at all.
 - **(#127)** `.gitignore` no longer ignores `*.h`. The cgo bridge headers
   (`cmd/pam-module/cgo_bridge.h`) are source files, so the rule meant a newly added
   header would be skipped by `git add` without a word — in a project whose

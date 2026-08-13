@@ -93,6 +93,11 @@ make lint
 sudo make install-dev
 ```
 
+The linter set is declared in `.golangci.yml` and the golangci-lint version is
+pinned in `.golangci-version`, so a local run matches CI. `make lint` warns if
+your installed version differs from the pin — install that version, or use
+`make verify-linux`, which always uses it.
+
 ### Working on the PAM module
 
 `cmd/pam-module` is the only cgo package. It holds the C bridge

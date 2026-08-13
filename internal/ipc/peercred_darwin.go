@@ -25,7 +25,10 @@ func getPeerCredentials(conn net.Conn) (uid, gid uint32, err error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get file descriptor: %w", err)
 	}
-	defer f.Close()
+	// File() returns a duplicate descriptor, so closing it does not disturb conn;
+	// there is nothing to do about a failure to close a descriptor we only read a
+	// sockopt from. Matches peercred_linux.go.
+	defer func() { _ = f.Close() }()
 
 	cred, err := unix.GetsockoptXucred(int(f.Fd()), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
 	if err != nil {
