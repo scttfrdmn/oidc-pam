@@ -184,12 +184,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go APIs (`pkg/auth`), not wire or config surface.
 
 ### Removed
+- **(#126)** `pkg/policy` (`RiskEngine`, 548 lines plus 482 lines of tests). No
+  package imported it. It is a second, parallel risk-scoring implementation; the
+  live one is `PolicyEngine` in `pkg/auth/policy.go`, which is what the broker
+  actually calls. Two engines with no shared interface and only one of them wired
+  up is a standing invitation to fix the wrong one.
+- **(#126)** `pkg/auth/auth_code_flow.go` (`StartAuthCodeFlow`,
+  `ExchangeCodeForToken`, `AuthCodeFlowState`) and its tests. Nothing called them.
+  The authorization code flow needs a browser redirect back to a local listener,
+  which is not available at a PAM prompt on a headless host — the device
+  authorization grant is the whole reason this project exists. Recoverable from
+  git history if a web-based flow is ever added.
 - **(#123)** `TokenManager.RefreshToken`, a stub that validated its arguments and
   then returned `"token refresh not implemented"`. Refresh is done by
   `Broker.RefreshSession` via the provider; the stub had no callers and only
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#126) Orphaned SSH keys are now swept.** `AuthorizedKeysManager.RemoveExpiredKeys`
+  existed but was never called from anywhere, so the 24-hour cleanup it implements
+  never ran. It matters because sessions live only in the broker's memory: a
+  broker restart orphans every key it had issued, leaving `@oidc-pam-<timestamp>`
+  entries in users' `authorized_keys` with no session left to revoke them — a
+  working credential for whoever holds the private key. The session-expiry pass
+  now sweeps the `authorized_keys` of each user whose session just expired, once
+  per user rather than once per session. Keys without a parseable broker comment,
+  and the user's own keys, are left alone. The sweep is bounded to users with an
+  expiring session, so a user orphaned by a restart who has not logged in since is
+  not reached; that avoids walking every home directory on the host from the
+  broker.
 - **(#125)** Provider selection is deterministic. `selectProvider` ranged over a
   Go map and returned the first login-enabled provider it happened to hit, so on
   a host with more than one such provider, consecutive logins could be sent to
