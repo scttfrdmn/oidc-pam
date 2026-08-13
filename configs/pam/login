@@ -14,7 +14,7 @@ auth    required    pam_unix.so try_first_pass nullok_secure
 auth    optional    pam_group.so
 
 # Account management
-account sufficient  pam_oidc.so
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_nologin.so
@@ -29,7 +29,7 @@ session optional    pam_motd.so
 session optional    pam_mail.so standard
 
 # Password management (disabled for OIDC)
-password sufficient pam_oidc.so
+password optional   pam_oidc.so
 password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 
 # CONFIGURATION NOTES:

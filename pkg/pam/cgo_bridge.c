@@ -762,6 +762,32 @@ PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const cha
     return PAM_SUCCESS;
 }
 
+// The module's account-phase verdict, which is "no opinion".
+//
+// Authorization is enforced entirely in the auth phase (pam_sm_authenticate ->
+// broker: identity binding, group membership, risk policy). This module has
+// nothing to add in the account phase, so it returns PAM_IGNORE rather than
+// PAM_SUCCESS.
+//
+// The distinction matters. PAM_SUCCESS from a module marked `sufficient`
+// short-circuits the rest of the account stack, so `account sufficient
+// pam_oidc.so` — which these example configs used to ship — silently disabled
+// every account check after it: pam_time, pam_nologin, pam_access, account
+// expiry, pam_unix's shadow checks. Answering a question it was never asked let
+// pam_oidc rubber-stamp the account phase for every user.
+//
+// PAM_IGNORE is not counted toward the stack's result at all, so the modules
+// after it decide. If pam_oidc is the *only* account module, an all-ignored
+// stack yields PAM_PERM_DENIED: it fails closed rather than admitting everyone.
+// The shipped configs use `account optional pam_oidc.so` alongside a real account
+// module; see configs/pam/README.md.
+//
+// This is a separate function so a Go test can pin the value — see
+// TestAcctMgmtHasNoOpinion.
+int acct_mgmt_verdict(void) {
+    return PAM_IGNORE;
+}
+
 // PAM account management function
 PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     const char *username;
@@ -782,12 +808,7 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const c
     
     log_pam_message(LOG_DEBUG, "Account management check for user: %s", username);
 
-    // L-5: Authorization is enforced entirely in the auth phase (pam_sm_authenticate
-    // -> broker: identity binding, group checks, risk policy). This module does NOT
-    // implement account-phase (acct_mgmt) authorization, so deployments MUST NOT
-    // rely on the PAM `account` stack with pam_oidc as the sole gate. Returning
-    // PAM_SUCCESS here is intentional and documented; see DEPLOYMENT.md.
-    return PAM_SUCCESS;
+    return acct_mgmt_verdict();
 }
 
 // PAM session open function

@@ -1,14 +1,16 @@
 # PAM configuration for SSH daemon with OIDC authentication
 # This configuration enables OIDC authentication via the PAM module
 
-# Authentication stack
+# Authentication stack. OIDC-only: a successful OIDC authentication ends the auth
+# phase, and pam_deny.so refuses everything else. Nothing may follow pam_deny.so
+# -- it returns immediately, so any module listed after it never runs.
 auth    sufficient  pam_oidc.so debug
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass nullok_secure
-auth    optional    pam_group.so
 
-# Account management
-account sufficient  pam_oidc.so
+# Account management. pam_oidc.so returns PAM_IGNORE -- it has no account-phase
+# opinion; the broker decides authorization during the auth phase. The modules
+# below are what actually decide.
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_time.so
@@ -28,6 +30,7 @@ session optional    pam_lastlog.so
 session optional    pam_motd.so
 session optional    pam_mail.so standard
 
-# Password management (disabled for OIDC)
-password sufficient pam_oidc.so
+# Password management. pam_oidc.so cannot change a password; it returns
+# PAM_AUTHTOK_ERR, so it is 'optional' rather than 'required'.
+password optional   pam_oidc.so
 password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
