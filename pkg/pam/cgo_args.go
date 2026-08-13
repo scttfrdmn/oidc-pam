@@ -14,14 +14,20 @@ import "unsafe"
 // on Darwin/BSD) — the longest broker socket path the module can use.
 const maxSocketPath = int(C.MAX_SOCKET_PATH)
 
+// moduleArgs is the Go view of pam_oidc_options.
+type moduleArgs struct {
+	socketPath     string
+	timeoutSeconds int
+}
+
 // parseModuleArgs runs the C parse_arguments() over args — the module arguments
-// as PAM would pass them from /etc/pam.d/<service> — and returns the broker
-// socket path it settled on.
+// as PAM would pass them from /etc/pam.d/<service> — and returns the options it
+// settled on.
 //
 // The module's argument handling lives in C because that is where PAM enters the
 // module; this wrapper exists so it can be tested from Go (cgo is not permitted
 // in _test.go files).
-func parseModuleArgs(args []string) string {
+func parseModuleArgs(args []string) moduleArgs {
 	var opts C.pam_oidc_options
 
 	argv := make([]*C.char, len(args))
@@ -40,5 +46,8 @@ func parseModuleArgs(args []string) string {
 	}
 	C.parse_arguments(C.int(len(args)), argvPtr, &opts)
 
-	return C.GoString(&opts.socket_path[0])
+	return moduleArgs{
+		socketPath:     C.GoString(&opts.socket_path[0]),
+		timeoutSeconds: int(opts.timeout_s),
+	}
 }
