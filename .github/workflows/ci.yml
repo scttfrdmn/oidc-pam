@@ -32,12 +32,14 @@ jobs:
         run: |
           # PAM/cgo packages are vetted and tested in the separate `pam` job,
           # which installs the PAM and json-c development headers.
-          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin
+          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh \
+            ./internal/adminapi ./internal/brokerclient ./internal/ipc ./cmd/broker ./cmd/oidc-admin
 
       - name: Run tests
         run: |
           go test -race -coverprofile=coverage.out -covermode=atomic \
-            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc
+            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh \
+            ./internal/adminapi ./internal/brokerclient ./internal/ipc ./cmd/oidc-admin
 
       - name: Check test coverage
         run: |

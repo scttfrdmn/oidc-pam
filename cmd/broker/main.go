@@ -72,6 +72,10 @@ func main() {
 			Msg("Failed to create authentication broker")
 	}
 
+	// Report this binary's version through `oidc-admin status`; pkg/auth cannot
+	// see the ldflags variable itself.
+	broker.SetVersion(version)
+
 	// Initialise Prometheus metrics and optionally start the /metrics endpoint.
 	var metricsServer *oidcmetrics.Server
 	if cfg.Server.MetricsAddr != "" {

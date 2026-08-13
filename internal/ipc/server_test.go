@@ -20,6 +20,18 @@ func createTestBroker(t *testing.T) *auth.Broker {
 	return nil
 }
 
+// authResponse asserts that a handleRequest result is an authentication-shaped
+// response and returns it. handleRequest returns `any` because the admin request
+// types answer with their own shapes (see internal/adminapi).
+func authResponse(t *testing.T, v any) *Response {
+	t.Helper()
+	response, ok := v.(*Response)
+	if !ok {
+		t.Fatalf("expected *Response, got %T", v)
+	}
+	return response
+}
+
 // skipIfNotRootOnLinux skips the test when running on Linux as a non-root user.
 // The IPC server's verifyPeerCredentials unconditionally requires UID 0 on Linux,
 // so any test that connects to the socket will be rejected when run as non-root.
@@ -333,7 +345,7 @@ func TestServerHandleRequest(t *testing.T) {
 		UserID: "test-user",
 	}
 
-	response := server.handleRequest(invalidRequest)
+	response := authResponse(t, server.handleRequest(invalidRequest))
 	if response.Success {
 		t.Error("Expected failure for invalid request type")
 	}
@@ -362,7 +374,7 @@ func TestServerHandleRequestUnknownTypeDoesNotEcho(t *testing.T) {
 		UserID: "test-user",
 	}
 
-	response := server.handleRequest(request)
+	response := authResponse(t, server.handleRequest(request))
 	if response.Success {
 		t.Error("Expected failure for unknown request type")
 	}
@@ -723,7 +735,7 @@ func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
 		UserID: "test-user",
 	}
 
-	resp := server.handleRequest(req)
+	resp := authResponse(t, server.handleRequest(req))
 	if resp.ErrorCode != "TOO_MANY_CONCURRENT_AUTHS" {
 		t.Fatalf("expected TOO_MANY_CONCURRENT_AUTHS, got error_code=%q", resp.ErrorCode)
 	}
