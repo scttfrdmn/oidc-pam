@@ -8,13 +8,13 @@
 # Always maintain console or SSH access for emergency recovery.
 
 # Authentication stack
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    sufficient  pam_oidc.so debug
 auth    requisite   pam_nologin.so
 auth    required    pam_unix.so try_first_pass nullok_secure
 auth    optional    pam_group.so
 
 # Account management
-account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account sufficient  pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_nologin.so
@@ -22,14 +22,14 @@ account required    pam_time.so
 
 # Session management
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 session optional    pam_systemd.so
 session optional    pam_lastlog.so
 session optional    pam_motd.so
 session optional    pam_mail.so standard
 
 # Password management (disabled for OIDC)
-password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password sufficient pam_oidc.so
 password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 
 # CONFIGURATION NOTES:

@@ -149,17 +149,17 @@ For SSH authentication, edit `/etc/pam.d/ssh`:
 
 ```
 # OIDC authentication
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml service=ssh
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
 auth    required    pam_unix.so try_first_pass
 
 # Account management
-account required    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account required    pam_oidc.so
 account required    pam_unix.so
 
 # Session management
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 ```
 
 ### 3. SSH Configuration
@@ -285,7 +285,7 @@ logging:
 
 Add debug to PAM configuration:
 ```
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    sufficient  pam_oidc.so debug
 ```
 
 ## Next Steps

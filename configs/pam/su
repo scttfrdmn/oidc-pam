@@ -9,33 +9,34 @@
 
 # Authentication stack
 auth    sufficient  pam_rootok.so
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml target_user=%u
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
 auth    required    pam_unix.so try_first_pass nullok_secure
 auth    optional    pam_group.so
 
 # Account management
-account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account sufficient  pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_time.so
 
 # Session management
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 session optional    pam_systemd.so
 session optional    pam_env.so
 session optional    pam_limits.so
 
 # Password management (disabled for OIDC)
-password sufficient pam_oidc.so config=/etc/oidc-auth/broker.yaml
+password sufficient pam_oidc.so
 password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 
 # CONFIGURATION NOTES:
 # 1. pam_rootok.so allows root to switch to any user without authentication
-# 2. The 'target_user=%u' parameter passes the target username to the OIDC module
-# 3. This allows for user-specific authorization policies
-# 4. Consider the security implications of allowing OIDC for privilege escalation
+# 2. The module takes no authorization parameters. It reads the target user from
+#    pam_get_user() and the service name from PAM_SERVICE and sends both to the
+#    broker; configure per-service policy in /etc/oidc-auth/broker.yaml
+# 3. Consider the security implications of allowing OIDC for privilege escalation
 
 # SU POLICY CONFIGURATION:
 # Configure additional policies in /etc/oidc-auth/broker.yaml:

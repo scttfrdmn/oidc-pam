@@ -70,39 +70,52 @@ ssh -i ~/.ssh/id_rsa root@localhost
 
 ### Basic OIDC Authentication
 ```
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+auth    sufficient  pam_oidc.so
 auth    required    pam_unix.so try_first_pass
 ```
 
 ### OIDC-Only Authentication
 ```
-auth    required    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+auth    required    pam_oidc.so
 ```
 
 ### Unix-First with OIDC Fallback
 ```
 auth    sufficient  pam_unix.so
-auth    required    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+auth    required    pam_oidc.so
 ```
 
 ### Debug Mode
 ```
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    sufficient  pam_oidc.so debug
 ```
 
 ## PAM Module Parameters
 
-### Common Parameters
-- `config=/path/to/config.yaml` - Path to OIDC broker configuration
-- `debug` - Enable debug logging
-- `operation=operation_name` - Specify operation type (ssh, sudo, su, etc.)
-- `target_user=%u` - Pass target username for authorization
+`pam_oidc.so` accepts exactly two arguments:
 
-### Service-Specific Parameters
-- **SSH**: `service=ssh`
-- **Sudo**: `operation=sudo target_user=%u`
-- **Su**: `operation=su target_user=%u`
-- **Login**: `service=login`
+| Argument | Meaning |
+|---|---|
+| `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`). Remove in production. |
+| `socket=<path>` | Absolute path to the broker's Unix socket. Defaults to `/var/run/oidc-auth/broker.sock`, matching the broker's own default for `server.socket_path`. Only needed if you changed that. |
+
+Anything else is ignored and logged at `LOG_WARNING`, so a typo shows up in
+`/var/log/auth.log` instead of silently doing nothing.
+
+### Arguments that do *not* exist
+
+Earlier versions of these example configs passed parameters the module has never
+implemented. They were silently discarded; they are now logged as unrecognized:
+
+- `config=/path/to/broker.yaml` — the module reads no configuration file. It
+  talks to the broker over the socket, and the broker reads `broker.yaml`
+  itself. Still accepted (with a warning) so existing PAM stacks keep working.
+- `operation=sudo`, `target_user=%u`, `service=ssh` — no such authorization
+  knobs exist in the module. Note also that PAM does **not** expand `%u` in
+  module arguments; it would have been passed through literally. The service
+  name and target user already reach the broker: the module reads them from
+  `PAM_SERVICE` and `pam_get_user()` and sends them in the request. Configure
+  per-service policy in `broker.yaml`, not in the PAM line.
 
 ## Security Considerations
 
@@ -180,7 +193,7 @@ sudo pam-config --check /etc/pam.d/ssh
 #### 4. Debug Authentication Flow
 ```bash
 # Enable debug mode
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml debug
+auth    sufficient  pam_oidc.so debug
 
 # Check detailed logs
 sudo journalctl -f | grep pam_oidc

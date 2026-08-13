@@ -19,12 +19,22 @@
 // Maximum buffer sizes
 #define MAX_BUFFER_SIZE 8192
 #define MAX_RESPONSE_SIZE 8192
-#define MAX_SOCKET_PATH 108
+// Longest usable Unix socket path, taken from the platform's sockaddr_un
+// (108 bytes on Linux, 104 on Darwin/BSD) so it can never disagree with it.
+#define MAX_SOCKET_PATH (sizeof(((struct sockaddr_un *)0)->sun_path))
 
-// Default socket path for OIDC broker
-#define SOCKET_PATH "/var/run/oidc-auth-broker.sock"
+// Default socket path for the OIDC broker. Must match the default of
+// server.socket_path in pkg/config/config.go; override per-service with the
+// `socket=<path>` module argument in /etc/pam.d/<service>.
+#define SOCKET_PATH "/var/run/oidc-auth/broker.sock"
+
+// Options parsed from the module arguments in /etc/pam.d/<service>.
+typedef struct {
+    char socket_path[MAX_SOCKET_PATH];
+} pam_oidc_options;
 
 // Function prototypes
+void parse_arguments(int argc, const char **argv, pam_oidc_options *opts);
 void log_pam_message(int priority, const char *format, ...);
 void log_pam_message_string(int priority, const char *message);
 int connect_to_broker(const char *socket_path);

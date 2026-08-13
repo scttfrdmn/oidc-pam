@@ -101,16 +101,16 @@ The SSH server is configured with:
 
 ```bash
 # /etc/pam.d/sshd
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml service=ssh debug
+auth    sufficient  pam_oidc.so debug
 auth    requisite   pam_deny.so
 auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account sufficient  pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 session required    pam_systemd.so
 ```
 

@@ -9,7 +9,7 @@
 # Test thoroughly and maintain emergency access methods.
 
 # Primary authentication stack
-auth    [success=2 default=ignore]     pam_oidc.so config=/etc/oidc-auth/broker.yaml
+auth    [success=2 default=ignore]     pam_oidc.so
 auth    [success=1 default=ignore]     pam_unix.so nullok_secure try_first_pass
 auth    requisite                      pam_deny.so
 auth    required                       pam_permit.so
@@ -24,7 +24,7 @@ auth    required                       pam_permit.so
 # ALTERNATIVE CONFIGURATION (OIDC-only):
 # For OIDC-only authentication without Unix fallback:
 # 
-# auth    required    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+# auth    required    pam_oidc.so
 # auth    requisite   pam_deny.so
 # auth    required    pam_permit.so
 
@@ -32,7 +32,7 @@ auth    required                       pam_permit.so
 # For Unix authentication first, then OIDC fallback:
 # 
 # auth    [success=2 default=ignore]     pam_unix.so nullok_secure
-# auth    [success=1 default=ignore]     pam_oidc.so config=/etc/oidc-auth/broker.yaml
+# auth    [success=1 default=ignore]     pam_oidc.so
 # auth    requisite                      pam_deny.so
 # auth    required                       pam_permit.so
 
