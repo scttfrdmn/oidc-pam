@@ -1,4 +1,4 @@
-.PHONY: build test install clean lint fmt vet tidy verify-linux help
+.PHONY: build build-pam skip-pam test install clean lint fmt vet tidy verify-linux help
 
 # Build variables
 BINARY_DIR := bin
@@ -16,11 +16,25 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GO_BUILD_FLAGS := -ldflags="-s -w -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE) -X main.gitCommit=$(GIT_COMMIT)" -trimpath
 GO_TEST_FLAGS := -race -coverprofile=coverage.out
 
+# The PAM module is the one artifact that cannot be built off Linux — its C
+# bridge needs Linux-PAM and json-c. `make build` therefore skips it elsewhere
+# rather than failing, so the rest of the tree still builds on a developer's Mac;
+# `make build-pam` invoked directly always refuses, and CI builds on Linux.
+GOOS := $(shell go env GOOS)
+ifeq ($(GOOS),linux)
+PAM_MODULE_TARGET := build-pam
+else
+PAM_MODULE_TARGET := skip-pam
+endif
+
 # Default target
 all: build
 
-## Build all binaries
-build: build-broker build-pam build-helper build-admin
+## Build all binaries (the PAM module only on Linux)
+build: build-broker build-helper build-admin $(PAM_MODULE_TARGET)
+
+skip-pam:
+	@echo "Skipping the PAM module: it is Linux-only (GOOS=$(GOOS)). Use 'make verify-linux'."
 
 ## Build authentication broker daemon
 build-broker:
@@ -28,11 +42,24 @@ build-broker:
 	@mkdir -p $(BINARY_DIR)
 	go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(BROKER_BINARY) ./cmd/broker
 
-## Build PAM module
+## Build PAM module (Linux only; verifies the result is loadable)
 build-pam:
 	@echo "Building PAM module..."
+	@# The module's C bridge needs Linux-PAM (<security/pam_ext.h>) and json-c,
+	@# which macOS does not have, so the cgo in cmd/pam-module is behind a
+	@# //go:build linux tag. On another OS this would build a .so with no PAM
+	@# entry points in it, which is exactly the failure #140 was about — refuse
+	@# instead. Use `make verify-linux` to build and test in the container.
+	@if [ "$$(go env GOOS)" != "linux" ]; then \
+		echo "build-pam: the PAM module can only be built for Linux (GOOS=$$(go env GOOS))." >&2; \
+		echo "           Run 'make verify-linux', or build in a Linux container." >&2; \
+		exit 1; \
+	fi
 	@mkdir -p $(BINARY_DIR)
 	CGO_ENABLED=1 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./cmd/pam-module
+	@# A build that emits a module with no pam_sm_* symbols exits 0, so the only
+	@# way to know it worked is to look at the artifact.
+	@./scripts/verify-pam-module.sh $(BINARY_DIR)/$(PAM_MODULE)
 
 ## Build PAM helper binary
 build-helper:
@@ -79,8 +106,11 @@ verify-linux:
 		-v oidc-pam-gocache:/root/.cache \
 		-w /src oidc-pam-verify \
 		sh -c 'go vet ./... \
-			&& go test -race ./pkg/... ./internal/... \
-			&& golangci-lint run --timeout=5m ./...'
+			&& go test -race ./pkg/... ./internal/... ./cmd/... \
+			&& golangci-lint run --timeout=5m ./... \
+			&& echo "Building and verifying the PAM module..." \
+			&& CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /tmp/pam_oidc.so ./cmd/pam-module \
+			&& ./scripts/verify-pam-module.sh /tmp/pam_oidc.so'
 
 ## Install binaries to system locations
 install: build

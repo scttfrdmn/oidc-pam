@@ -32,17 +32,6 @@ void log_pam_message(int priority, const char *format, ...) {
     va_end(args);
 }
 
-// CGO-compatible logging function (no variadic arguments)
-void log_pam_message_string(int priority, const char *message) {
-    if (!debug_enabled && priority == LOG_DEBUG) {
-        return;
-    }
-    
-    openlog(PAM_MODULE_NAME, LOG_PID, LOG_AUTHPRIV);
-    syslog(priority, "%s", message);
-    closelog();
-}
-
 // Connect to the OIDC authentication broker
 int connect_to_broker(const char *socket_path) {
     int sock;

@@ -30,15 +30,18 @@ jobs:
 
       - name: Run go vet
         run: |
-          # PAM/cgo packages are vetted and tested in the separate `pam` job,
-          # which installs the PAM and json-c development headers.
-          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/security ./pkg/ssh \
-            ./internal/adminapi ./internal/brokerclient ./internal/ipc ./cmd/broker ./cmd/oidc-admin
+          # cmd/pam-module is the only package that needs cgo; it is vetted and
+          # tested in the separate `pam` job, which installs the PAM and json-c
+          # development headers. pkg/pam and cmd/pam-helper are pure Go (#141) and
+          # belong here.
+          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/pam ./pkg/security ./pkg/ssh \
+            ./internal/adminapi ./internal/brokerclient ./internal/ipc \
+            ./cmd/broker ./cmd/oidc-admin ./cmd/pam-helper
 
       - name: Run tests
         run: |
           go test -race -coverprofile=coverage.out -covermode=atomic \
-            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/security ./pkg/ssh \
+            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/pam ./pkg/security ./pkg/ssh \
             ./internal/adminapi ./internal/brokerclient ./internal/ipc ./cmd/oidc-admin
 
       - name: Check test coverage
@@ -64,11 +67,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
+      # cmd/pam-module holds the C bridge and every cgo wrapper around it, so it
+      # is the only package this job exists for. It must stay that way: the C has
+      # to live in the package that is built as c-shared, or the module ships with
+      # no PAM entry points in it (#140).
       - name: Run go vet
-        run: go vet ./pkg/pam ./cmd/pam-module ./cmd/pam-helper
+        run: go vet ./cmd/pam-module
 
       - name: Run tests
-        run: go test -race ./pkg/pam/...
+        run: go test -race ./cmd/pam-module/...
 
   build:
     name: Build

@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Critical (#140): every `pam_oidc.so` this project has ever released contains
+  no PAM entry points at all.** `nm -D --defined-only bin/pam_oidc.so` finds zero
+  `pam_sm_*` symbols, and `readelf -d` shows the module does not even link
+  `libpam`. The C implementing the six entry points lived in `pkg/pam`, but cgo
+  compiles only the C sources sitting in the directory of the package being
+  built, and `cmd/pam-module` — the package built as `c-shared` — does not import
+  `pkg/pam`. So the C was never compiled into the artifact. Nothing failed:
+  `cgo_bridge.h` supplied valid declarations, nothing referenced `libpam`, and
+  the linker's default `-Wl,--as-needed` dropped `-lpam` as unused, leaving a
+  build that exits 0 and a module `dlopen()` loads and finds nothing in.
+  **The practical effect was total failure, not a bypass** — PAM cannot call a
+  function that is not there, so the stack failed rather than admitting anyone,
+  and the #120 bypass below was never reachable through the C path on a released
+  build. The cost was elsewhere: the module could not authenticate anyone, and
+  every C-side fix was absent from the shipped `.so` regardless of what the
+  source said. The C bridge now lives in `cmd/pam-module` alongside the package
+  that produces the module, and three separate gates check the artifact rather
+  than the source — see **Added** below.
 - **(#123): OAuth2 refresh tokens were held in plaintext on every session; the
   encrypted `TokenManager` was never called.** `NewTokenManager` was constructed
   and started, and `StoreToken` encrypts with AES-256-GCM, but no broker code
@@ -132,6 +150,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#140)** `scripts/verify-pam-module.sh` — the gate that would have caught the
+  empty module. It asserts a built `.so` exports all six `pam_sm_*` entry points
+  and links `libpam` and `libjson-c`, and it runs everywhere a shipped module is
+  produced: `make build-pam`, `make verify-linux`, and the release workflow's
+  per-architecture build. A compiler cannot catch a missing entry point — the
+  declarations are valid and the symbol is simply never defined — so the only
+  check that works is inspecting the artifact.
+- **(#140)** `make build-pam` refuses to run outside Linux instead of emitting a
+  module with no C in it (`make build` skips it there and builds everything else;
+  use `make verify-linux`). `make verify-linux` now also builds the module and
+  verifies it, and covers `./cmd/...` in the test sweep — where the cgo tests now
+  live.
+- **(#141)** `TestPAMResultCodesMatchHeaders` (`cmd/pam-module`) compares every
+  `PAMResultCode` in `pkg/pam` against the PAM macro of the same name in the
+  headers the module is compiled against, and fails if a value or the set of
+  codes drifts. This preserves what #118 established — that the codes are not
+  hand-copied guesses — now that `pkg/pam` declares them without cgo.
 - **(#124)** `oidc-admin status`, `health`, `sessions` and `keys` work. The broker
   now implements the `status`, `sessions_list` and `keys_list` IPC requests the
   CLI has always sent, backed by `Broker.Status()`, `Broker.ListSessions()` and
@@ -171,6 +206,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge compiles warning-free.
 
 ### Changed
+- **(#140)** The C bridge moves from `pkg/pam` to `cmd/pam-module`
+  (`cgo_bridge.c` → `cgo_bridge_linux.c`, plus `cgo_bridge.h` and the cgo wrappers
+  and tests around them). This is the fix, not tidying: the C has to be in the
+  package built as `c-shared` for cgo to compile it in. The `_linux` filename
+  suffix is how the go tool applies a build constraint to a C file — a build tag
+  in a C comment is not honoured.
+- **(#141)** `pkg/pam` is now pure Go and builds and tests on any platform. It
+  needed cgo for three things, none of which required C: the `PAMResultCode`
+  constants (now Go literals, pinned to the real headers by a test in
+  `cmd/pam-module`), `LogMessage` (now `log/syslog` to `LOG_AUTHPRIV`, where
+  `pam_syslog` was writing anyway), and `C.getpid()` (now `os.Getpid()`). With
+  that, `go build ./...` and `go test ./...` work on macOS, and the cgo/PAM
+  packages CI has to treat specially are down to one: `cmd/pam-module`. The
+  `pam_sm_*` entry points are unaffected — they are C, called by libpam, and stay
+  C.
 - **(#127)** The six pre-implementation design documents in the repository root
   (`oidc_pam_project.md`, `oidc_pam_comprehensive.md`,
   `oidc_provider_configuration.md`, `research_computing_oidc.md`,
@@ -193,6 +243,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go APIs (`pkg/auth`), not wire or config surface.
 
 ### Removed
+- **(#141)** `pkg/pam`'s `ConnectToBroker`, `SendAuthRequest`,
+  `ReceiveAuthResponse`, `CloseSocket` and `LogPAMMessage`, along with
+  `log_pam_message_string` in the C bridge. They were a cgo-wrapped duplicate of
+  the socket handling the C module does for itself, referenced only by their own
+  tests — the live Go path has gone through `internal/brokerclient` since #121.
+  Their tests asserted that a bad file descriptor fails, which is a property of
+  the C library, not of this project.
+- **(#141)** The four `cgo_{linux,darwin}.go` files that carried nothing but
+  duplicate `#cgo` flag comments. cgo merges `#cgo` directives across a package,
+  so the flags are declared once, in `cmd/pam-module/bridge_linux.go`.
 - **(#127)** The committed build artifacts `integration-test` (11.2 MB) and
   `test-broker` (7.75 MB) — 19 MB of macOS arm64 binaries in the repository root,
   which every clone paid for and no build step consumed. They are untracked and
@@ -217,7 +277,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **(#127)** `.gitignore` no longer ignores `*.h`. The cgo bridge headers
-  (`pkg/pam/cgo_bridge.h`) are source files, so the rule meant a newly added
+  (`cmd/pam-module/cgo_bridge.h`) are source files, so the rule meant a newly added
   header would be skipped by `git add` without a word — in a project whose
   security-critical component is written in C. The final entry was also the
   single mangled line `*.c.o.claude/`, which matched nothing; it is now `*.c.o`

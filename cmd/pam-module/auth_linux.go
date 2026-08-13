@@ -1,14 +1,20 @@
-package pam
+//go:build linux
+
+package main
+
+// The package's #cgo CFLAGS/LDFLAGS live in bridge_linux.go.
 
 /*
-#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security -Wall -Wextra
-#cgo LDFLAGS: -lpam -ljson-c
 #include <stdlib.h>
 #include "cgo_bridge.h"
 */
 import "C"
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/scttfrdmn/oidc-pam/pkg/pam"
+)
 
 // performAuthentication runs the C module's auth phase — the same code path
 // pam_sm_authenticate takes — against the broker listening on socketPath, and
@@ -19,7 +25,7 @@ import "unsafe"
 // terminal-state mapping) behaves exactly as it does under a real PAM stack.
 // This wrapper lives in a normal .go file because cgo is not permitted in
 // _test.go files.
-func performAuthentication(socketPath, username, service, rhost, tty string, timeoutSeconds int) PAMResultCode {
+func performAuthentication(socketPath, username, service, rhost, tty string, timeoutSeconds int) pam.PAMResultCode {
 	cSocketPath := C.CString(socketPath)
 	cUsername := C.CString(username)
 	cService := C.CString(service)
@@ -33,7 +39,7 @@ func performAuthentication(socketPath, username, service, rhost, tty string, tim
 		C.free(unsafe.Pointer(cTTY))
 	}()
 
-	return PAMResultCode(C.perform_authentication(nil, cSocketPath, cUsername, cService, cRhost, cTTY,
+	return pam.PAMResultCode(C.perform_authentication(nil, cSocketPath, cUsername, cService, cRhost, cTTY,
 		C.int(timeoutSeconds)))
 }
 
@@ -53,6 +59,6 @@ func classifyLoginTypeC(service, tty string) string {
 }
 
 // acctMgmtVerdict exposes the C module's account-phase verdict to Go tests.
-func acctMgmtVerdict() PAMResultCode {
-	return PAMResultCode(C.acct_mgmt_verdict())
+func acctMgmtVerdict() pam.PAMResultCode {
+	return pam.PAMResultCode(C.acct_mgmt_verdict())
 }

@@ -1,8 +1,10 @@
-package pam
+//go:build linux
+
+package main
+
+// The package's #cgo CFLAGS/LDFLAGS live in bridge_linux.go.
 
 /*
-#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security -Wall -Wextra
-#cgo LDFLAGS: -lpam -ljson-c
 #include <stdlib.h>
 #include "cgo_bridge.h"
 */

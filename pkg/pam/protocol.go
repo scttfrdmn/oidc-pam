@@ -1,15 +1,9 @@
 package pam
 
-/*
-#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security -Wall -Wextra
-#cgo LDFLAGS: -lpam -ljson-c
-#include "cgo_bridge.h"
-*/
-import "C"
 import (
 	"encoding/json"
 	"fmt"
-	"unsafe"
+	"os"
 )
 
 // AuthRequest represents an authentication request
@@ -40,92 +34,25 @@ type AuthResponse struct {
 	RiskScore        int      `json:"risk_score,omitempty"`
 }
 
-// ConnectToBroker connects to the authentication broker
-func ConnectToBroker(socketPath string) (int, error) {
-	cSocketPath := C.CString(socketPath)
-	defer C.free(unsafe.Pointer(cSocketPath))
+// maxUnixSocketPath is the longest broker socket path that fits
+// sockaddr_un.sun_path with its NUL terminator: 108 bytes on Linux, which is the
+// only platform the module runs on. The C module derives the same bound from
+// sizeof(sun_path) (MAX_SOCKET_PATH in cmd/pam-module) rather than hardcoding it;
+// this package has no cgo to derive it from.
+const maxUnixSocketPath = 107
 
-	sock := C.connect_to_broker(cSocketPath)
-	if sock == -1 {
-		return -1, fmt.Errorf("failed to connect to broker at %s", socketPath)
-	}
-
-	return int(sock), nil
-}
-
-// SendAuthRequest sends an authentication request to the broker
-func SendAuthRequest(sock int, username, service, rhost, tty string) error {
-	cUsername := C.CString(username)
-	cService := C.CString(service)
-	cRhost := C.CString(rhost)
-	cTTY := C.CString(tty)
-
-	defer C.free(unsafe.Pointer(cUsername))
-	defer C.free(unsafe.Pointer(cService))
-	defer C.free(unsafe.Pointer(cRhost))
-	defer C.free(unsafe.Pointer(cTTY))
-
-	result := C.send_auth_request(C.int(sock), cUsername, cService, cRhost, cTTY)
-	if result != 0 {
-		return fmt.Errorf("failed to send authentication request")
-	}
-
-	return nil
-}
-
-// ReceiveAuthResponse receives an authentication response from the broker
-func ReceiveAuthResponse(sock int) (*AuthResponse, error) {
-	// Buffer matches the C module's MAX_RESPONSE_SIZE (8192).
-	var response [8192]C.char
-
-	result := C.receive_auth_response(C.int(sock), &response[0], C.size_t(len(response)))
-	if result != 0 {
-		return nil, fmt.Errorf("failed to receive authentication response")
-	}
-
-	responseStr := C.GoString(&response[0])
-	if responseStr == "" {
-		return nil, fmt.Errorf("empty response from broker")
-	}
-
-	var authResponse AuthResponse
-	if err := json.Unmarshal([]byte(responseStr), &authResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse authentication response: %w", err)
-	}
-
-	return &authResponse, nil
-}
-
-// LogPAMMessage logs a message through the PAM logging system
-func LogPAMMessage(priority int, message string) {
-	cMessage := C.CString(message)
-	defer C.free(unsafe.Pointer(cMessage))
-
-	C.log_pam_message_string(C.int(priority), cMessage)
-}
-
-// CloseSocket closes the socket connection
-func CloseSocket(sock int) {
-	C.close(C.int(sock))
-}
-
-// IsSocketPathValid checks if the socket path is valid
+// IsSocketPathValid reports whether socketPath could name a Unix domain socket:
+// non-empty, absolute, and short enough to fit sockaddr_un.sun_path.
 func IsSocketPathValid(socketPath string) bool {
 	if socketPath == "" {
 		return false
 	}
 
-	// Check if path starts with /
 	if socketPath[0] != '/' {
 		return false
 	}
 
-	// Check maximum path length
-	if len(socketPath) > 107 { // Maximum Unix domain socket path length
-		return false
-	}
-
-	return true
+	return len(socketPath) <= maxUnixSocketPath
 }
 
 // GetLoginType determines the login type based on service and TTY
@@ -152,7 +79,7 @@ func BuildAuthRequest(username, service, rhost, tty string) *AuthRequest {
 	metadata := map[string]string{
 		"service": service,
 		"tty":     tty,
-		"pid":     fmt.Sprintf("%d", C.getpid()),
+		"pid":     fmt.Sprintf("%d", os.Getpid()),
 	}
 
 	return &AuthRequest{

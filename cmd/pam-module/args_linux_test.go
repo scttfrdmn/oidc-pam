@@ -1,4 +1,6 @@
-package pam
+//go:build linux
+
+package main
 
 import (
 	"strings"

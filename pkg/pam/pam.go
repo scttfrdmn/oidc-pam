@@ -1,46 +1,46 @@
 package pam
 
-/*
-#cgo CFLAGS: -I${SRCDIR} -I/usr/include/security -Wall -Wextra
-#cgo LDFLAGS: -lpam -ljson-c
-#include "cgo_bridge.h"
-*/
-import "C"
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/syslog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/scttfrdmn/oidc-pam/internal/brokerclient"
 )
 
 // PAMResultCode is a PAM result code.
 //
-// The values are taken from the PAM headers the module is compiled against
-// rather than being copied by hand: they are not portable between
-// implementations (Linux-PAM and OpenPAM disagree on almost everything past
-// PAM_BUF_ERR), and a hand-copied value that libpam does not recognize turns a
-// deliberate denial into an unknown error. PAMMaxTries was 24 before this was
-// derived, which is not a Linux-PAM code at all.
+// These are Linux-PAM's values. They are not portable — Linux-PAM and OpenPAM
+// disagree on almost everything past PAM_BUF_ERR — and a value libpam does not
+// recognize turns a deliberate denial into an unknown error, which is why
+// PAMMaxTries being 24 (not a Linux-PAM code at all) was worth fixing in #118.
+//
+// They are written out here rather than read from <security/_pam_types.h> via
+// cgo so that this package builds and tests on any platform (#141). The
+// guarantee that they are correct is not lost: TestPAMResultCodesMatchHeaders in
+// cmd/pam-module compares every constant below against the macro of the same
+// name in the PAM headers the module is actually compiled against, and that test
+// runs in the PAM (cgo) CI job. Change a value here and it fails.
 type PAMResultCode int
 
 const (
-	PAMSuccess         PAMResultCode = C.PAM_SUCCESS
-	PAMSystemError     PAMResultCode = C.PAM_SYSTEM_ERR
-	PAMPermDenied      PAMResultCode = C.PAM_PERM_DENIED
-	PAMAuthError       PAMResultCode = C.PAM_AUTH_ERR
-	PAMAuthInfoUnavail PAMResultCode = C.PAM_AUTHINFO_UNAVAIL
-	PAMMaxTries        PAMResultCode = C.PAM_MAXTRIES
+	PAMSuccess         PAMResultCode = 0  // PAM_SUCCESS
+	PAMSystemError     PAMResultCode = 4  // PAM_SYSTEM_ERR
+	PAMPermDenied      PAMResultCode = 6  // PAM_PERM_DENIED
+	PAMAuthError       PAMResultCode = 7  // PAM_AUTH_ERR
+	PAMAuthInfoUnavail PAMResultCode = 9  // PAM_AUTHINFO_UNAVAIL
+	PAMMaxTries        PAMResultCode = 11 // PAM_MAXTRIES
 
 	// PAMIgnore means "this module has no opinion". PAM does not count it
 	// toward the stack's result, so unlike PAMSuccess it cannot short-circuit a
 	// `sufficient` entry.
-	PAMIgnore PAMResultCode = C.PAM_IGNORE
+	PAMIgnore PAMResultCode = 25 // PAM_IGNORE
 )
 
 // PAMAuthFailure is returned by AuthenticateUser when the broker reports a
@@ -79,12 +79,52 @@ func errorCodeToPAMResult(errorCode string) PAMResultCode {
 	}
 }
 
-// syslog priorities, as syslog.h defines them. The C bridge takes the raw int.
+// syslog priorities, as syslog.h defines them.
 const (
 	logErr    = 3 // LOG_ERR
 	logNotice = 5 // LOG_NOTICE
 	logInfo   = 6 // LOG_INFO
 )
+
+// moduleSyslog is the connection LogMessage writes to, opened on first use.
+//
+// The C entry points log through pam_syslog(), which picks up the service name
+// from the PAM handle. This package has no handle — it is reached from
+// oidc-pam-helper, not from inside libpam — so it logs to LOG_AUTHPRIV under a
+// fixed tag, which is where pam_syslog would have put it anyway.
+var (
+	syslogOnce   sync.Once
+	syslogWriter *syslog.Writer
+)
+
+func moduleSyslog() *syslog.Writer {
+	syslogOnce.Do(func() {
+		// A failure here means syslogd is unreachable. There is nowhere left to
+		// report that, and losing a log line must not fail an authentication, so
+		// the writer stays nil and LogMessage becomes a no-op.
+		syslogWriter, _ = syslog.New(syslog.LOG_AUTHPRIV|syslog.LOG_NOTICE, "pam_oidc")
+	})
+	return syslogWriter
+}
+
+// LogMessage logs a message to syslog at the given syslog.h priority.
+func (p *PAMModule) LogMessage(priority int, message string) {
+	w := moduleSyslog()
+	if w == nil {
+		return
+	}
+
+	var err error
+	switch priority {
+	case logErr:
+		err = w.Err(message)
+	case logInfo:
+		err = w.Info(message)
+	default:
+		err = w.Notice(message)
+	}
+	_ = err // see moduleSyslog: a lost log line is not an authentication error.
+}
 
 // PAMModule represents the PAM module interface
 type PAMModule struct {
@@ -193,14 +233,6 @@ func (p *PAMModule) authFailure(err error) error {
 	// PAM_AUTHINFO_UNAVAIL rather than reporting a denial we did not observe.
 	p.LogMessage(logErr, fmt.Sprintf("OIDC authentication unavailable: %v", err))
 	return err
-}
-
-// LogMessage logs a message through the PAM logging system
-func (p *PAMModule) LogMessage(priority int, message string) {
-	cMessage := C.CString(message)
-	defer C.free(unsafe.Pointer(cMessage))
-
-	C.log_pam_message_string(C.int(priority), cMessage)
 }
 
 // GetSocketPath returns the configured socket path

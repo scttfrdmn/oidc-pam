@@ -1,4 +1,6 @@
-package pam
+//go:build linux
+
+package main
 
 import (
 	"encoding/json"
@@ -7,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/scttfrdmn/oidc-pam/pkg/pam"
 )
 
 // fakeBroker is a minimal stand-in for internal/ipc.Server. Like the real
@@ -154,8 +158,8 @@ func TestPerformAuthenticationDeniesWhenDeviceFlowNeverCompletes(t *testing.T) {
 		return devicePending("sess-never")
 	})
 
-	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 2); got != PAMAuthError {
-		t.Fatalf("unfinished device flow: got PAM result %d, want PAMAuthError (%d)", got, PAMAuthError)
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 2); got != pam.PAMAuthError {
+		t.Fatalf("unfinished device flow: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
 	}
 
 	// One authenticate plus at least one poll: the module must actually wait for
@@ -179,8 +183,8 @@ func TestPerformAuthenticationSucceedsAfterDeviceApproval(t *testing.T) {
 		}
 	})
 
-	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30); got != PAMSuccess {
-		t.Fatalf("completed device flow: got PAM result %d, want PAMSuccess", got)
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30); got != pam.PAMSuccess {
+		t.Fatalf("completed device flow: got PAM result %d, want pam.PAMSuccess", got)
 	}
 
 	requests := broker.received()
@@ -214,15 +218,15 @@ func TestPerformAuthenticationDeniesOnTerminalPollErrors(t *testing.T) {
 
 	tests := []struct {
 		errorCode string
-		want      PAMResultCode
+		want      pam.PAMResultCode
 	}{
-		{"SESSION_NOT_FOUND", PAMAuthError},
-		{"SESSION_EXPIRED", PAMAuthError},
-		{"FORBIDDEN", PAMAuthError},
-		{"DEVICE_FLOW_FAILED", PAMAuthError},
-		{"POLICY_DENIED", PAMPermDenied},
-		{"TOO_MANY_SESSIONS", PAMPermDenied},
-		{"RATE_LIMITED", PAMMaxTries},
+		{"SESSION_NOT_FOUND", pam.PAMAuthError},
+		{"SESSION_EXPIRED", pam.PAMAuthError},
+		{"FORBIDDEN", pam.PAMAuthError},
+		{"DEVICE_FLOW_FAILED", pam.PAMAuthError},
+		{"POLICY_DENIED", pam.PAMPermDenied},
+		{"TOO_MANY_SESSIONS", pam.PAMPermDenied},
+		{"RATE_LIMITED", pam.PAMMaxTries},
 	}
 
 	for _, tt := range tests {
@@ -252,8 +256,8 @@ func TestPerformAuthenticationSucceedsWithoutDeviceStep(t *testing.T) {
 		return authenticated("sess-active")
 	})
 
-	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30); got != PAMSuccess {
-		t.Fatalf("active session: got PAM result %d, want PAMSuccess", got)
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30); got != pam.PAMSuccess {
+		t.Fatalf("active session: got PAM result %d, want pam.PAMSuccess", got)
 	}
 	if n := len(broker.received()); n != 1 {
 		t.Fatalf("expected exactly 1 request, got %d", n)
@@ -265,14 +269,14 @@ func TestPerformAuthenticationDeniesUpFront(t *testing.T) {
 
 	tests := []struct {
 		errorCode string
-		want      PAMResultCode
+		want      pam.PAMResultCode
 	}{
-		{"NO_PROVIDER", PAMPermDenied},
-		{"POLICY_DENIED", PAMPermDenied},
-		{"TOO_MANY_CONCURRENT_AUTHS", PAMMaxTries},
-		{"RATE_LIMIT_EXCEEDED", PAMMaxTries},
-		{"AUTHENTICATION_FAILED", PAMAuthError},
-		{"", PAMAuthError},
+		{"NO_PROVIDER", pam.PAMPermDenied},
+		{"POLICY_DENIED", pam.PAMPermDenied},
+		{"TOO_MANY_CONCURRENT_AUTHS", pam.PAMMaxTries},
+		{"RATE_LIMIT_EXCEEDED", pam.PAMMaxTries},
+		{"AUTHENTICATION_FAILED", pam.PAMAuthError},
+		{"", pam.PAMAuthError},
 	}
 
 	for _, tt := range tests {
@@ -312,8 +316,8 @@ func TestPerformAuthenticationUnavailable(t *testing.T) {
 		defer func() { _ = os.RemoveAll(dir) }()
 
 		got := performAuthentication(filepath.Join(dir, "absent.sock"), "testuser", "sshd", "10.0.0.1", "ssh", 30)
-		if got != PAMAuthInfoUnavail {
-			t.Fatalf("absent broker: got PAM result %d, want PAMAuthInfoUnavail (%d)", got, PAMAuthInfoUnavail)
+		if got != pam.PAMAuthInfoUnavail {
+			t.Fatalf("absent broker: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)", got, pam.PAMAuthInfoUnavail)
 		}
 	})
 
@@ -342,8 +346,8 @@ func TestPerformAuthenticationUnavailable(t *testing.T) {
 			})
 
 			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
-			if got != PAMAuthInfoUnavail {
-				t.Fatalf("got PAM result %d, want PAMAuthInfoUnavail (%d)", got, PAMAuthInfoUnavail)
+			if got != pam.PAMAuthInfoUnavail {
+				t.Fatalf("got PAM result %d, want pam.PAMAuthInfoUnavail (%d)", got, pam.PAMAuthInfoUnavail)
 			}
 		})
 	}
@@ -364,8 +368,8 @@ func TestPerformAuthenticationRejectsOverlongSessionID(t *testing.T) {
 	})
 
 	got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
-	if got != PAMAuthInfoUnavail {
-		t.Fatalf("over-long session_id: got PAM result %d, want PAMAuthInfoUnavail (%d)", got, PAMAuthInfoUnavail)
+	if got != pam.PAMAuthInfoUnavail {
+		t.Fatalf("over-long session_id: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)", got, pam.PAMAuthInfoUnavail)
 	}
 	if n := len(broker.received()); n != 1 {
 		t.Fatalf("expected no polling, got %d requests", n)
@@ -373,7 +377,7 @@ func TestPerformAuthenticationRejectsOverlongSessionID(t *testing.T) {
 }
 
 // TestLoginTypeClassificationMatchesGo pins the C module's login-type
-// classification to GetLoginType's. The broker applies per-login-type policy, so
+// classification to pam.GetLoginType's. The broker applies per-login-type policy, so
 // if pam_oidc.so and the Go client disagreed, the same login would be evaluated
 // against different rules depending on which client handled it. The C side used
 // to differ on both counts covered here: it matched "gdm"/"lightdm" as
@@ -402,9 +406,9 @@ func TestLoginTypeClassificationMatchesGo(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.service+"/"+tc.tty, func(t *testing.T) {
-			want := GetLoginType(tc.service, tc.tty)
+			want := pam.GetLoginType(tc.service, tc.tty)
 			if got := classifyLoginTypeC(tc.service, tc.tty); got != want {
-				t.Errorf("C classify_login_type(%q, %q) = %q, Go GetLoginType = %q",
+				t.Errorf("C classify_login_type(%q, %q) = %q, Go pam.GetLoginType = %q",
 					tc.service, tc.tty, got, want)
 			}
 		})
@@ -423,11 +427,11 @@ func TestLoginTypeClassificationMatchesGo(t *testing.T) {
 func TestAcctMgmtHasNoOpinion(t *testing.T) {
 	got := acctMgmtVerdict()
 
-	if got == PAMSuccess {
+	if got == pam.PAMSuccess {
 		t.Fatal("pam_sm_acct_mgmt returns PAM_SUCCESS: with `account sufficient pam_oidc.so` " +
 			"that short-circuits every account module after it")
 	}
-	if got != PAMIgnore {
-		t.Errorf("pam_sm_acct_mgmt returned %d, want PAM_IGNORE (%d)", got, PAMIgnore)
+	if got != pam.PAMIgnore {
+		t.Errorf("pam_sm_acct_mgmt returned %d, want PAM_IGNORE (%d)", got, pam.PAMIgnore)
 	}
 }
