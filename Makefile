@@ -20,6 +20,10 @@ GO_TEST_FLAGS := -race -coverprofile=coverage.out
 # bridge needs Linux-PAM and json-c. `make build` therefore skips it elsewhere
 # rather than failing, so the rest of the tree still builds on a developer's Mac;
 # `make build-pam` invoked directly always refuses, and CI builds on Linux.
+# The pinned golangci-lint version, single-sourced from .golangci-version so the
+# CI Lint job, the verification container and a local `make lint` cannot disagree.
+GOLANGCI_LINT_VERSION := $(shell tr -d '[:space:]' < .golangci-version)
+
 GOOS := $(shell go env GOOS)
 ifeq ($(GOOS),linux)
 PAM_MODULE_TARGET := build-pam
@@ -98,7 +102,9 @@ test-e2e:
 ## reproduce CI's `pam` and `lint` jobs locally.
 verify-linux:
 	@echo "Building verification image..."
-	docker build -t oidc-pam-verify -f test/docker/Dockerfile.verify test/docker
+	docker build -t oidc-pam-verify \
+		--build-arg GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) \
+		-f test/docker/Dockerfile.verify test/docker
 	@echo "Running vet, tests and lint in Linux container..."
 	docker run --rm \
 		-v "$(CURDIR)":/src \
@@ -144,6 +150,15 @@ clean:
 ## Run linter
 lint:
 	@echo "Running linter..."
+	@# CI runs $(GOLANGCI_LINT_VERSION). A different local version enables a
+	@# different set of checks, so a clean local run would not mean a clean CI run
+	@# — warn rather than fail, since the version is a local install concern.
+	@have=$$(golangci-lint version --short 2>/dev/null || golangci-lint --version 2>/dev/null | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1); \
+	want=$$(echo "$(GOLANGCI_LINT_VERSION)" | sed 's/^v//'); \
+	if [ -n "$$have" ] && [ "$${have#v}" != "$$want" ]; then \
+		echo "warning: golangci-lint $$have installed, but this repo pins v$$want (.golangci-version)." >&2; \
+		echo "         Results may differ from CI. 'make verify-linux' always uses the pin." >&2; \
+	fi
 	golangci-lint run
 
 ## Format code

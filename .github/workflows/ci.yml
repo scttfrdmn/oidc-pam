@@ -128,10 +128,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
+      # One pin, read by everything that runs the linter: this job and
+      # test/docker/Dockerfile.verify. Hardcoding it in each meant they could
+      # drift, and a linter version is part of what "lint passes" means (#142).
+      - name: Read the pinned golangci-lint version
+        id: golangci
+        run: echo "version=$(tr -d '[:space:]' < .golangci-version)" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ steps.golangci.outputs.version }}
           # Every package, including the cgo/PAM ones (hence the headers above).
           args: --timeout=5m ./...
 
