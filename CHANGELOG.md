@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Bumped the Go toolchain pin from 1.25.12 to 1.25.13. govulncheck reported four
+  called standard-library vulnerabilities against 1.25.12, all fixed in 1.25.13:
+  GO-2026-6218 (quadratic `resolvePath` in `net/url`), GO-2026-6090
+  (post-handshake message limit in `crypto/tls`), GO-2026-6089
+  (`ReadHeaderTimeout` on the unencrypted HTTP/2 check in `net/http`) and
+  GO-2026-5972 (asn1 recursion depth). They are reachable from the metrics HTTP
+  server, the HTTP audit sink, and the provider TLS setup. Clean afterwards.
 - **Critical (#140): every `pam_oidc.so` this project has ever released contains
   no PAM entry points at all.** `nm -D --defined-only bin/pam_oidc.so` finds zero
   `pam_sm_*` symbols, and `readelf -d` shows the module does not even link
