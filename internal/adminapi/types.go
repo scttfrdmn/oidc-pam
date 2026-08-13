@@ -89,6 +89,9 @@ type SessionListResponse struct {
 // appears here — never the key material itself.
 type SSHKeyInfo struct {
 	Username string `json:"username"`
+	// SessionID is the session the key was issued for, which is also the ID it is
+	// stored under. Without it an operator cannot tie a listed key to a session.
+	SessionID string `json:"session_id"`
 	// KeyType is the SSH algorithm name, e.g. "ssh-rsa".
 	KeyType string `json:"key_type"`
 	// KeySize is the key's strength in bits.

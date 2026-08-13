@@ -139,6 +139,9 @@ func sessionStatus(session *Session, now time.Time) string {
 
 // ListKeys returns metadata for the SSH keys the broker manages, sorted by
 // username, along with the number of key directories it could not read.
+//
+// One user can hold several keys — one per session — so the key ID breaks ties
+// and keeps the order stable across calls.
 func (b *Broker) ListKeys() ([]sshpkg.KeyInfo, int, error) {
 	if b.keyManager == nil {
 		return nil, 0, nil
@@ -149,6 +152,11 @@ func (b *Broker) ListKeys() ([]sshpkg.KeyInfo, int, error) {
 		return nil, 0, err
 	}
 
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Username < keys[j].Username })
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Username != keys[j].Username {
+			return keys[i].Username < keys[j].Username
+		}
+		return keys[i].KeyID < keys[j].KeyID
+	})
 	return keys, unreadable, nil
 }

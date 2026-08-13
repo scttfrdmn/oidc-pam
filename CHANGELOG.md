@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **High (#152): no login ever got an SSH key, which is the one thing the broker
+  exists to hand out.** `Broker.generateSSHKey` files the on-disk key pair under
+  the *session* ID, deliberately, so that concurrent sessions for one user do not
+  overwrite each other's key — but `KeyManager.SaveKey` validated that argument
+  with `validateUsername`, and a 64-character hex session ID is not a POSIX login
+  name. Every save was refused, the error was only written to the broker's own
+  log, and the login carried on and was audited as `authentication_successful`.
+  So a device flow completed, PAM returned success, and `authorized_keys` was
+  never touched. Introduced by `2e5522a`'s path-traversal hardening: the hardening
+  was right, the validator was simply the wrong one for an argument that is not a
+  username.
+
+  The key store is now explicitly keyed by an opaque **key ID**: `validateKeyID`
+  (anchored, length-bounded, no dots or separators, so traversal is still
+  impossible) replaces `validateUsername` in `SaveKey`/`LoadKey`/`DeleteKey`/
+  `GetKeyPath`/`GetPublicKeyPath`, and those parameters are named `keyID` so the
+  contract is legible from the signature. `validateUsername` stays where the
+  argument really is a username. `KeyInfo` gains a `KeyID`, and its `Username` is
+  now recovered from the key's comment instead of being the storage directory
+  name — so `oidc-admin keys` no longer prints session IDs in a `USERNAME`
+  column, and gains a `SESSION` column to tie a key to the session that owns it.
+  A provisioning failure is now also audited (`ssh_key_provisioning_failed`)
+  rather than only logged, since that silence is why this survived eleven
+  releases.
+
+  Unit tests passed on both sides throughout: each half was self-consistent, and
+  the one test that exercised the store end to end used the session ID
+  `"sess-poll-test"` — which satisfies the POSIX username pattern by accident.
+  The regression gate therefore uses a session ID of the shape the broker really
+  mints, and asserts the key reaches both the store and the user's
+  `authorized_keys`.
 - **Critical (#150): the broker abandoned every device flow on the first poll,
   so no device login could ever complete.** RFC 8628 §3.5 makes
   `authorization_pending` the *normal* answer to every poll before the user
