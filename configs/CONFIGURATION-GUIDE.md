@@ -7,9 +7,10 @@ This guide provides comprehensive instructions for configuring the OIDC PAM auth
 1. [Quick Start](#quick-start)
 2. [Configuration Templates](#configuration-templates)
 3. [Provider-Specific Setup](#provider-specific-setup)
-4. [Security Best Practices](#security-best-practices)
-5. [Environment-Specific Configurations](#environment-specific-configurations)
-6. [Troubleshooting](#troubleshooting)
+4. [Multiple Providers and `priority`](#multiple-providers-and-priority)
+5. [Security Best Practices](#security-best-practices)
+6. [Environment-Specific Configurations](#environment-specific-configurations)
+7. [Troubleshooting](#troubleshooting)
 
 ## Quick Start
 
@@ -306,6 +307,49 @@ Any provider that lacks a publicly accessible `/.well-known/openid-configuration
 | `userinfo_endpoint` | optional | OpenID Connect UserInfo endpoint |
 
 When `skip_discovery: true` is set, the broker constructs the OIDC provider from these fields directly using `oidc.ProviderConfig` — no network call is made to the discovery endpoint at startup.
+
+## Multiple Providers and `priority`
+
+A login is served by exactly one provider. When more than one is configured, the
+broker picks it deterministically:
+
+1. Providers with `enabled_for_login: false` (the default) are not candidates.
+2. Providers with `verification_only: true` are not candidates either — that flag
+   means the provider may confirm an identity but must not be the one a login is
+   issued against. Setting both it and `enabled_for_login: true` is
+   contradictory, and the broker resolves it by not offering logins.
+3. The remaining candidates are ordered by `priority` **ascending — 1 is the most
+   preferred**, as in `broker-enterprise.yaml`, where the primary provider is
+   `priority: 1` and the failover provider is `priority: 2`.
+4. A provider that omits `priority` sorts *after* every provider that sets one,
+   so forgetting the field cannot promote a provider over your declared primary.
+   Negative values are treated the same way, as typos rather than as a way to
+   mean "first".
+5. Providers with equal priority are ordered by name, so the choice is the same
+   on every host and across restarts.
+
+```yaml
+oidc:
+  providers:
+    - name: corporate-primary
+      priority: 1              # chosen for every login
+      enabled_for_login: true
+
+    - name: corporate-backup
+      priority: 2              # configured, but not selected while the primary is present
+      enabled_for_login: true
+
+    - name: orcid
+      priority: 3
+      enabled_for_login: true
+      verification_only: true  # never selected for a login
+```
+
+`sudo oidc-admin status` lists the providers the broker loaded. Note that
+priority is a *preference*, not health-based failover: the broker does not
+currently probe providers and fall through to the next one when the preferred
+provider is unreachable, so a login against an unavailable primary fails rather
+than silently using the backup.
 
 ## Security Best Practices
 
