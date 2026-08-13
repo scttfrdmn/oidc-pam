@@ -171,6 +171,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge compiles warning-free.
 
 ### Changed
+- **(#127)** The six pre-implementation design documents in the repository root
+  (`oidc_pam_project.md`, `oidc_pam_comprehensive.md`,
+  `oidc_provider_configuration.md`, `research_computing_oidc.md`,
+  `tailscale_oidc_integration.md`, `cloudworkstation_oidc_integration.md` — 5,546
+  lines) move to `docs/design/`, behind an index that says plainly what they are:
+  aspirational, unmaintained, and not a description of the current system. Two of
+  them are about separate projects. In the root they outnumbered the real
+  documentation and read as if they described shipped behaviour. Nothing linked to
+  them, and nothing was deleted.
 - **(#125)** `Broker.selectProvider` takes no arguments. It accepted an
   `*AuthRequest` and a `*PolicyResult` and read neither, which is part of why it
   went unnoticed that the body was non-deterministic; nothing about the request
@@ -184,6 +193,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Go APIs (`pkg/auth`), not wire or config surface.
 
 ### Removed
+- **(#127)** The committed build artifacts `integration-test` (11.2 MB) and
+  `test-broker` (7.75 MB) — 19 MB of macOS arm64 binaries in the repository root,
+  which every clone paid for and no build step consumed. They are untracked and
+  ignored now. Note that this does not shrink the history: the blobs are still
+  reachable from old commits, and removing them would need a rewrite, which is out
+  of scope here.
 - **(#126)** `pkg/policy` (`RiskEngine`, 548 lines plus 482 lines of tests). No
   package imported it. It is a second, parallel risk-scoring implementation; the
   live one is `PolicyEngine` in `pkg/auth/policy.go`, which is what the broker
@@ -201,6 +216,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#127)** `.gitignore` no longer ignores `*.h`. The cgo bridge headers
+  (`pkg/pam/cgo_bridge.h`) are source files, so the rule meant a newly added
+  header would be skipped by `git add` without a word — in a project whose
+  security-critical component is written in C. The final entry was also the
+  single mangled line `*.c.o.claude/`, which matched nothing; it is now `*.c.o`
+  and `.claude/`, as intended.
+- **(#127)** SSH setup instructions use `KbdInteractiveAuthentication`.
+  `ChallengeResponseAuthentication` was deprecated in OpenSSH 8.7 and is now only
+  a legacy alias; the device-flow prompt reaches the user over
+  keyboard-interactive authentication, so this directive is the one that has to be
+  right. Corrected in `QUICK-START.md`, `configs/pam/README.md`,
+  `configs/pam/ssh` and the test SSH server's `sshd_config`.
+- **(#127)** `QUICK-START.md` no longer tells the reader to run `./test-broker`,
+  a committed macOS arm64 binary that could not execute on the Linux hosts the
+  guide targets. It uses `sudo oidc-admin status` and `sudo oidc-admin sessions`.
+- **(#127)** `test/Dockerfile.integration` pins `golang:1.25.12-alpine`. It was
+  pinned to `golang:1.21-alpine`, four minor versions behind the `go 1.25.12`
+  directive in `go.mod`, so building it either failed outright or quietly
+  downloaded a second toolchain.
 - **(#126) Orphaned SSH keys are now swept.** `AuthorizedKeysManager.RemoveExpiredKeys`
   existed but was never called from anywhere, so the 24-hour cleanup it implements
   never ran. It matters because sessions live only in the broker's memory: a

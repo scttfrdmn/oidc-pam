@@ -62,8 +62,10 @@ password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 # # Disable password authentication (optional, for OIDC-only)
 # PasswordAuthentication no
 # 
-# # Enable challenge-response authentication for OIDC device flow
-# ChallengeResponseAuthentication yes
+# # Enable keyboard-interactive authentication, which is how the device flow
+# # prompt reaches the user. Named ChallengeResponseAuthentication before
+# # OpenSSH 8.7, which still accepts the old name as a deprecated alias.
+# KbdInteractiveAuthentication yes
 # 
 # # Enable public key authentication as fallback
 # PubkeyAuthentication yes

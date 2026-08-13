@@ -173,6 +173,7 @@ ssh user@server.company.com
 - [Requirements](REQUIREMENTS.md)
 - [Security Policy](SECURITY.md)
 - Provider examples: [`configs/providers/`](configs/providers/) (Okta, Azure AD, Keycloak, AWS IAM Identity Center)
+- [`docs/design/`](docs/design/) — early design and positioning notes, kept for provenance. Aspirational, unmaintained, and not a description of the current system
 
 ## 🔧 Development
 

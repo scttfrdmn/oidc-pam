@@ -103,8 +103,9 @@ sudo journalctl -u oidc-auth-broker -f
 ### 4. Test Authentication
 
 ```bash
-# Test authentication flow
-./test-broker
+# Confirm the broker is up and which providers it loaded (requires root: the
+# broker socket accepts uid 0 only)
+sudo oidc-admin status
 
 # Test with SSH (if configured)
 ssh testuser@localhost
@@ -169,7 +170,12 @@ Edit `/etc/ssh/sshd_config`:
 ```
 # Enable PAM authentication
 UsePAM yes
-ChallengeResponseAuthentication yes
+
+# The device-flow prompt is delivered over keyboard-interactive authentication.
+# Called ChallengeResponseAuthentication before OpenSSH 8.7, which still accepts
+# the old name as a deprecated alias.
+KbdInteractiveAuthentication yes
+
 PasswordAuthentication no
 PubkeyAuthentication yes
 ```
@@ -194,17 +200,22 @@ sudo systemctl status oidc-auth-broker
 ### 2. Test Authentication Flow
 
 ```bash
-# Test with the test utility
-./test-broker
+sudo oidc-admin status
 
 # Expected output:
-# Starting authentication flow...
-# Device code: ABCD-EFGH
-# User code: ABCD-EFGH
-# Verification URL: https://your-oidc-provider.com/device
-# Please visit the URL and enter the code
-# Waiting for user authorization...
-# Authentication successful!
+# Broker Status: RUNNING
+# Version:       v0.4.2
+# Started:       2026-01-01 09:00:00
+# Uptime:        3h 12m
+# Sessions:      2 active, 0 pending
+# Providers:     okta-corporate
+```
+
+A device flow the user started but never completed shows up as a **pending**
+session, which is what an apparently hanging login looks like:
+
+```bash
+sudo oidc-admin sessions
 ```
 
 ### 3. Test SSH Authentication

@@ -1,4 +1,10 @@
-FROM golang:1.21-alpine AS builder
+# Integration-test image, built by docker-compose.test.yml.
+#
+# Pin the toolchain to the version in go.mod and in .github/workflows/ci.yml.
+# This was golang:1.21-alpine, four minor versions behind the `go 1.25.12`
+# directive in go.mod, so the build either refused outright or silently spent
+# time downloading a second toolchain at image-build time.
+FROM golang:1.25.12-alpine AS builder
 
 # Install dependencies
 RUN apk add --no-cache \
