@@ -1067,10 +1067,55 @@ func (b *Broker) expireSessions(now time.Time) {
 		}
 	}
 
+	b.sweepExpiredAuthorizedKeys(expiredSessions)
+
 	if len(expiredSessions) > 0 {
 		log.Info().
 			Int("count", len(expiredSessions)).
 			Msg("Cleaned up expired sessions")
+	}
+}
+
+// sweepExpiredAuthorizedKeys removes stale `@oidc-pam-<timestamp>` lines from
+// the authorized_keys of every user who just had a session expire.
+//
+// revokeSSHKey above already removes the key belonging to each expired session,
+// so in the ordinary case this finds nothing. What it is for is the keys that no
+// session can account for: sessions live only in the broker's memory, so if the
+// broker is restarted or killed, every key issued before the restart is orphaned
+// in authorized_keys with nothing left to revoke it. Each orphan is a working
+// credential for whoever holds the matching private key, and until now the
+// sweep that was written to remove them was never called from anywhere.
+//
+// One pass per user, not per session, and errors are logged rather than
+// returned: this is best-effort maintenance, and the caller has other sessions
+// to finish tearing down.
+//
+// Note that this only reaches users who have a session expiring now. A user
+// whose keys were all orphaned by a restart, and who has not logged in since,
+// is not swept — bounding the sweep to known users avoids walking every home
+// directory on the host from the broker.
+func (b *Broker) sweepExpiredAuthorizedKeys(expiredSessions []*Session) {
+	if b.authorizedKeysManager == nil || len(expiredSessions) == 0 {
+		return
+	}
+
+	swept := make(map[string]struct{}, len(expiredSessions))
+	for _, session := range expiredSessions {
+		if session.UserID == "" {
+			continue
+		}
+		if _, done := swept[session.UserID]; done {
+			continue
+		}
+		swept[session.UserID] = struct{}{}
+
+		if err := b.authorizedKeysManager.RemoveExpiredKeys(session.UserID); err != nil {
+			log.Warn().
+				Err(err).
+				Str("user_id", session.UserID).
+				Msg("Failed to sweep expired keys from authorized_keys")
+		}
 	}
 }
 
