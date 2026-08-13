@@ -42,7 +42,11 @@ Thumbs.db
 *.log
 /logs/
 
-# Configuration files with secrets
+# Configuration files with secrets.
+# Note that configs/production/broker-{minimal,cloud,enterprise}.yaml are tracked
+# despite this rule (they are secret-free templates); a new file added there needs
+# `git add -f`, which is deliberate -- this directory is where real credentials
+# end up.
 /configs/local/
 /configs/production/
 *.env
@@ -69,6 +73,16 @@ coverage.html
 /deploy/local/
 /deploy/production/
 
-# PAM module artifacts
-*.h
-*.c.o.claude/
+# PAM module artifacts.
+# NOT *.h -- the cgo bridge headers (pkg/pam/cgo_bridge.h) are source files, and
+# ignoring them meant a new header would be silently skipped by `git add`.
+*.o
+*.c.o
+
+# Compiled test and helper binaries. These were committed once (19 MB of Mach-O
+# arm64 in the repo root); build them with `make` instead.
+/integration-test
+/test-broker
+
+# Claude Code local state
+.claude/

@@ -344,7 +344,12 @@ git commit -m "Add OIDC PAM configuration"
 ```bash
 # /etc/ssh/sshd_config
 UsePAM yes
-ChallengeResponseAuthentication yes
+
+# The device-flow prompt reaches the user over keyboard-interactive
+# authentication. This directive was named ChallengeResponseAuthentication
+# before OpenSSH 8.7, which still accepts that spelling as a deprecated alias.
+KbdInteractiveAuthentication yes
+
 PasswordAuthentication no
 PubkeyAuthentication yes
 ```
