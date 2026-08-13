@@ -27,7 +27,7 @@ MaxSessions 10
 
 # Enable PAM authentication for OIDC
 UsePAM yes
-ChallengeResponseAuthentication yes
+KbdInteractiveAuthentication yes
 PasswordAuthentication yes
 PermitEmptyPasswords no
 
@@ -115,7 +115,7 @@ RSAAuthentication no
 
 # Change to yes to enable challenge-response passwords (beware issues with
 # some PAM modules and threads)
-ChallengeResponseAuthentication yes
+KbdInteractiveAuthentication yes
 
 # Set this to 'no' to disable forwarding of X11 connections, by default
 # X11 connections are forwarded.
@@ -136,7 +136,7 @@ PermitEmptyPasswords no
 
 # Change to yes to enable challenge-response passwords (beware issues with
 # some PAM modules and threads)
-ChallengeResponseAuthentication yes
+KbdInteractiveAuthentication yes
 
 # Kerberos options
 KerberosAuthentication no
