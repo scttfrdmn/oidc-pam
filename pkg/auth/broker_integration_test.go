@@ -262,44 +262,22 @@ func TestBrokerProviderSelection(t *testing.T) {
 		},
 	}
 
-	// Test provider selection
-	authRequest := &AuthRequest{
-		UserID:     "test-user@provider1.com",
-		SourceIP:   "192.168.1.100",
-		UserAgent:  "test-agent",
-		TargetHost: "test-host",
-		LoginType:  "ssh",
-		DeviceID:   "test-device",
-		SessionID:  "test-session",
-		Timestamp:  time.Now(),
-	}
-
-	// Create a basic policy result
-	policyResult := &PolicyResult{
-		Allowed:        true,
-		Reason:         "test policy",
-		RequiredMFA:    false,
-		RequiredGroups: nil,
-		MaxDuration:    time.Hour,
-		RiskScore:      0,
-		RiskFactors:    nil,
-		Metadata:       nil,
-	}
-
-	provider := broker.selectProvider(authRequest, policyResult)
+	// provider1 is priority 1 and provider2 is priority 2, so provider1 wins.
+	// This assertion used to accept either one, which is what allowed the map
+	// iteration to go unnoticed.
+	provider := broker.selectProvider()
 	if provider == nil {
-		t.Error("Expected non-nil provider")
-		return
+		t.Fatal("Expected non-nil provider")
 	}
-	if provider.Name != "provider1" && provider.Name != "provider2" {
-		t.Errorf("Expected provider1 or provider2, got %s", provider.Name)
+	if provider.Name != "provider1" {
+		t.Errorf("selectProvider() = %s, want provider1 (priority 1)", provider.Name)
 	}
 
-	// Test provider selection with different user
-	authRequest.UserID = "test-user"
-	provider = broker.selectProvider(authRequest, policyResult)
-	if provider == nil {
-		t.Error("Expected non-nil provider (should default to first)")
+	// And it keeps winning: the choice must not vary between calls.
+	for i := 0; i < 20; i++ {
+		if again := broker.selectProvider(); again.Name != provider.Name {
+			t.Fatalf("call %d selected %s, first call selected %s", i, again.Name, provider.Name)
+		}
 	}
 }
 

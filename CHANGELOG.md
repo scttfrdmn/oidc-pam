@@ -171,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge compiles warning-free.
 
 ### Changed
+- **(#125)** `Broker.selectProvider` takes no arguments. It accepted an
+  `*AuthRequest` and a `*PolicyResult` and read neither, which is part of why it
+  went unnoticed that the body was non-deterministic; nothing about the request
+  influences the choice today.
 - **(#124)** `Server.handleRequest` returns `any`, since the admin requests answer
   with their own shapes rather than squeezing a session listing into the fields of
   an authentication response. `internal/adminapi` and `cmd/oidc-admin` are covered
@@ -186,6 +190,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#125)** Provider selection is deterministic. `selectProvider` ranged over a
+  Go map and returned the first login-enabled provider it happened to hit, so on
+  a host with more than one such provider, consecutive logins could be sent to
+  different identity providers at random — and `priority` was read from the
+  config file and then never used. Candidates are now ordered by `priority`
+  ascending (**1 is the most preferred**, matching every shipped config, where the
+  primary provider is `priority: 1` and the failover provider is `priority: 2`),
+  then by name so that equal priorities still order identically on every host and
+  across restarts. A provider that omits `priority` sorts *after* every provider
+  that sets one, so forgetting the field cannot promote a provider over the
+  declared primary; negative values are treated the same way. Documented in
+  `configs/CONFIGURATION-GUIDE.md`.
+- **(#125)** `verification_only` is honoured. It was parsed and never read, so a
+  provider marked "may confirm an identity, must not be logged in against" was a
+  valid login target if `enabled_for_login` was also set. It is now excluded from
+  login selection.
 - **(#124) Every `oidc-admin` command that talks to the broker was silently
   broken.** The CLI sent `status`, `sessions_list` and `keys_list`; the broker
   implemented none of them, so each request fell through to
