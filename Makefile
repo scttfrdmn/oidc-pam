@@ -1,4 +1,4 @@
-.PHONY: build build-pam skip-pam test install clean lint fmt vet tidy verify-linux help
+.PHONY: build build-pam skip-pam test install clean lint fmt vet check-cgo tidy verify-linux help
 
 # Build variables
 BINARY_DIR := bin
@@ -20,16 +20,16 @@ GO_TEST_FLAGS := -race -coverprofile=coverage.out
 # bridge needs Linux-PAM and json-c. `make build` therefore skips it elsewhere
 # rather than failing, so the rest of the tree still builds on a developer's Mac;
 # `make build-pam` invoked directly always refuses, and CI builds on Linux.
-# The pinned golangci-lint version, single-sourced from .golangci-version so the
-# CI Lint job, the verification container and a local `make lint` cannot disagree.
-GOLANGCI_LINT_VERSION := $(shell tr -d '[:space:]' < .golangci-version)
-
 GOOS := $(shell go env GOOS)
 ifeq ($(GOOS),linux)
 PAM_MODULE_TARGET := build-pam
 else
 PAM_MODULE_TARGET := skip-pam
 endif
+
+# The pinned golangci-lint version, single-sourced from .golangci-version so the
+# CI Lint job, the verification container and a local `make lint` cannot disagree.
+GOLANGCI_LINT_VERSION := $(shell tr -d '[:space:]' < .golangci-version)
 
 # Default target
 all: build
@@ -87,10 +87,17 @@ test-unit:
 	@echo "Running unit tests..."
 	go test $(GO_TEST_FLAGS) ./pkg/... ./internal/...
 
-## Run integration tests
+## Compile-check the Keycloak integration harness (see test-integration-run)
 test-integration:
-	@echo "Running integration tests..."
-	go test $(GO_TEST_FLAGS) ./test/integration/...
+	@# test/integration is the harness `docker-compose.test.yml` runs against a
+	@# live Keycloak, not a `go test` package: it is a `package main` behind the
+	@# `integration` build tag, so ./... skips it and nothing else type-checks it.
+	@echo "Vetting the integration harness..."
+	go vet -tags integration ./test/integration/...
+
+## Run the Keycloak integration harness in Docker (needs Docker + docker-compose)
+test-integration-run:
+	./scripts/start-integration-tests.sh
 
 ## Run end-to-end tests
 test-e2e:
@@ -111,8 +118,9 @@ verify-linux:
 		-v oidc-pam-gomod:/go/pkg/mod \
 		-v oidc-pam-gocache:/root/.cache \
 		-w /src oidc-pam-verify \
-		sh -c 'go vet ./... \
-			&& go test -race ./pkg/... ./internal/... ./cmd/... \
+		sh -c './scripts/check-cgo-quarantine.sh \
+			&& go vet ./... \
+			&& go test -race ./... \
 			&& golangci-lint run --timeout=5m ./... \
 			&& echo "Building and verifying the PAM module..." \
 			&& CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /tmp/pam_oidc.so ./cmd/pam-module \
@@ -170,6 +178,10 @@ fmt:
 vet:
 	@echo "Running go vet..."
 	go vet ./...
+
+## Check that cgo stays confined to cmd/pam-module (works on any OS)
+check-cgo:
+	@./scripts/check-cgo-quarantine.sh
 
 ## Tidy dependencies
 tidy:
@@ -232,7 +244,8 @@ help:
 	@echo "  build-admin     Build admin CLI tool"
 	@echo "  test            Run all tests"
 	@echo "  test-unit       Run unit tests only"
-	@echo "  test-integration Run integration tests"
+	@echo "  test-integration Vet the Keycloak integration harness"
+	@echo "  test-integration-run Run that harness in Docker"
 	@echo "  test-e2e        Run end-to-end tests"
 	@echo "  verify-linux    Run vet+test+lint for ALL packages (incl. cgo/PAM) in Docker"
 	@echo "  install         Install binaries to system"
@@ -241,6 +254,7 @@ help:
 	@echo "  lint            Run linter"
 	@echo "  fmt             Format code"
 	@echo "  vet             Run go vet"
+	@echo "  check-cgo       Check cgo is confined to cmd/pam-module"
 	@echo "  tidy            Tidy dependencies"
 	@echo "  coverage        Generate coverage report"
 	@echo "  security        Run security scan"
