@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -46,6 +47,8 @@ type pollTestEnv struct {
 	// provisioned has to look at the filesystem, since that is the only place the
 	// answer is recorded.
 	homeDir string
+	// auditPath is the JSON-lines file the broker's audit logger writes to.
+	auditPath string
 }
 
 func newPollTestEnv(t *testing.T) *pollTestEnv {
@@ -74,10 +77,21 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 		t.Fatalf("NewOIDCProvider against the in-process issuer: %v", err)
 	}
 
-	auditLogger, err := security.NewAuditLogger(config.AuditConfig{Enabled: false})
+	// A real, file-backed audit logger rather than a disabled one. The audit
+	// record is part of what a device flow produces, and the defect in #153 was a
+	// record with the wrong contents — which a disabled logger cannot show.
+	// "sync" writes on the calling goroutine, so nothing is left buffered by the
+	// time the flow returns and no Start()/Stop() pair is needed.
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	auditLogger, err := security.NewAuditLogger(config.AuditConfig{
+		Enabled:          true,
+		Outputs:          []config.AuditOutput{{Type: "file", Path: auditPath}},
+		OverflowStrategy: "sync",
+	})
 	if err != nil {
 		t.Fatalf("NewAuditLogger: %v", err)
 	}
+	t.Cleanup(func() { _ = auditLogger.Stop() })
 
 	keyManager := sshpkg.NewKeyManager(t.TempDir())
 	// The happy path generates a login key; 2048 bits keeps that off the
@@ -134,13 +148,62 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 	broker.setSession(session)
 
 	return &pollTestEnv{
-		broker:   broker,
-		provider: provider,
-		idp:      idp,
-		session:  session,
-		flow:     flow,
-		homeDir:  homeDir,
+		broker:    broker,
+		provider:  provider,
+		idp:       idp,
+		session:   session,
+		flow:      flow,
+		homeDir:   homeDir,
+		auditPath: auditPath,
 	}
+}
+
+// auditEvents returns every event the flow recorded, in the order it wrote them.
+// A run that recorded nothing yields nil rather than an error, so a test can
+// assert on an absence.
+func (e *pollTestEnv) auditEvents(t *testing.T) []security.AuditEvent {
+	t.Helper()
+
+	data, err := os.ReadFile(e.auditPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("reading the audit log: %v", err)
+	}
+
+	var events []security.AuditEvent
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var event security.AuditEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("audit line %q is not a valid event: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+// auditEvent returns the one event of the given type, failing if the run did not
+// record exactly one.
+func (e *pollTestEnv) auditEvent(t *testing.T, eventType string) security.AuditEvent {
+	t.Helper()
+
+	var matched []security.AuditEvent
+	var seen []string
+	for _, event := range e.auditEvents(t) {
+		seen = append(seen, event.EventType)
+		if event.EventType == eventType {
+			matched = append(matched, event)
+		}
+	}
+	if len(matched) != 1 {
+		t.Fatalf("audit log has %d %q event(s), want exactly 1; it recorded %v",
+			len(matched), eventType, seen)
+	}
+	return matched[0]
 }
 
 // run drives the poll loop to completion and returns how long it took.
@@ -349,6 +412,76 @@ func TestTokenEndpointError(t *testing.T) {
 	wrapped := fmt.Errorf("failed to poll device authorization: %w", tokenEndpointError("authorization_pending"))
 	if !errors.Is(wrapped, ErrAuthorizationPending) {
 		t.Error("a wrapped pending error is no longer recognisable as pending")
+	}
+}
+
+// The regression gate for #153: the record of a successful login has to name the
+// identity that login resolved to.
+//
+// The poll loop clones the session before mutating it, and writes the email and
+// groups it got from the provider onto the clone. The success event was built from
+// the original, so it went to the audit trail with email "" and groups null on
+// every login — while the *denial* events, built from the provider's user info
+// directly, carried the identity correctly. An operator reviewing the trail could
+// see who was refused but not who got in.
+func TestSuccessAuditCarriesResolvedIdentity(t *testing.T) {
+	env := newPollTestEnv(t)
+	env.idp.Script(testoidc.Pending, testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session == nil || !session.IsActive {
+		t.Fatal("the flow did not complete, so there is no success record to check")
+	}
+
+	event := env.auditEvent(t, "authentication_successful")
+
+	// The two fields that were empty. They are the point of the event: user_id is
+	// the local account, but the email and groups are the federated identity that
+	// account was mapped from.
+	if event.Email != "testuser@example.org" {
+		t.Errorf("audited email = %q, want the identity the flow resolved (#153)", event.Email)
+	}
+	if len(event.Groups) != 1 || event.Groups[0] != "researchers" {
+		t.Errorf("audited groups = %v, want [researchers] from the claims (#153)", event.Groups)
+	}
+
+	// And the rest of the record still has to be right.
+	if event.UserID != "testuser" {
+		t.Errorf("audited user_id = %q, want %q", event.UserID, "testuser")
+	}
+	if event.SessionID != env.session.ID {
+		t.Errorf("audited session_id = %q, want %q", event.SessionID, env.session.ID)
+	}
+	if event.Provider != "testidp" {
+		t.Errorf("audited provider = %q, want %q", event.Provider, "testidp")
+	}
+	if !event.Success {
+		t.Error("the success event is recorded with success=false")
+	}
+}
+
+// The counterpart: a refusal is recorded with the identity too. This passed before
+// #153 was fixed and must keep passing after, since the fix touches the shared
+// clone the success path reads from.
+func TestDenialAuditCarriesResolvedIdentity(t *testing.T) {
+	env := newPollTestEnv(t)
+	env.idp.Script(testoidc.AccessDenied)
+
+	env.run(t)
+
+	event := env.auditEvent(t, "device_authorization_failed")
+	if event.Success {
+		t.Error("a refused authorization is recorded with success=true")
+	}
+	if event.UserID != "testuser" {
+		t.Errorf("audited user_id = %q, want %q", event.UserID, "testuser")
+	}
+	if event.SessionID != env.session.ID {
+		t.Errorf("audited session_id = %q, want %q", event.SessionID, env.session.ID)
+	}
+	if event.ErrorCode == "" {
+		t.Error("a refusal is recorded with no error code, so the trail does not say why")
 	}
 }
 
