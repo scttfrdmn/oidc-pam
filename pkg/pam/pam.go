@@ -7,10 +7,16 @@ package pam
 */
 import "C"
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
+	"time"
 	"unsafe"
+
+	"github.com/scttfrdmn/oidc-pam/internal/brokerclient"
 )
 
 // PAMResultCode is a PAM result code.
@@ -68,96 +74,120 @@ func errorCodeToPAMResult(errorCode string) PAMResultCode {
 	}
 }
 
+// syslog priorities, as syslog.h defines them. The C bridge takes the raw int.
+const (
+	logErr    = 3 // LOG_ERR
+	logNotice = 5 // LOG_NOTICE
+	logInfo   = 6 // LOG_INFO
+)
+
 // PAMModule represents the PAM module interface
 type PAMModule struct {
 	socketPath string
 	debug      atomic.Bool
+
+	// AuthTimeout bounds the wait for the user to complete the device flow.
+	// Zero means brokerclient.DefaultAuthTimeout.
+	AuthTimeout time.Duration
 }
 
 // NewPAMModule creates a new PAM module instance
 func NewPAMModule(socketPath string, debug bool) *PAMModule {
-	m := &PAMModule{socketPath: socketPath}
+	m := &PAMModule{socketPath: socketPath, AuthTimeout: brokerclient.DefaultAuthTimeout}
 	m.debug.Store(debug)
 	return m
 }
 
-// AuthenticateUser handles user authentication through the broker
+// AuthenticateUser handles user authentication through the broker, waiting for
+// the device authorization flow to complete.
+//
+// A nil return means the user authenticated. A *PAMAuthFailure means the login
+// was refused — including when the user simply never completed the device flow —
+// and carries the PAM result code the caller should return. Any other error means
+// the broker could not be reached or understood, which is PAM_AUTHINFO_UNAVAIL
+// territory: no opinion, rather than a grant.
 func (p *PAMModule) AuthenticateUser(username, service, rhost, tty string) error {
-	// Convert Go strings to C strings
-	cUsername := C.CString(username)
-	cService := C.CString(service)
-	cRhost := C.CString(rhost)
-	cTTY := C.CString(tty)
-	cSocketPath := C.CString(p.socketPath)
+	return p.AuthenticateUserContext(context.Background(), username, service, rhost, tty)
+}
 
-	// Ensure C strings are freed
-	defer C.free(unsafe.Pointer(cUsername))
-	defer C.free(unsafe.Pointer(cService))
-	defer C.free(unsafe.Pointer(cRhost))
-	defer C.free(unsafe.Pointer(cTTY))
-	defer C.free(unsafe.Pointer(cSocketPath))
+// AuthenticateUserContext is AuthenticateUser with a caller-supplied context;
+// cancelling it abandons the wait for device authorization.
+func (p *PAMModule) AuthenticateUserContext(ctx context.Context, username, service, rhost, tty string) error {
+	client := brokerclient.New(p.socketPath)
 
-	// Connect to broker
-	sock := C.connect_to_broker(cSocketPath)
-	if sock == -1 {
-		return fmt.Errorf("failed to connect to authentication broker")
-	}
-	defer C.close(sock)
-
-	// Send authentication request
-	if C.send_auth_request(sock, cUsername, cService, cRhost, cTTY) != 0 {
-		return fmt.Errorf("failed to send authentication request")
+	// Surface the verification URL and user code. This is the only chance the
+	// user gets to learn where to authenticate, so it goes to syslog at
+	// LOG_NOTICE regardless of debug mode.
+	client.OnDeviceFlow = func(resp *brokerclient.Response) {
+		if resp.Instructions != "" {
+			p.LogMessage(logNotice, resp.Instructions)
+		}
+		if resp.DeviceURL != "" {
+			p.LogMessage(logNotice, fmt.Sprintf("OIDC authentication: visit %s", resp.DeviceURL))
+		}
+		if resp.DeviceCode != "" {
+			p.LogMessage(logNotice, fmt.Sprintf("OIDC authentication: enter code %s", resp.DeviceCode))
+		}
 	}
 
-	// Receive and parse the broker response. Buffer matches the C module's
-	// MAX_RESPONSE_SIZE (8192) so large success responses are not truncated.
-	var response [8192]C.char
-	if C.receive_auth_response(sock, &response[0], C.size_t(len(response))) != 0 {
-		return fmt.Errorf("failed to receive authentication response")
+	timeout := p.AuthTimeout
+	if timeout <= 0 {
+		timeout = brokerclient.DefaultAuthTimeout
 	}
 
-	authResp, err := ParseBrokerResponse(C.GoString(&response[0]))
+	resp, err := client.AuthenticateAndWait(ctx, &brokerclient.Request{
+		UserID:     username,
+		TargetHost: rhost,
+		LoginType:  GetLoginType(service, tty),
+		Metadata: map[string]interface{}{
+			"service": service,
+			"tty":     tty,
+			"pid":     os.Getpid(),
+		},
+	}, timeout)
 	if err != nil {
-		return fmt.Errorf("failed to parse broker response: %w", err)
+		return p.authFailure(err)
 	}
 
-	// When device flow is required, surface the device URL and user code so
-	// the user knows where to authenticate. Messages are sent to syslog and
-	// (where supported) to the PAM conversation.
-	if authResp.RequiresDevice {
-		if authResp.DeviceURL != "" {
-			p.LogMessage(5 /* LOG_NOTICE */, fmt.Sprintf("OIDC authentication: visit %s", authResp.DeviceURL))
-		}
-		if authResp.DeviceCode != "" {
-			p.LogMessage(5 /* LOG_NOTICE */, fmt.Sprintf("OIDC authentication: enter code %s", authResp.DeviceCode))
-		}
-		// Device flow initiated; the PAM stack will poll via check_session.
-		return nil
+	if resp.Instructions != "" {
+		p.LogMessage(logInfo, resp.Instructions)
 	}
+	return nil
+}
 
-	if !authResp.Success {
-		msg := authResp.ErrorMessage
+// authFailure turns a brokerclient error into the error contract described on
+// AuthenticateUser, logging it on the way out.
+func (p *PAMModule) authFailure(err error) error {
+	var denial *brokerclient.DenialError
+	if errors.As(err, &denial) {
+		msg := denial.Message
 		if msg == "" {
 			msg = "authentication failed"
 		}
-		// Log the error so it appears in system logs; include error code in
-		// debug mode to aid troubleshooting.
-		if p.debug.Load() && authResp.ErrorCode != "" {
-			p.LogMessage(3 /* LOG_ERR */, fmt.Sprintf("OIDC authentication failed: %s (%s)", msg, authResp.ErrorCode))
+		if p.debug.Load() && denial.ErrorCode != "" {
+			p.LogMessage(logErr, fmt.Sprintf("OIDC authentication failed: %s (%s)", msg, denial.ErrorCode))
 		} else {
-			p.LogMessage(3 /* LOG_ERR */, fmt.Sprintf("OIDC authentication failed: %s", msg))
+			p.LogMessage(logErr, fmt.Sprintf("OIDC authentication failed: %s", msg))
 		}
 		return &PAMAuthFailure{
-			Code:    errorCodeToPAMResult(authResp.ErrorCode),
+			Code:    errorCodeToPAMResult(denial.ErrorCode),
 			Message: msg,
 		}
 	}
 
-	if authResp.Instructions != "" {
-		p.LogMessage(6 /* LOG_INFO */, authResp.Instructions)
+	var timeout *brokerclient.TimeoutError
+	if errors.As(err, &timeout) {
+		p.LogMessage(logErr, fmt.Sprintf("OIDC authentication failed: %s", timeout))
+		return &PAMAuthFailure{
+			Code:    PAMAuthError,
+			Message: timeout.Error(),
+		}
 	}
 
-	return nil
+	// Could not reach an opinion: leave it to the caller to translate into
+	// PAM_AUTHINFO_UNAVAIL rather than reporting a denial we did not observe.
+	p.LogMessage(logErr, fmt.Sprintf("OIDC authentication unavailable: %v", err))
+	return err
 }
 
 // LogMessage logs a message through the PAM logging system
