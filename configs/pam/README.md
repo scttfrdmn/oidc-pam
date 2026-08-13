@@ -92,15 +92,36 @@ auth    sufficient  pam_oidc.so debug
 
 ## PAM Module Parameters
 
-`pam_oidc.so` accepts exactly two arguments:
+`pam_oidc.so` accepts exactly three arguments:
 
 | Argument | Meaning |
 |---|---|
 | `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`). Remove in production. |
 | `socket=<path>` | Absolute path to the broker's Unix socket. Defaults to `/var/run/oidc-auth/broker.sock`, matching the broker's own default for `server.socket_path`. Only needed if you changed that. |
+| `timeout=<seconds>` | How long to wait for the user to finish the device flow before refusing the login. Default `90`, accepted range `10`–`900`. |
 
 Anything else is ignored and logged at `LOG_WARNING`, so a typo shows up in
 `/var/log/auth.log` instead of silently doing nothing.
+
+### How the wait works
+
+The module prompts with the verification URL and user code, then polls the broker
+until the flow completes, is refused, or `timeout` expires. **The login is
+refused when the timeout expires** — an unfinished device flow is never a
+success.
+
+The default `timeout` of 90 s is deliberately below sshd's default
+`LoginGraceTime` of 120 s: sshd kills the connection when the grace time runs
+out, which would look like a hang rather than a denial. If you raise `timeout`,
+raise `LoginGraceTime` in `/etc/ssh/sshd_config` to match:
+
+```
+# /etc/pam.d/sshd
+auth    sufficient  pam_oidc.so timeout=300
+
+# /etc/ssh/sshd_config
+LoginGraceTime 330
+```
 
 ### Arguments that do *not* exist
 

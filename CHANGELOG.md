@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Critical (#120): `pam_oidc.so` granted `PAM_SUCCESS` before device
+  authorization completed.** `Broker.Authenticate` returns `success: true`
+  *together with* `requires_device: true` when it has merely started the device
+  flow, and `pam_sm_authenticate` tested `success` before it looked at
+  `requires_device` — so with the shipped `auth sufficient pam_oidc.so` the auth
+  stack was short-circuited and login granted the moment the broker replied,
+  before the user visited the verification URL and before the broker performed
+  identity binding (`username_claim`) and `require_groups`, which run afterwards
+  in a background goroutine. `requires_device` is now checked first, and
+  `success` alone is no longer treated as a grant.
+- **(#120)** The module now completes the device flow instead of abandoning it.
+  It displays the verification instructions, then polls `check_session` —
+  reconnecting per attempt, since the broker serves one request per connection —
+  at the interval the broker asks for in `metadata.polling_interval` (clamped to
+  [1, 60] s) until the flow completes or the budget expires. Nothing called
+  `check_session` before, so the device flow had no completion path at all.
+- **(#120) Every non-success outcome now fails closed.** A refusal, a session the
+  broker no longer has (`SESSION_NOT_FOUND`/`SESSION_EXPIRED`/`FORBIDDEN` — the
+  broker deletes the session on identity mismatch, group denial and expiry), or
+  an exhausted timeout all deny; broker error codes are mapped to PAM codes
+  mirroring `errorCodeToPAMResult`. Only failing to reach an opinion at all
+  (broker unreachable, unparseable response) returns `PAM_AUTHINFO_UNAVAIL`.
+- **(#120)** `internal/ipc` now *requires* `user_id` on `check_session`,
+  `refresh_session` and `revoke_session`. The broker compares it against the
+  session owner to reject cross-user access, but the validator neither required
+  nor validated it, so an absent `user_id` was compared as the empty string.
+- **(#120)** `PAMMaxTries` was `24`, which is not a Linux-PAM result code
+  (`PAM_MAXTRIES` is 11); returning it would have turned a deliberate
+  rate-limit denial into an unrecognized error. The `PAMResultCode` constants are
+  now taken from the PAM headers the module is compiled against instead of being
+  copied by hand, since the values are not portable between Linux-PAM and
+  OpenPAM.
+
 ### Fixed (BREAKING for PAM configs)
 - **(#119) `pam_oidc.so` connected to the wrong socket and ignored its module
   arguments.** The compiled-in `SOCKET_PATH` was
@@ -32,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#120)** `timeout=<seconds>` module argument bounding the wait for device
+  authorization (default 90, range 10–900). The default sits below sshd's
+  default `LoginGraceTime` of 120 s so an expired flow is reported as a denial
+  rather than sshd dropping the connection; documented in
+  `configs/pam/README.md`.
 - **(#118) CI coverage for the PAM/cgo packages.** A new `PAM (cgo)` job installs
   `libpam0g-dev`/`libjson-c-dev` and runs `go vet ./pkg/pam ./cmd/pam-module
   ./cmd/pam-helper` plus `go test -race ./pkg/pam/...`; the `Lint` job now lints

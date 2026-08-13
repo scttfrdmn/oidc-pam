@@ -180,13 +180,32 @@ func TestValidateRequest(t *testing.T) {
 			req: Request{
 				Type:      "check_session",
 				SessionID: "valid-session-123",
+				UserID:    "testuser",
 			},
 			wantErr: false,
 		},
 		{
+			name: "check_session missing user_id",
+			req: Request{
+				Type:      "check_session",
+				SessionID: "valid-session-123",
+			},
+			wantErr: true,
+		},
+		{
+			name: "check_session invalid user_id",
+			req: Request{
+				Type:      "check_session",
+				SessionID: "valid-session-123",
+				UserID:    "root; rm -rf /",
+			},
+			wantErr: true,
+		},
+		{
 			name: "check_session missing session_id",
 			req: Request{
-				Type: "check_session",
+				Type:   "check_session",
+				UserID: "testuser",
 			},
 			wantErr: true,
 		},
@@ -195,13 +214,32 @@ func TestValidateRequest(t *testing.T) {
 			req: Request{
 				Type:      "refresh_session",
 				SessionID: "valid-session-123",
+				UserID:    "testuser",
 			},
 			wantErr: false,
 		},
 		{
+			name: "refresh_session missing user_id",
+			req: Request{
+				Type:      "refresh_session",
+				SessionID: "valid-session-123",
+			},
+			wantErr: true,
+		},
+		{
+			name: "refresh_session invalid user_id",
+			req: Request{
+				Type:      "refresh_session",
+				SessionID: "valid-session-123",
+				UserID:    "root; rm -rf /",
+			},
+			wantErr: true,
+		},
+		{
 			name: "refresh_session missing session_id",
 			req: Request{
-				Type: "refresh_session",
+				Type:   "refresh_session",
+				UserID: "testuser",
 			},
 			wantErr: true,
 		},
@@ -210,13 +248,32 @@ func TestValidateRequest(t *testing.T) {
 			req: Request{
 				Type:      "revoke_session",
 				SessionID: "valid-session-123",
+				UserID:    "testuser",
 			},
 			wantErr: false,
 		},
 		{
+			name: "revoke_session missing user_id",
+			req: Request{
+				Type:      "revoke_session",
+				SessionID: "valid-session-123",
+			},
+			wantErr: true,
+		},
+		{
+			name: "revoke_session invalid user_id",
+			req: Request{
+				Type:      "revoke_session",
+				SessionID: "valid-session-123",
+				UserID:    "root; rm -rf /",
+			},
+			wantErr: true,
+		},
+		{
 			name: "revoke_session missing session_id",
 			req: Request{
-				Type: "revoke_session",
+				Type:   "revoke_session",
+				UserID: "testuser",
 			},
 			wantErr: true,
 		},
