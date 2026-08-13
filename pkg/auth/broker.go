@@ -993,6 +993,22 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 						Err(err).
 						Str("session_id", updated.ID).
 						Msg("Failed to generate SSH key")
+					// Audit it too. A login whose key could not be provisioned is
+					// authenticated but cannot actually be used, and #152 stayed
+					// hidden for eleven releases precisely because this failure
+					// only ever reached the broker's own log.
+					b.auditLogger.LogAuthEvent(security.AuditEvent{
+						EventType:    "ssh_key_provisioning_failed",
+						UserID:       updated.UserID,
+						Email:        updated.Email,
+						Groups:       updated.Groups,
+						SessionID:    updated.ID,
+						Provider:     provider.Name,
+						Success:      false,
+						ErrorCode:    "SSH_KEY_PROVISIONING_FAILED",
+						ErrorMessage: err.Error(),
+						Timestamp:    time.Now(),
+					})
 				} else {
 					updated.SSHKeyID = sshKey.ID
 					updated.SSHPublicKey = sshKey.PublicKey

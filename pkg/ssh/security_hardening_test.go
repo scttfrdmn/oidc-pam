@@ -3,6 +3,7 @@ package ssh
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -95,6 +96,104 @@ func TestValidateUsernameAllowlist(t *testing.T) {
 	for _, u := range invalid {
 		if err := validateUsername(u); err == nil {
 			t.Errorf("expected %q to be rejected", u)
+		}
+	}
+}
+
+// The key store is keyed by an opaque key ID — the broker passes a session ID —
+// so validateKeyID has to admit a 64-character hex string while still refusing
+// anything that could escape the base directory. Validating that argument as a
+// POSIX login name is what broke key provisioning outright (#152).
+func TestValidateKeyIDAllowlist(t *testing.T) {
+	valid := []string{
+		"4de51658fa4527eb9e1894ca69732ec8db2800723c21b516b8434d27b6491b5b", // a real session ID
+		"alice", "Session-1", "a", "abc_def-123",
+	}
+	for _, id := range valid {
+		if err := validateKeyID(id); err != nil {
+			t.Errorf("expected %q to be a valid key ID, got: %v", id, err)
+		}
+	}
+
+	invalid := []string{
+		"", "..", ".", "../etc", "a/../b", "/etc/passwd", "keys/id_rsa",
+		".hidden", "with space", "semi;colon", "nul\x00byte",
+		strings.Repeat("a", 129),
+	}
+	for _, id := range invalid {
+		if err := validateKeyID(id); err == nil {
+			t.Errorf("expected key ID %q to be rejected", id)
+		}
+	}
+}
+
+// A key ID that a POSIX login name check would refuse must round-trip through the
+// store, since that is exactly the shape the broker uses.
+func TestSaveAndLoadKeyUnderSessionID(t *testing.T) {
+	km := NewKeyManager(t.TempDir())
+	km.SetKeySize(2048)
+
+	const sessionID = "4de51658fa4527eb9e1894ca69732ec8db2800723c21b516b8434d27b6491b5b"
+
+	key, err := km.GenerateKey("alice")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := km.SaveKey(sessionID, key); err != nil {
+		t.Fatalf("SaveKey under a session ID: %v", err)
+	}
+
+	loaded, err := km.LoadKey(sessionID)
+	if err != nil {
+		t.Fatalf("LoadKey(%q): %v", sessionID, err)
+	}
+	if string(loaded.PublicKey) != string(key.PublicKey) {
+		t.Error("the loaded public key differs from the saved one")
+	}
+
+	// The listing has to name both the storage ID and the account the key is for.
+	// The store is keyed by session, so the username can only come from the key's
+	// own comment — before #152 this column simply showed the session ID.
+	infos, unreadable, err := km.ListKeyInfo()
+	if err != nil {
+		t.Fatalf("ListKeyInfo: %v", err)
+	}
+	if unreadable != 0 {
+		t.Errorf("unreadable = %d, want 0", unreadable)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("ListKeyInfo returned %d keys, want 1", len(infos))
+	}
+	if infos[0].KeyID != sessionID {
+		t.Errorf("KeyID = %q, want %q", infos[0].KeyID, sessionID)
+	}
+	if infos[0].Username != "alice" {
+		t.Errorf("Username = %q, want %q recovered from the key comment", infos[0].Username, "alice")
+	}
+
+	if err := km.DeleteKey(sessionID); err != nil {
+		t.Fatalf("DeleteKey(%q): %v", sessionID, err)
+	}
+	if _, err := km.LoadKey(sessionID); err == nil {
+		t.Error("LoadKey succeeded after DeleteKey")
+	}
+}
+
+// usernameFromComment returns "" rather than guessing, so an operator sees an
+// empty column instead of a plausible-looking wrong name.
+func TestUsernameFromComment(t *testing.T) {
+	cases := map[string]string{
+		"alice@oidc-pam-1786663703": "alice",
+		"svc-account@oidc-pam-0":    "svc-account",
+		"alice@oidc-pam-":           "",
+		"alice@oidc-pam-notanumber": "",
+		"@oidc-pam-1786663703":      "",
+		"alice@example.org":         "",
+		"":                          "",
+	}
+	for comment, want := range cases {
+		if got := usernameFromComment(comment); got != want {
+			t.Errorf("usernameFromComment(%q) = %q, want %q", comment, got, want)
 		}
 	}
 }

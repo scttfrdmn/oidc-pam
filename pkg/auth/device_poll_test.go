@@ -3,6 +3,9 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +42,10 @@ type pollTestEnv struct {
 	idp      *testoidc.Server
 	session  *Session
 	flow     *DeviceFlow
+	// homeDir stands in for /home. A test that cares whether a login key was
+	// provisioned has to look at the filesystem, since that is the only place the
+	// answer is recorded.
+	homeDir string
 }
 
 func newPollTestEnv(t *testing.T) *pollTestEnv {
@@ -77,6 +84,8 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 	// critical path of a test that is about polling.
 	keyManager.SetKeySize(2048)
 
+	homeDir := t.TempDir()
+
 	broker := &Broker{
 		config: &config.Config{
 			Authentication: config.AuthenticationConfig{
@@ -91,7 +100,7 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 		auditLogger:           auditLogger,
 		sessions:              make(map[string]*Session),
 		keyManager:            keyManager,
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(t.TempDir()),
+		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
 		stopChan:              make(chan struct{}),
 		pollIntervalUnit:      testPollUnit,
 	}
@@ -107,7 +116,12 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 	}
 
 	session := &Session{
-		ID:           "sess-poll-test",
+		// A session ID of the shape the broker actually mints: 32 random bytes,
+		// hex-encoded. It matters that this is not a plausible login name — the key
+		// store is keyed by it, and the bug in #152 was a store that validated it
+		// as a POSIX username. A friendlier "sess-poll-test" passes that check by
+		// accident and hides the defect.
+		ID:           "9d1c6f0e5b4a3827160f9e8d7c6b5a493827160f9e8d7c6b5a4938271605f4e3d",
 		UserID:       "testuser",
 		Provider:     "testidp",
 		LoginType:    "ssh",
@@ -119,7 +133,14 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 	}
 	broker.setSession(session)
 
-	return &pollTestEnv{broker: broker, provider: provider, idp: idp, session: session, flow: flow}
+	return &pollTestEnv{
+		broker:   broker,
+		provider: provider,
+		idp:      idp,
+		session:  session,
+		flow:     flow,
+		homeDir:  homeDir,
+	}
 }
 
 // run drives the poll loop to completion and returns how long it took.
@@ -328,5 +349,54 @@ func TestTokenEndpointError(t *testing.T) {
 	wrapped := fmt.Errorf("failed to poll device authorization: %w", tokenEndpointError("authorization_pending"))
 	if !errors.Is(wrapped, ErrAuthorizationPending) {
 		t.Error("a wrapped pending error is no longer recognisable as pending")
+	}
+}
+
+// The regression gate for #152: a granted device flow must actually provision the
+// login key, which is the whole point of the broker.
+//
+// This failed against the code that keyed the on-disk key store by session ID but
+// validated that ID as a POSIX login name: SaveKey refused every real session ID,
+// the error was only logged, and the login carried on and was audited as a
+// success — so nothing but an end-to-end run noticed that no key was ever written.
+func TestDeviceFlowProvisionsLoginKey(t *testing.T) {
+	env := newPollTestEnv(t)
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	session := env.activeSession()
+	if session == nil {
+		t.Fatal("session was removed even though the provider granted the token")
+	}
+	if session.SSHKeyID == "" {
+		t.Fatal("session has no SSHKeyID: no login key was provisioned (#152)")
+	}
+	if session.SSHKeyID != session.ID {
+		t.Errorf("SSHKeyID = %q, want the session ID %q", session.SSHKeyID, session.ID)
+	}
+
+	// The pair has to be retrievable by the ID the session points at, or nothing
+	// can revoke it later.
+	stored, err := env.broker.keyManager.LoadKey(session.SSHKeyID)
+	if err != nil {
+		t.Fatalf("LoadKey(%q): %v", session.SSHKeyID, err)
+	}
+	if len(stored.PrivateKey) == 0 {
+		t.Error("stored key pair has no private key")
+	}
+
+	// And it has to be authorized for the local account, in the user's own file,
+	// exactly once.
+	authorizedKeys := filepath.Join(env.homeDir, session.UserID, ".ssh", "authorized_keys")
+	data, err := os.ReadFile(authorizedKeys)
+	if err != nil {
+		t.Fatalf("reading %s: %v", authorizedKeys, err)
+	}
+	if got := strings.Count(string(data), "@oidc-pam-"); got != 1 {
+		t.Errorf("authorized_keys has %d oidc-pam key(s), want exactly 1:\n%s", got, data)
+	}
+	if !strings.Contains(string(data), session.UserID+"@oidc-pam-") {
+		t.Errorf("the authorized key is not commented for %q:\n%s", session.UserID, data)
 	}
 }

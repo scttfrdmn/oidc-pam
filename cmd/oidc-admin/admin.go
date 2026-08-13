@@ -247,9 +247,11 @@ func listSSHKeys() error {
 		fmt.Printf("No SSH keys found.\n")
 	} else {
 		fmt.Printf("Total keys: %d\n\n", response.Total)
-		fmt.Printf("%-20s %-14s %-6s %-8s %-20s %-20s\n", "Username", "Type", "Bits", "Status", "Created", "Expires")
-		fmt.Printf("%-20s %-14s %-6s %-8s %-20s %-20s\n",
+		fmt.Printf("%-20s %-16s %-14s %-6s %-8s %-20s %-20s\n",
+			"Username", "Session", "Type", "Bits", "Status", "Created", "Expires")
+		fmt.Printf("%-20s %-16s %-14s %-6s %-8s %-20s %-20s\n",
 			strings.Repeat("-", 20),
+			strings.Repeat("-", 16),
 			strings.Repeat("-", 14),
 			strings.Repeat("-", 6),
 			strings.Repeat("-", 8),
@@ -257,8 +259,9 @@ func listSSHKeys() error {
 			strings.Repeat("-", 20))
 
 		for _, key := range response.Keys {
-			fmt.Printf("%-20s %-14s %-6d %-8s %-20s %-20s\n",
+			fmt.Printf("%-20s %-16s %-14s %-6d %-8s %-20s %-20s\n",
 				truncateString(key.Username, 20),
+				truncateString(key.SessionID, 16),
 				truncateString(key.KeyType, 14),
 				key.KeySize,
 				truncateString(key.Status, 8),
