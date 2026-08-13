@@ -51,3 +51,8 @@ func classifyLoginTypeC(service, tty string) string {
 
 	return C.GoString(C.classify_login_type(cService, cTTY))
 }
+
+// acctMgmtVerdict exposes the C module's account-phase verdict to Go tests.
+func acctMgmtVerdict() PAMResultCode {
+	return PAMResultCode(C.acct_mgmt_verdict())
+}

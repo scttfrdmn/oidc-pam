@@ -90,6 +90,68 @@ auth    required    pam_oidc.so
 auth    sufficient  pam_oidc.so debug
 ```
 
+## Which PAM phases the module participates in
+
+`pam_oidc.so` implements one decision, in the `auth` phase. Everything the
+module is for — talking to the broker, which enforces identity binding
+(`username_claim`), `require_groups`, risk policy and session limits — happens in
+`pam_sm_authenticate`. The other phases are listed below with the control flag to
+use and why.
+
+| Phase | Use | What the module does |
+|---|---|---|
+| `auth` | `sufficient` or `required` | The real decision. Runs the device flow, waits for it, and returns success only once the broker has authorized the login. |
+| `account` | **`optional`** | Nothing: returns `PAM_IGNORE`. |
+| `session` | `optional` | Logs session open/close. No decision. |
+| `password` | `optional` | Cannot change a password; returns `PAM_AUTHTOK_ERR`. |
+
+### Why `account optional`, never `account sufficient`
+
+The module returns `PAM_IGNORE` from `pam_sm_acct_mgmt` — "I have no opinion" —
+so PAM does not count it toward the account stack's result and the modules after
+it decide.
+
+Earlier versions returned `PAM_SUCCESS` instead, and the example configs used
+`account sufficient pam_oidc.so`. A `sufficient` module that succeeds
+short-circuits the rest of the phase, so that combination silently disabled every
+account check after it: `pam_time`, `pam_nologin`, `pam_access`, account expiry,
+`pam_unix`'s shadow checks. The module was answering a question it never asked,
+and rubber-stamping the account phase for every user. **If your `/etc/pam.d/*`
+files still say `account sufficient pam_oidc.so`, change them to `optional`.**
+
+Keep at least one real account module in the stack. If `pam_oidc.so` is the only
+one, every module ignores and Linux-PAM returns `PAM_PERM_DENIED`: it fails
+closed rather than admitting everyone, but nothing useful is being checked. The
+shipped configs pair it with `pam_unix.so` plus `pam_access.so`/`pam_time.so`.
+
+### Nothing may follow `requisite pam_deny.so`
+
+`requisite` returns to the application immediately on failure, so in
+
+```
+auth    sufficient  pam_oidc.so
+auth    requisite   pam_deny.so
+auth    required    pam_unix.so try_first_pass   # never reached
+```
+
+the third line is dead configuration, not an emergency fallback — the shipped
+`ssh`, `su` and `sudo` examples used to carry exactly that line and describe it as
+one. These stacks are OIDC-only: if OIDC authentication fails, the login is
+refused.
+
+To allow Unix passwords when the broker or IdP is unavailable, drop
+`pam_deny.so`:
+
+```
+auth    sufficient  pam_oidc.so
+auth    required    pam_unix.so try_first_pass nullok_secure
+```
+
+The trade-off is real: a user with a local password then bypasses every OIDC
+policy. The usual alternative is to keep the stack OIDC-only and rely on SSH
+public-key authentication as the break-glass path, since sshd's pubkey path does
+not consult the PAM auth stack at all.
+
 ## PAM Module Parameters
 
 `pam_oidc.so` accepts exactly three arguments:

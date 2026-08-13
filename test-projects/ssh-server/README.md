@@ -101,11 +101,13 @@ The SSH server is configured with:
 
 ```bash
 # /etc/pam.d/sshd
+# OIDC-only: nothing may follow `requisite pam_deny.so`, which returns to sshd
+# immediately. pam_oidc.so returns PAM_IGNORE in the account phase, so it is
+# `optional` there and pam_unix/pam_access are what actually decide.
 auth    sufficient  pam_oidc.so debug
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 

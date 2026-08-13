@@ -36,6 +36,11 @@ const (
 	PAMAuthError       PAMResultCode = C.PAM_AUTH_ERR
 	PAMAuthInfoUnavail PAMResultCode = C.PAM_AUTHINFO_UNAVAIL
 	PAMMaxTries        PAMResultCode = C.PAM_MAXTRIES
+
+	// PAMIgnore means "this module has no opinion". PAM does not count it
+	// toward the stack's result, so unlike PAMSuccess it cannot short-circuit a
+	// `sufficient` entry.
+	PAMIgnore PAMResultCode = C.PAM_IGNORE
 )
 
 // PAMAuthFailure is returned by AuthenticateUser when the broker reports a
