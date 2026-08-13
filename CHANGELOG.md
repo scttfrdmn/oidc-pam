@@ -110,9 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(#120)** `PAMMaxTries` was `24`, which is not a Linux-PAM result code
   (`PAM_MAXTRIES` is 11); returning it would have turned a deliberate
   rate-limit denial into an unrecognized error. The `PAMResultCode` constants are
-  now taken from the PAM headers the module is compiled against instead of being
-  copied by hand, since the values are not portable between Linux-PAM and
-  OpenPAM.
+  no longer hand-copied guesses: each one is checked against the PAM macro of the
+  same name in the headers the module is compiled against, by
+  `TestPAMResultCodesMatchHeaders` (see **(#141)** under **Added**). The values
+  are not portable between Linux-PAM and OpenPAM, so the test is what keeps
+  `pkg/pam`'s literals honest.
 
 ### Fixed (BREAKING for PAM configs)
 - **(#122)** The example configs (`configs/pam/{ssh,login,su,sudo}`, the
@@ -184,6 +186,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers the module is compiled against, and fails if a value or the set of
   codes drifts. This preserves what #118 established — that the codes are not
   hand-copied guesses — now that `pkg/pam` declares them without cgo.
+- **(#141)** A `macOS (no PAM headers)` CI job runs `go build ./...`,
+  `go vet ./...` and `go test ./...` on `macos-latest`. The point is what is *not*
+  installed: with no `<security/pam_ext.h>` and no json-c, any cgo that escapes
+  `cmd/pam-module`'s `//go:build linux` constraint fails CI instead of only
+  breaking for contributors on a Mac — which is how the tree came to be
+  unbuildable there in the first place.
+- **(#141)** `scripts/check-cgo-quarantine.sh` (`make check-cgo`, and a step in
+  the `Validate` job) asserts that `cmd/pam-module` is the only package with cgo
+  files under `GOOS=linux`, and that no package has any under `GOOS=darwin`. It
+  reads the build graph rather than the host, so it gives the same answer on any
+  OS with no headers installed, and it names the offending package instead of
+  failing with a missing header a hundred lines into a compile. Both halves
+  matter: cgo escaping the module breaks the macOS build (#141), and C leaving
+  `cmd/pam-module` is exactly what shipped a module with no entry points (#140).
 - **(#124)** `oidc-admin status`, `health`, `sessions` and `keys` work. The broker
   now implements the `status`, `sessions_list` and `keys_list` IPC requests the
   CLI has always sent, backed by `Broker.Status()`, `Broker.ListSessions()` and
@@ -238,6 +254,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages CI has to treat specially are down to one: `cmd/pam-module`. The
   `pam_sm_*` entry points are unaffected — they are C, called by libpam, and stay
   C.
+- **(#141)** The `Test` job runs `go vet ./...` and `go test -race ./...` instead
+  of two hand-maintained package lists, and installs the PAM headers because
+  `./...` now includes `cmd/pam-module`. A list of packages to check is a list of
+  packages someone has to remember to extend, and that is the whole mechanism by
+  which the PAM code went years without being vetted or tested (#113/#118). The
+  `PAM (cgo)` job stays, overlapping with this one on purpose, so a break in the C
+  is reported as a cgo failure by name.
 - **(#127)** The six pre-implementation design documents in the repository root
   (`oidc_pam_project.md`, `oidc_pam_comprehensive.md`,
   `oidc_provider_configuration.md`, `research_computing_oidc.md`,
@@ -267,6 +290,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests — the live Go path has gone through `internal/brokerclient` since #121.
   Their tests asserted that a bad file descriptor fails, which is a property of
   the C library, not of this project.
+- **(#141) `test/integration/broker_test.go` (748 lines), which had never passed.**
+  All three of its top-level tests died in `auth.NewBroker`: the fixture's issuer
+  was `mock://test-provider` and OIDC discovery is an HTTP GET, so every run
+  ended in `unsupported protocol scheme "mock"`. The subtests behind that failure
+  were written against a broker that does not exist either — `key_create` and
+  `risk_assess` are not request types the broker implements, several sent two
+  requests down one connection when the broker answers one per connection, and
+  `sessions_list`/`keys_list` require uid 0. The directory did not even build
+  under its own `integration` tag (`package integration` in the test file,
+  `package main` in `main.go`), which it now does. Nothing was covered by this
+  file: `internal/ipc` exercises the same request surface over real sockets, and
+  end-to-end coverage through PAM is what the container harness in #129 is for.
+  `make test-integration` now vets the tagged Keycloak harness that
+  `docker-compose.test.yml` actually runs, and `make test-integration-run` runs
+  it, instead of pointing `go test` at a package with no tests in it.
 - **(#141)** The four `cgo_{linux,darwin}.go` files that carried nothing but
   duplicate `#cgo` flag comments. cgo merges `#cgo` directives across a package,
   so the flags are declared once, in `cmd/pam-module/bridge_linux.go`.
