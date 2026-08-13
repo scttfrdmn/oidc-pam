@@ -435,6 +435,8 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
+	tokenManager := newTestTokenManager(t)
+
 	broker := &Broker{
 		config: &config.Config{
 			Authentication: config.AuthenticationConfig{
@@ -446,6 +448,18 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 		sessionMutex: sync.RWMutex{},
 		providers:    map[string]*OIDCProvider{"test-provider": provider},
 		auditLogger:  auditLogger,
+		tokenManager: tokenManager,
+	}
+
+	// The refresh token lives in the token store, not on the session.
+	oldTokenID, err := tokenManager.StoreToken(&Token{
+		AccessToken:  "old-access-token",
+		RefreshToken: "old-refresh-token",
+		ExpiresAt:    time.Now().Add(5 * time.Minute),
+		Fingerprint:  "old-fingerprint",
+	}, "test-user", "refresh-test")
+	if err != nil {
+		t.Fatalf("StoreToken: %v", err)
 	}
 
 	// Session is within the refresh threshold (expires in 5 minutes < 15 minute threshold)
@@ -456,7 +470,7 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 		Provider:         "test-provider",
 		IsActive:         true,
 		TokenFingerprint: "old-fingerprint",
-		RefreshToken:     "old-refresh-token",
+		TokenID:          oldTokenID,
 		ExpiresAt:        time.Now().Add(5 * time.Minute),
 		LastAccessed:     time.Now(),
 	}
@@ -478,8 +492,23 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 	if updated.TokenFingerprint == "old-fingerprint" {
 		t.Error("Expected token fingerprint to be updated after refresh")
 	}
-	if updated.RefreshToken != "refreshed-refresh-token" {
-		t.Errorf("Expected refresh token to be updated, got %q", updated.RefreshToken)
+	if updated.TokenID == "" || updated.TokenID == oldTokenID {
+		t.Errorf("Expected the session to point at a new stored token, got %q", updated.TokenID)
+	}
+
+	// The new refresh token is reachable through the store...
+	refreshed, err := tokenManager.GetToken(updated.TokenID)
+	if err != nil {
+		t.Fatalf("GetToken(%q): %v", updated.TokenID, err)
+	}
+	if refreshed.RefreshToken != "refreshed-refresh-token" {
+		t.Errorf("stored refresh token = %q, want refreshed-refresh-token", refreshed.RefreshToken)
+	}
+
+	// ...and the rotated one is gone, rather than lingering as dead credential
+	// material until the token store's own sweep.
+	if _, err := tokenManager.GetToken(oldTokenID); err == nil {
+		t.Error("the pre-refresh token is still in the store after rotation")
 	}
 }
 
@@ -504,12 +533,12 @@ func TestBrokerRefreshSessionNoRefreshToken(t *testing.T) {
 
 	// Session without a refresh token
 	session := &Session{
-		ID:           "no-refresh-token-session",
-		UserID:       "test-user",
-		Provider:     "test-provider",
-		IsActive:     true,
-		RefreshToken: "", // no refresh token
-		ExpiresAt:    time.Now().Add(5 * time.Minute),
+		ID:        "no-refresh-token-session",
+		UserID:    "test-user",
+		Provider:  "test-provider",
+		IsActive:  true,
+		TokenID:   "", // no stored token, so no refresh token
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 	broker.setSession(session)
 
@@ -541,11 +570,11 @@ func TestBrokerRefreshSessionNotCloseToExpiry(t *testing.T) {
 	}
 
 	session := &Session{
-		ID:           "fresh-session",
-		UserID:       "test-user",
-		IsActive:     true,
-		RefreshToken: "some-token",
-		ExpiresAt:    time.Now().Add(30 * time.Minute), // well outside threshold
+		ID:        "fresh-session",
+		UserID:    "test-user",
+		IsActive:  true,
+		TokenID:   "some-token-id",
+		ExpiresAt: time.Now().Add(30 * time.Minute), // well outside threshold
 	}
 	broker.setSession(session)
 
@@ -581,4 +610,20 @@ func TestAuthenticateSessionIDUniqueness(t *testing.T) {
 		}
 		seen[resp.SessionID] = true
 	}
+}
+
+// newTestTokenManager returns a TokenManager with a valid AES-256 key, for tests
+// that exercise broker paths which store or read tokens.
+func newTestTokenManager(t *testing.T) *TokenManager {
+	t.Helper()
+
+	tm, err := NewTokenManager(&config.Config{
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	return tm
 }

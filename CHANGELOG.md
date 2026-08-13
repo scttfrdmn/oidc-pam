@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **(#123): OAuth2 refresh tokens were held in plaintext on every session; the
+  encrypted `TokenManager` was never called.** `NewTokenManager` was constructed
+  and started, and `StoreToken` encrypts with AES-256-GCM, but no broker code
+  path ever stored a token — so the documented "AES-256 encryption for token
+  storage" applied to an empty store, while the real credentials sat in
+  `Session.RefreshToken` as plaintext strings in a struct that is copied and
+  passed around freely. The broker now stores tokens through the token manager
+  and keeps only `Session.TokenID`; `RefreshSession` decrypts the refresh token
+  for the duration of the call, stores the rotated token and revokes the
+  pre-refresh entry. A structural test fails if any token-bearing field is added
+  back to `Session`.
+- **(#123)** Revoked and expired sessions now destroy their stored tokens
+  (`RevokeSessionTokens`). Previously the session was dropped while its tokens
+  stayed in the store until the tokens themselves expired — which can be well
+  after the session, and a refresh token outlives the access token it renews. A
+  refused cross-user revocation leaves the owner's tokens intact.
 - **High (#122): `pam_sm_acct_mgmt` rubber-stamped the account stack.** It
   returned `PAM_SUCCESS` while performing no account-phase authorization at all,
   and the shipped configs listed it as `account sufficient pam_oidc.so`. A
@@ -138,6 +154,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `-Wall -Wextra` on the cgo `CFLAGS` for `pkg/pam` and `cmd/pam-module`, and
   `(void)` markers on the genuinely unused PAM entry-point parameters so the C
   bridge compiles warning-free.
+
+### Changed
+- **(#123)** `Session.RefreshToken` is replaced by `Session.TokenID`, and
+  `TokenManager.StoreToken` now returns the ID it generated. Both are internal
+  Go APIs (`pkg/auth`), not wire or config surface.
+
+### Removed
+- **(#123)** `TokenManager.RefreshToken`, a stub that validated its arguments and
+  then returned `"token refresh not implemented"`. Refresh is done by
+  `Broker.RefreshSession` via the provider; the stub had no callers and only
+  suggested a capability that did not exist.
 
 ### Fixed
 - **(#118)** `oidc-pam-helper -version` now prints the build date and git commit
