@@ -325,12 +325,31 @@ func (s *Server) handleConnection(conn net.Conn) {
 	log.Debug().
 		Str("request_type", request.Type).
 		Str("user_id", request.UserID).
-		Bool("success", response.Success).
+		Bool("success", responseSucceeded(response)).
 		Msg("IPC request handled")
 }
 
-// handleRequest handles different types of requests
-func (s *Server) handleRequest(request *Request) *Response {
+// responseSucceeded reports whether a handler's response carries a result rather
+// than a failure, so the connection handler can log the outcome without knowing
+// which shape it is sending.
+func responseSucceeded(response any) bool {
+	switch r := response.(type) {
+	case *Response:
+		return r.Success
+	case interface{ Err() error }: // the adminapi responses
+		return r.Err() == nil
+	default:
+		return true
+	}
+}
+
+// handleRequest handles different types of requests.
+//
+// It returns `any` rather than *Response because the administrative requests
+// (`status`, `sessions_list`, `keys_list`) answer with their own shapes, defined
+// in internal/adminapi: a session listing does not fit into the fields of an
+// authentication response.
+func (s *Server) handleRequest(request *Request) any {
 	switch request.Type {
 	case "authenticate":
 		if !s.rateLimiter.AcquireAuth() {
@@ -349,6 +368,12 @@ func (s *Server) handleRequest(request *Request) *Response {
 		return s.handleRefreshSession(request)
 	case "revoke_session":
 		return s.handleRevokeSession(request)
+	case "status":
+		return s.handleStatus()
+	case "sessions_list":
+		return s.handleSessionsList()
+	case "keys_list":
+		return s.handleKeysList()
 	default:
 		log.Warn().
 			Str("request_type", request.Type).

@@ -826,8 +826,9 @@ journalctl -u oidc-auth-broker --since "1 week ago" | grep -i error
 # Check disk usage
 du -sh /var/log/oidc-auth/
 
-# Test authentication
-./test-broker
+# Check what the broker itself thinks
+sudo oidc-admin status
+sudo oidc-admin sessions
 ```
 
 #### Monthly Tasks
@@ -873,6 +874,50 @@ LimitNOFILE=65536
 LimitNPROC=4096
 LimitMEMLOCK=64M
 ```
+
+## Administrative CLI (`oidc-admin`)
+
+`oidc-admin` asks the running broker about its own state over the same Unix
+socket the PAM module uses. **Every command that talks to the broker must be run
+as root** (`sudo`): the socket accepts connections only from uid 0, so an
+unprivileged invocation is refused by the broker, not by the CLI.
+
+```bash
+# Is the broker running, and since when?
+sudo oidc-admin status
+
+# Detailed local checks: socket, config file, providers
+sudo oidc-admin health
+
+# Who is logged in, and which device flows are still pending?
+sudo oidc-admin sessions
+
+# Which broker-managed SSH keys exist, how strong are they, when do they expire?
+sudo oidc-admin keys
+
+# Generate a token_encryption_key (does not talk to the broker)
+oidc-admin gen-key
+```
+
+If the broker listens somewhere other than the default
+`/var/run/oidc-auth/broker.sock`, point the CLI at it with
+`OIDC_SOCKET_PATH=/path/to/broker.sock`.
+
+`sessions` lists pending device flows as well as authenticated sessions:
+
+| Status | Meaning |
+|---|---|
+| `pending` | The device flow has started; the user has not completed it. Grants nothing. |
+| `active` | Authenticated. Identity binding and `require_groups` have passed. |
+| `expired` | Past its lifetime but not yet removed by the 5-minute cleanup sweep. Not usable. |
+
+A login that appears to hang is usually a `pending` row here — that tells you the
+request reached the broker and is waiting on the user, rather than failing before
+it got that far.
+
+Nothing in this output is a credential: sessions are listed without their tokens
+(which live encrypted in the broker's token store) and keys are listed without
+their key material.
 
 ## Troubleshooting
 

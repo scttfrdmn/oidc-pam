@@ -35,7 +35,7 @@ func TestServerHandleRequestTypes(t *testing.T) {
 		UserID: "test-user",
 	}
 
-	response := server.handleRequest(invalidRequest)
+	response := authResponse(t, server.handleRequest(invalidRequest))
 	if response.Success {
 		t.Error("Expected invalid request type to fail")
 	}

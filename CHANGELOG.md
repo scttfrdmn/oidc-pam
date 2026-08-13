@@ -132,6 +132,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#124)** `oidc-admin status`, `health`, `sessions` and `keys` work. The broker
+  now implements the `status`, `sessions_list` and `keys_list` IPC requests the
+  CLI has always sent, backed by `Broker.Status()`, `Broker.ListSessions()` and
+  `Broker.ListKeys()`. `status` reports the broker's version, start time, uptime,
+  configured providers and session counts; `sessions` lists user, provider, login
+  type, creation time and status, including **pending** device flows the user has
+  not completed (a login that looks like it is hanging shows up here, which is
+  usually the question being asked); `keys` lists each managed key's algorithm,
+  size in bits, status and expiry. Listings carry no credentials — no tokens, no
+  token IDs, no key material — and are sorted (sessions newest first, keys by
+  username) so repeated runs are diffable. All of them require root, since the
+  broker socket accepts uid 0 only; DEPLOYMENT.md documents the commands and the
+  `sudo` requirement.
+- **(#124)** `Session.LoginType`: the broker applied per-login-type policy without
+  recording which login type a session was opened for.
 - **(#121)** `oidc-pam-helper -timeout` now bounds the device-flow wait rather
   than only arming a watchdog (default 90 s, matching the PAM module's
   `timeout=`); the outer watchdog fires 10 s later so an authentication that runs
@@ -156,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge compiles warning-free.
 
 ### Changed
+- **(#124)** `Server.handleRequest` returns `any`, since the admin requests answer
+  with their own shapes rather than squeezing a session listing into the fields of
+  an authentication response. `internal/adminapi` and `cmd/oidc-admin` are covered
+  by CI's vet, test and lint runs.
 - **(#123)** `Session.RefreshToken` is replaced by `Session.TokenID`, and
   `TokenManager.StoreToken` now returns the ID it generated. Both are internal
   Go APIs (`pkg/auth`), not wire or config surface.
@@ -167,6 +186,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#124) Every `oidc-admin` command that talks to the broker was silently
+  broken.** The CLI sent `status`, `sessions_list` and `keys_list`; the broker
+  implemented none of them, so each request fell through to
+  `INVALID_REQUEST_TYPE`. The client decoded that error object into its own
+  response struct — which shares no fields with it — and printed the resulting
+  zero value: `status` reported a **running broker with an empty version and no
+  uptime**, and `sessions`/`keys` reported "none". The request and response types
+  now live in one place (`internal/adminapi`) instead of being declared once on
+  each side, every admin response can carry an error the client checks, and a
+  round-trip test fails if the two sides drift again.
+- **(#124)** `oidc-admin` no longer opens a throwaway connection to decide
+  whether the broker is running. It sends the real request: a broker that accepts
+  connections but cannot answer them was previously reported as healthy. Requests
+  are bounded by a 10-second deadline, so a broker that accepts and then goes
+  quiet no longer hangs the CLI indefinitely.
 - **(#118)** `oidc-pam-helper -version` now prints the build date and git commit
   (the `buildDate`/`gitCommit` ldflags targets were set by the Makefile but never
   read, which is what surfaced them as `unused` once linting covered the package).

@@ -89,6 +89,14 @@ func validateRequest(req *Request) error {
 		}
 		return validateUserID(req.UserID)
 
+	case "status", "sessions_list", "keys_list":
+		// Administrative reads. They take no parameters, so there is nothing to
+		// validate: any user_id, session_id or metadata a client sends is
+		// ignored by the handlers rather than rejected, since rejecting it would
+		// break clients that fill in a common request struct. Authorization is
+		// the socket's uid-0 peer check, not a field in the request.
+		return nil
+
 	default:
 		// Unknown types are handled by handleRequest; no validation needed here.
 		return nil

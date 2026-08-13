@@ -33,6 +33,8 @@ type Broker struct {
 	wg                    sync.WaitGroup
 	metrics               *oidcmetrics.Metrics // nil when metrics are disabled
 	pendingFlows          int64                // atomic counter of in-progress device authorization goroutines
+	version               string               // build version, set via SetVersion; reported by Status
+	startedAt             time.Time            // when Start ran; zero until then. Reported by Status
 }
 
 // SetMetrics attaches a Metrics instance to the broker and its policy engine.
@@ -44,11 +46,15 @@ func (b *Broker) SetMetrics(m *oidcmetrics.Metrics) {
 
 // Session represents an active authentication session
 type Session struct {
-	ID               string
-	UserID           string
-	Email            string
-	Groups           []string
-	Provider         string
+	ID       string
+	UserID   string
+	Email    string
+	Groups   []string
+	Provider string
+	// LoginType is the kind of login this session was opened for ("ssh",
+	// "console", "gui"), as classified by the PAM client. The broker applies
+	// per-login-type policy on it, and `oidc-admin sessions` reports it.
+	LoginType        string
 	DeviceID         string
 	CreatedAt        time.Time
 	ExpiresAt        time.Time
@@ -199,6 +205,8 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 // Start starts the broker services
 func (b *Broker) Start(ctx context.Context) error {
 	log.Info().Msg("Starting authentication broker services")
+
+	b.startedAt = time.Now()
 
 	// Start token manager
 	if err := b.tokenManager.Start(ctx); err != nil {
@@ -366,6 +374,7 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		ID:               sessionID,
 		UserID:           req.UserID,
 		Provider:         provider.Name,
+		LoginType:        req.LoginType,
 		DeviceID:         req.DeviceID,
 		CreatedAt:        time.Now(),
 		ExpiresAt:        time.Now().Add(b.config.Authentication.TokenLifetime),
