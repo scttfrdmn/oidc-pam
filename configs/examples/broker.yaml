@@ -33,9 +33,14 @@ oidc:
         enable_data_use_agreements: false
         
       # Provider settings
+      # priority orders providers when more than one can serve a login: 1 is the
+      # most preferred, and a provider that omits it sorts last. Ties are broken
+      # by name. See CONFIGURATION-GUIDE.md, "Multiple Providers and priority".
       priority: 1
       user_type: "corporate"
       enabled_for_login: true
+      # verification_only: this provider may confirm an identity but must never
+      # be the one a login is issued against.
       verification_only: false
 
     # Example: Azure AD configuration  
@@ -50,6 +55,8 @@ oidc:
         name_claim: "name"
         groups_claim: "groups"
         
+      # Lower preference than okta-corporate above: configured, but not selected
+      # while a priority-1 provider is present.
       priority: 2
       user_type: "corporate"
       enabled_for_login: true

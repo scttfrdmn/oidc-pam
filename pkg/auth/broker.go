@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -328,7 +330,7 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	}
 
 	// Select appropriate provider
-	provider := b.selectProvider(req, policyResult)
+	provider := b.selectProvider()
 	if provider == nil {
 		return &AuthResponse{
 			Success:      false,
@@ -732,16 +734,64 @@ func (b *Broker) createSuccessResponse(session *Session) *AuthResponse {
 	}
 }
 
-func (b *Broker) selectProvider(req *AuthRequest, policyResult *PolicyResult) *OIDCProvider {
-	// For now, select the first available provider
-	// In a full implementation, this would consider provider priority,
-	// user preferences, policy requirements, etc.
+// selectProvider returns the provider a new login should be sent to, or nil if
+// the configuration has none that can serve one.
+//
+// It takes no request or policy argument on purpose: nothing about the request
+// influences the choice today. The previous signature accepted both and read
+// neither, which is how it went unnoticed that the body ranged over a map — so
+// with more than one login-enabled provider, consecutive logins on the same host
+// could be sent to different identity providers at random, and `priority` was
+// parsed from the config and never read. Reinstate the parameters along with the
+// logic that actually needs them.
+func (b *Broker) selectProvider() *OIDCProvider {
+	candidates := b.loginProviders()
+	if len(candidates) == 0 {
+		return nil
+	}
+	return candidates[0]
+}
+
+// loginProviders returns every provider eligible to serve a login, in
+// precedence order: by `priority` ascending, then by name.
+//
+// Priority 1 is the most preferred, matching the shipped configurations, where
+// the primary provider is `priority: 1` and the failover provider is
+// `priority: 2`. A provider that does not set `priority` at all sorts *after*
+// every provider that does, so omitting the field cannot outrank an explicit
+// declaration.
+func (b *Broker) loginProviders() []*OIDCProvider {
+	candidates := make([]*OIDCProvider, 0, len(b.providers))
 	for _, provider := range b.providers {
-		if provider.Config.EnabledForLogin {
-			return provider
+		// verification_only means the provider may confirm an identity but must
+		// not be the one a login is issued against, so it is not a candidate
+		// even if enabled_for_login is also set. The two together are
+		// contradictory config; this resolves it the safe way.
+		if provider.Config.EnabledForLogin && !provider.Config.VerificationOnly {
+			candidates = append(candidates, provider)
 		}
 	}
-	return nil
+
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := providerPriority(candidates[i]), providerPriority(candidates[j])
+		if left != right {
+			return left < right
+		}
+		// Ties broken by name so that the order is stable across restarts and
+		// independent of Go's map iteration order.
+		return candidates[i].Name < candidates[j].Name
+	})
+
+	return candidates
+}
+
+// providerPriority maps a provider's configured priority onto its sort key,
+// translating "unset" (0, and any nonsensical negative value) to "last".
+func providerPriority(provider *OIDCProvider) int {
+	if provider.Config.Priority <= 0 {
+		return math.MaxInt
+	}
+	return provider.Config.Priority
 }
 
 func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow) {
