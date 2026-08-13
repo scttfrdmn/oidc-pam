@@ -171,6 +171,38 @@ int send_auth_request(int sock, const char *username, const char *service, const
     return 0;
 }
 
+// Send a session-status request to the broker.
+//
+// user_id is required as well as session_id: Broker.CheckSession rejects a
+// session whose owner does not match the requesting user with FORBIDDEN, so
+// omitting it would make every poll fail.
+int send_check_session_request(int sock, const char *session_id, const char *username) {
+    json_object *request = json_object_new_object();
+
+    json_object_object_add(request, "type", json_object_new_string("check_session"));
+    json_object_object_add(request, "session_id", json_object_new_string(session_id));
+    json_object_object_add(request, "user_id", json_object_new_string(username));
+
+    const char *request_str = json_object_to_json_string(request);
+    size_t request_len = strlen(request_str);
+
+    log_pam_message(LOG_DEBUG, "Sending session check request: %s", request_str);
+
+    ssize_t total_sent = 0;
+    while (total_sent < (ssize_t)request_len) {
+        ssize_t sent = send(sock, request_str + total_sent, request_len - total_sent, 0);
+        if (sent == -1) {
+            log_pam_message(LOG_ERR, "Failed to send session check request: %s", strerror(errno));
+            json_object_put(request);
+            return -1;
+        }
+        total_sent += sent;
+    }
+
+    json_object_put(request);
+    return 0;
+}
+
 // Receive authentication response from broker.
 //
 // The broker writes a single newline-delimited JSON object (json.Encoder.Encode
@@ -317,10 +349,15 @@ int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t r
 // therefore trusted, unlike oidc-pam-helper's argv, which may come from an
 // unprivileged caller (see L-6). Recognized arguments:
 //
-//   debug          Log at LOG_DEBUG to syslog.
-//   socket=<path>  Absolute path to the broker's Unix socket. Defaults to
-//                  SOCKET_PATH, which matches the broker's own default for
-//                  server.socket_path.
+//   debug             Log at LOG_DEBUG to syslog.
+//   socket=<path>     Absolute path to the broker's Unix socket. Defaults to
+//                     SOCKET_PATH, which matches the broker's own default for
+//                     server.socket_path.
+//   timeout=<seconds> How long to wait for the user to complete the device
+//                     authorization flow. Clamped to
+//                     [MIN_AUTH_TIMEOUT, MAX_AUTH_TIMEOUT]; this is the only
+//                     place that bound is applied, so perform_authentication
+//                     can be driven with a short budget from tests.
 //
 // Anything else is ignored with a warning, so a typo or a stale argument shows
 // up in the log instead of silently doing nothing.
@@ -331,6 +368,7 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     // argc is 0 or an argument is rejected below.
     memset(opts, 0, sizeof(*opts));
     memcpy(opts->socket_path, SOCKET_PATH, sizeof(SOCKET_PATH));
+    opts->timeout_s = DEFAULT_AUTH_TIMEOUT;
 
     for (i = 0; i < argc; i++) {
         if (strcmp(argv[i], "debug") == 0) {
@@ -350,6 +388,23 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
                 memcpy(opts->socket_path, path, len + 1);
                 log_pam_message(LOG_DEBUG, "Using broker socket: %s", opts->socket_path);
             }
+        } else if (strncmp(argv[i], "timeout=", 8) == 0) {
+            const char *value = argv[i] + 8;
+            char *end = NULL;
+            long seconds;
+
+            errno = 0;
+            seconds = strtol(value, &end, 10);
+            if (errno != 0 || end == value || *end != '\0') {
+                log_pam_message(LOG_ERR, "Ignoring timeout= argument: '%s' is not a number; using %d",
+                                value, opts->timeout_s);
+            } else if (seconds < MIN_AUTH_TIMEOUT || seconds > MAX_AUTH_TIMEOUT) {
+                log_pam_message(LOG_ERR, "Ignoring timeout=%ld: outside [%d, %d]; using %d",
+                                seconds, MIN_AUTH_TIMEOUT, MAX_AUTH_TIMEOUT, opts->timeout_s);
+            } else {
+                opts->timeout_s = (int)seconds;
+                log_pam_message(LOG_DEBUG, "Device authorization timeout: %d seconds", opts->timeout_s);
+            }
         } else if (strncmp(argv[i], "config=", 7) == 0) {
             // Accepted for compatibility with configs shipped before v0.4.3.
             // This module reads no configuration file of its own; everything
@@ -361,24 +416,306 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     }
 }
 
+// Sentinel returned by classify_response for a device flow that has been started
+// but not yet completed. Every PAM_* return code is non-negative, so a negative
+// value cannot collide with one.
+#define BROKER_PENDING (-1)
+
+// Read a string field, or NULL if it is absent or JSON null. The result points
+// into obj and is only valid while obj is alive.
+static const char *json_get_string(json_object *obj, const char *key) {
+    json_object *field = NULL;
+
+    if (!json_object_object_get_ex(obj, key, &field) || field == NULL) {
+        return NULL;
+    }
+    return json_object_get_string(field);
+}
+
+// Read a boolean field, or fallback if it is absent.
+static int json_get_bool(json_object *obj, const char *key, int fallback) {
+    json_object *field = NULL;
+
+    if (!json_object_object_get_ex(obj, key, &field) || field == NULL) {
+        return fallback;
+    }
+    return json_object_get_boolean(field);
+}
+
+// Read the poll interval the broker asked for, clamped into a sane range. An
+// absent, non-numeric or out-of-range value falls back to DEFAULT_POLL_INTERVAL
+// rather than being trusted.
+static int response_poll_interval(json_object *obj) {
+    json_object *metadata = NULL, *field = NULL;
+    int interval;
+
+    if (!json_object_object_get_ex(obj, "metadata", &metadata) || metadata == NULL) {
+        return DEFAULT_POLL_INTERVAL;
+    }
+    if (!json_object_object_get_ex(metadata, "polling_interval", &field) || field == NULL) {
+        return DEFAULT_POLL_INTERVAL;
+    }
+
+    interval = json_object_get_int(field);
+    if (interval < MIN_POLL_INTERVAL) {
+        return MIN_POLL_INTERVAL;
+    }
+    if (interval > MAX_POLL_INTERVAL) {
+        return MAX_POLL_INTERVAL;
+    }
+    return interval;
+}
+
+// Map a broker error_code onto a PAM result. This mirrors errorCodeToPAMResult
+// in pam.go; keep the two in step.
+//
+// SESSION_NOT_FOUND, SESSION_EXPIRED and FORBIDDEN are denials, not transient
+// failures: the broker deletes the session when identity binding fails, when
+// require_groups rejects the user, when device-flow polling fails, and when the
+// session expires, so a poll that can no longer find its session means the
+// authentication was refused.
+static int map_error_code(const char *error_code) {
+    if (error_code == NULL) {
+        return PAM_AUTH_ERR;
+    }
+    if (strcmp(error_code, "RATE_LIMIT_EXCEEDED") == 0 ||
+        strcmp(error_code, "RATE_LIMITED") == 0 ||
+        strcmp(error_code, "TOO_MANY_CONCURRENT_AUTHS") == 0) {
+        return PAM_MAXTRIES;
+    }
+    if (strcmp(error_code, "TOO_MANY_SESSIONS") == 0 ||
+        strcmp(error_code, "POLICY_DENIED") == 0 ||
+        strcmp(error_code, "NO_PROVIDER") == 0) {
+        return PAM_PERM_DENIED;
+    }
+    return PAM_AUTH_ERR;
+}
+
+// Decide what a broker response means: a PAM result code, or BROKER_PENDING if
+// the device flow is still in progress.
+static int classify_response(json_object *obj) {
+    json_object *success_obj = NULL;
+
+    // A response we cannot interpret is not a grant.
+    if (!json_object_object_get_ex(obj, "success", &success_obj)) {
+        log_pam_message(LOG_ERR, "Broker response has no success field");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    if (!json_object_get_boolean(success_obj)) {
+        const char *code = json_get_string(obj, "error_code");
+        const char *message = json_get_string(obj, "error_message");
+
+        log_pam_message(LOG_INFO, "Broker refused authentication (error_code=%s): %s",
+                        code != NULL ? code : "(none)",
+                        message != NULL ? message : "(no message)");
+        return map_error_code(code);
+    }
+
+    // success=true is not on its own a grant. The broker sets it *together with*
+    // requires_device=true when it has merely started the device flow: the user
+    // has not visited the device URL yet, and identity binding and
+    // require_groups are still checked afterwards, in a background goroutine.
+    // requires_device must therefore be tested before success is honored, or
+    // `auth sufficient pam_oidc.so` short-circuits the auth stack and grants
+    // login to anyone who can reach the broker.
+    if (json_get_bool(obj, "requires_device", 0)) {
+        return BROKER_PENDING;
+    }
+
+    return PAM_SUCCESS;
+}
+
+// Show a message to the user, tolerating a NULL handle so the authentication
+// flow can be driven from tests without a PAM conversation.
+static void show_message(pam_handle_t *pamh, const char *message) {
+    if (pamh == NULL || message == NULL || message[0] == '\0') {
+        return;
+    }
+    display_message(pamh, message);
+}
+
+// Seconds on a monotonic clock, so a wall-clock adjustment mid-login cannot
+// extend or collapse the authentication budget.
+static long monotonic_seconds(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        // Should not happen; degrade to the realtime clock rather than spinning.
+        return (long)time(NULL);
+    }
+    return (long)ts.tv_sec;
+}
+
+static void sleep_seconds(long seconds) {
+    struct timespec remaining;
+
+    if (seconds <= 0) {
+        return;
+    }
+    remaining.tv_sec = (time_t)seconds;
+    remaining.tv_nsec = 0;
+
+    while (nanosleep(&remaining, &remaining) == -1 && errno == EINTR) {
+        // Interrupted by a signal; finish the remaining time.
+    }
+}
+
+// The broker serves exactly one request per connection and then closes it, so
+// every attempt — the initial authenticate and each poll — needs its own
+// connection.
+static int broker_recv_and_close(int sock, char *response, size_t response_size) {
+    int rc = receive_auth_response(sock, response, response_size);
+    close(sock);
+    return rc;
+}
+
+static int broker_authenticate_once(const char *socket_path, const char *username, const char *service,
+                                    const char *rhost, const char *tty,
+                                    char *response, size_t response_size) {
+    int sock = connect_to_broker(socket_path);
+    if (sock == -1) {
+        log_pam_message(LOG_ERR, "Failed to connect to authentication broker");
+        return -1;
+    }
+    if (send_auth_request(sock, username, service, rhost, tty) != 0) {
+        close(sock);
+        return -1;
+    }
+    return broker_recv_and_close(sock, response, response_size);
+}
+
+static int broker_check_session_once(const char *socket_path, const char *session_id, const char *username,
+                                     char *response, size_t response_size) {
+    int sock = connect_to_broker(socket_path);
+    if (sock == -1) {
+        log_pam_message(LOG_ERR, "Failed to reconnect to authentication broker while polling");
+        return -1;
+    }
+    if (send_check_session_request(sock, session_id, username) != 0) {
+        close(sock);
+        return -1;
+    }
+    return broker_recv_and_close(sock, response, response_size);
+}
+
+// Run one full authentication against the broker and return a PAM result code.
+//
+// This is the whole of the auth phase, factored out of pam_sm_authenticate so it
+// can be exercised against a fake broker from Go tests. pamh may be NULL, in
+// which case no messages are shown to the user.
+//
+// timeout_s bounds the wait for the user to complete the device flow. It is
+// clamped to [MIN_AUTH_TIMEOUT, MAX_AUTH_TIMEOUT] by parse_arguments, which is
+// how pam_sm_authenticate always obtains it; a non-positive value here means
+// "poll once, then give up".
+//
+// Only a transport or parse failure returns PAM_AUTHINFO_UNAVAIL ("I could not
+// reach an opinion"). Everything else — a refusal, a vanished session, an
+// exhausted budget — is a denial, so the auth stack fails closed.
+int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
+                           const char *service, const char *rhost, const char *tty, int timeout_s) {
+    char response[MAX_BUFFER_SIZE];
+    char session_id[MAX_SESSION_ID_SIZE];
+    json_object *response_obj;
+    const char *session;
+    int poll_interval;
+    long deadline;
+    int result;
+
+    if (broker_authenticate_once(socket_path, username, service, rhost, tty,
+                                 response, sizeof(response)) != 0) {
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    response_obj = json_tokener_parse(response);
+    if (response_obj == NULL) {
+        log_pam_message(LOG_ERR, "Failed to parse broker response");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    result = classify_response(response_obj);
+    if (result != BROKER_PENDING) {
+        if (result == PAM_SUCCESS) {
+            log_pam_message(LOG_INFO, "Authentication successful for user: %s", username);
+        }
+        json_object_put(response_obj);
+        return result;
+    }
+
+    // Device authorization started. Remember the session so we can poll it, then
+    // tell the user where to go.
+    session = json_get_string(response_obj, "session_id");
+    if (session == NULL || session[0] == '\0') {
+        log_pam_message(LOG_ERR, "Broker requires device authorization but returned no session_id");
+        json_object_put(response_obj);
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+    if (strlen(session) >= sizeof(session_id)) {
+        log_pam_message(LOG_ERR, "Broker returned an over-long session_id (%zu bytes)", strlen(session));
+        json_object_put(response_obj);
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+    memcpy(session_id, session, strlen(session) + 1);
+
+    poll_interval = response_poll_interval(response_obj);
+    show_message(pamh, json_get_string(response_obj, "instructions"));
+    json_object_put(response_obj);
+
+    log_pam_message(LOG_INFO, "Waiting up to %ds for device authorization by user %s (session %s)",
+                    timeout_s, username, session_id);
+
+    deadline = monotonic_seconds() + (timeout_s > 0 ? timeout_s : 0);
+
+    for (;;) {
+        long now = monotonic_seconds();
+        long remaining = deadline - now;
+
+        // Wait before polling: the broker has only just handed out the device
+        // code, so an immediate poll can only ever report "pending".
+        sleep_seconds(remaining < poll_interval ? remaining : poll_interval);
+
+        if (broker_check_session_once(socket_path, session_id, username,
+                                      response, sizeof(response)) != 0) {
+            return PAM_AUTHINFO_UNAVAIL;
+        }
+
+        response_obj = json_tokener_parse(response);
+        if (response_obj == NULL) {
+            log_pam_message(LOG_ERR, "Failed to parse broker session-check response");
+            return PAM_AUTHINFO_UNAVAIL;
+        }
+
+        result = classify_response(response_obj);
+        json_object_put(response_obj);
+
+        if (result != BROKER_PENDING) {
+            if (result == PAM_SUCCESS) {
+                log_pam_message(LOG_INFO, "Device authorization completed for user: %s", username);
+            }
+            return result;
+        }
+
+        if (monotonic_seconds() >= deadline) {
+            log_pam_message(LOG_NOTICE, "Device authorization not completed within %ds for user %s; denying",
+                            timeout_s, username);
+            return PAM_AUTH_ERR;
+        }
+    }
+}
+
 // PAM authentication function
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
     const char *username, *service, *rhost, *tty;
-    char response[MAX_BUFFER_SIZE];
-    int sock, retval;
-    json_object *response_obj, *success_obj, *instructions_obj, *requires_device_obj;
-    const char *instructions;
-    int success, requires_device;
+    pam_oidc_options opts;
+    int retval;
 
     (void)flags; // PAM_SILENT / PAM_DISALLOW_NULL_AUTHTOK are not honored
 
     log_pam_message(LOG_INFO, "OIDC PAM authentication started (version %s)", PAM_MODULE_VERSION);
-    
-    // Parse module arguments
-    pam_oidc_options opts;
+
     parse_arguments(argc, argv, &opts);
 
-    // Get user information
     retval = get_user_info(pamh, &username, &service, &rhost, &tty);
     if (retval != PAM_SUCCESS) {
         return retval;
@@ -386,74 +723,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     log_pam_message(LOG_INFO, "Authenticating user: %s", username);
 
-    // Connect to broker
-    sock = connect_to_broker(opts.socket_path);
-    if (sock == -1) {
-        log_pam_message(LOG_ERR, "Failed to connect to authentication broker");
-        return PAM_AUTHINFO_UNAVAIL;
+    retval = perform_authentication(pamh, opts.socket_path, username, service, rhost, tty, opts.timeout_s);
+    if (retval != PAM_SUCCESS) {
+        log_pam_message(LOG_INFO, "Authentication failed for user: %s (pam result %d)", username, retval);
     }
-    
-    // Send authentication request
-    if (send_auth_request(sock, username, service, rhost, tty) != 0) {
-        close(sock);
-        return PAM_AUTHINFO_UNAVAIL;
-    }
-    
-    // Receive response
-    if (receive_auth_response(sock, response, sizeof(response)) != 0) {
-        close(sock);
-        return PAM_AUTHINFO_UNAVAIL;
-    }
-    
-    close(sock);
-    
-    // Parse JSON response
-    response_obj = json_tokener_parse(response);
-    if (!response_obj) {
-        log_pam_message(LOG_ERR, "Failed to parse JSON response");
-        return PAM_AUTHINFO_UNAVAIL;
-    }
-    
-    // Check if authentication was successful
-    if (!json_object_object_get_ex(response_obj, "success", &success_obj)) {
-        log_pam_message(LOG_ERR, "No success field in response");
-        json_object_put(response_obj);
-        return PAM_AUTHINFO_UNAVAIL;
-    }
-    
-    success = json_object_get_boolean(success_obj);
-    
-    if (success) {
-        log_pam_message(LOG_INFO, "Authentication successful for user: %s", username);
-        json_object_put(response_obj);
-        return PAM_SUCCESS;
-    }
-    
-    // Check if device authentication is required
-    if (json_object_object_get_ex(response_obj, "requires_device", &requires_device_obj)) {
-        requires_device = json_object_get_boolean(requires_device_obj);
-        
-        if (requires_device) {
-            // Display instructions to user
-            if (json_object_object_get_ex(response_obj, "instructions", &instructions_obj)) {
-                instructions = json_object_get_string(instructions_obj);
-                if (instructions != NULL) {
-                    display_message(pamh, instructions);
-                }
-                
-                // For device flow, we need to poll for completion
-                // This is a simplified implementation - in practice, we'd need
-                // to implement proper polling with timeouts
-                log_pam_message(LOG_INFO, "Device authentication required for user: %s", username);
-                json_object_put(response_obj);
-                return PAM_AUTHINFO_UNAVAIL; // For now, require manual retry
-            }
-        }
-    }
-    
-    log_pam_message(LOG_INFO, "Authentication failed for user: %s", username);
-    json_object_put(response_obj);
-    return PAM_AUTH_ERR;
+    return retval;
 }
 
 // PAM credential setting function

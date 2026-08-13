@@ -332,7 +332,7 @@ func TestPAMAuthFailureError(t *testing.T) {
 // TestPAMAuthFailureCodesAreDistinct checks that the PAM result code constants
 // are not accidentally aliased.
 func TestPAMAuthFailureCodesAreDistinct(t *testing.T) {
-	codes := []PAMResultCode{PAMSuccess, PAMSystemError, PAMPermDenied, PAMAuthError, PAMMaxTries}
+	codes := []PAMResultCode{PAMSuccess, PAMSystemError, PAMPermDenied, PAMAuthError, PAMAuthInfoUnavail, PAMMaxTries}
 	seen := make(map[PAMResultCode]bool)
 	for _, c := range codes {
 		if seen[c] {

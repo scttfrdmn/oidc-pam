@@ -13,16 +13,23 @@ import (
 	"unsafe"
 )
 
-// PAMResultCode mirrors the PAM result code constants from
-// /usr/include/security/_pam_types.h.
+// PAMResultCode is a PAM result code.
+//
+// The values are taken from the PAM headers the module is compiled against
+// rather than being copied by hand: they are not portable between
+// implementations (Linux-PAM and OpenPAM disagree on almost everything past
+// PAM_BUF_ERR), and a hand-copied value that libpam does not recognize turns a
+// deliberate denial into an unknown error. PAMMaxTries was 24 before this was
+// derived, which is not a Linux-PAM code at all.
 type PAMResultCode int
 
 const (
-	PAMSuccess     PAMResultCode = 0  // PAM_SUCCESS
-	PAMSystemError PAMResultCode = 4  // PAM_SYSTEM_ERR
-	PAMPermDenied  PAMResultCode = 6  // PAM_PERM_DENIED
-	PAMAuthError   PAMResultCode = 7  // PAM_AUTH_ERR
-	PAMMaxTries    PAMResultCode = 24 // PAM_MAXTRIES
+	PAMSuccess         PAMResultCode = C.PAM_SUCCESS
+	PAMSystemError     PAMResultCode = C.PAM_SYSTEM_ERR
+	PAMPermDenied      PAMResultCode = C.PAM_PERM_DENIED
+	PAMAuthError       PAMResultCode = C.PAM_AUTH_ERR
+	PAMAuthInfoUnavail PAMResultCode = C.PAM_AUTHINFO_UNAVAIL
+	PAMMaxTries        PAMResultCode = C.PAM_MAXTRIES
 )
 
 // PAMAuthFailure is returned by AuthenticateUser when the broker reports a

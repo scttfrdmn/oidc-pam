@@ -77,7 +77,17 @@ func validateRequest(req *Request) error {
 		if req.SessionID == "" {
 			return fmt.Errorf("session_id is required for %s requests", req.Type)
 		}
-		return validateSessionID(req.SessionID)
+		if err := validateSessionID(req.SessionID); err != nil {
+			return err
+		}
+		// user_id is what the broker compares against the session owner to
+		// reject cross-user session access, so it is required rather than
+		// optional: an absent user_id would otherwise be checked against the
+		// owner as the empty string.
+		if req.UserID == "" {
+			return fmt.Errorf("user_id is required for %s requests", req.Type)
+		}
+		return validateUserID(req.UserID)
 
 	default:
 		// Unknown types are handled by handleRequest; no validation needed here.
