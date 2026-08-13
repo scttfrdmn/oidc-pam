@@ -93,45 +93,63 @@ make lint
 sudo make install-dev
 ```
 
-### Verifying the PAM/cgo packages
+### Working on the PAM module
 
-`pkg/pam`, `cmd/pam-module` and `cmd/pam-helper` are cgo packages that need
-`<security/pam_ext.h>` and `<json-c/json.h>`, so they cannot be built on macOS —
-`go build ./...` fails there with `'security/pam_ext.h' file not found`. Run the
-same vet/test/lint sweep CI runs inside a Linux container instead:
+`cmd/pam-module` is the only cgo package. It holds the C bridge
+(`cgo_bridge_linux.c`) that implements the six `pam_sm_*` entry points libpam
+calls, and it needs `<security/pam_ext.h>` and `<json-c/json.h>`, which macOS does
+not have. Its cgo is behind a `//go:build linux` tag, so `go build ./...` and
+`go test ./...` work on a Mac — the C and the tests that drive it are simply
+absent there. Everything else, `pkg/pam` included, is pure Go.
+
+**The C must stay in `cmd/pam-module`.** cgo compiles only the C sources in the
+directory of the package being built, so C living anywhere else is not compiled
+into the module — and because a header supplies valid declarations, the build
+still exits 0 and produces a `.so` with no entry points in it. That shipped in
+every release before this one (#140). `scripts/verify-pam-module.sh` checks the
+built artifact for exactly that, and runs from `make build-pam`,
+`make verify-linux` and the release workflow.
+
+To exercise the C locally, run the sweep CI runs inside a Linux container:
 
 ```bash
 make verify-linux
 ```
 
-This builds `test/docker/Dockerfile.verify` and runs `go vet ./...`,
-`go test -race ./pkg/... ./internal/...` and `golangci-lint run ./...` — which
-includes the PAM packages. CI covers them in the `PAM (cgo)` and `Lint` jobs.
+That builds `test/docker/Dockerfile.verify` and runs `go vet ./...`,
+`go test -race ./pkg/... ./internal/... ./cmd/...` and `golangci-lint run ./...`,
+then builds the module and verifies its entry points. CI covers the same ground in
+the `PAM (cgo)`, `Lint` and `Build` jobs. `make build-pam` refuses to run off
+Linux rather than emitting a module with no C in it.
 
 ### Project Structure
 
 ```
 oidc-pam/
-├── cmd/                    # Main applications
+├── cmd/                   # Main applications
 │   ├── broker/            # Authentication broker daemon
-│   ├── pam-helper/        # PAM helper binary
+│   ├── pam-module/        # pam_oidc.so — the C bridge and its cgo wrappers
+│   ├── pam-helper/        # PAM helper binary (pam_exec-style integrations)
 │   └── oidc-admin/        # Administrative CLI tool
 ├── pkg/                   # Library code
-│   ├── auth/             # Core authentication logic
-│   ├── config/           # Configuration management
-│   ├── display/          # User interface components
-│   ├── pam/              # PAM integration
-│   ├── security/         # Security utilities
-│   └── cloud/            # Cloud provider integrations
-├── internal/             # Private application code
-│   ├── ipc/             # Inter-process communication
-│   └── utils/           # Utility functions
-├── test/                 # Test files
-│   ├── integration/     # Integration tests
-│   └── unit/            # Unit tests
-├── docs/                 # Documentation
-├── scripts/             # Build and deployment scripts
-└── configs/             # Configuration examples
+│   ├── auth/              # Core authentication logic, providers, policy
+│   ├── config/            # Configuration management
+│   ├── metrics/           # Metrics collection
+│   ├── pam/               # PAM result codes and the module's Go-side helpers
+│   ├── security/          # Security utilities
+│   └── ssh/               # authorized_keys and SSH key management
+├── internal/              # Private application code
+│   ├── adminapi/          # Admin request/response shapes
+│   ├── brokerclient/      # Broker IPC client and device-flow completion
+│   └── ipc/               # Broker IPC server and request validation
+├── test/                  # Test support
+│   ├── config/            # Test configuration
+│   ├── docker/            # Dockerfile.verify (Linux toolchain for cgo)
+│   ├── integration/       # Integration tests
+│   └── keycloak/          # Keycloak realm for manual end-to-end runs
+├── docs/                  # Documentation (docs/design/ is unmaintained; see its index)
+├── scripts/               # Build, install and verification scripts
+└── configs/               # Configuration examples
 ```
 
 ## Coding Standards

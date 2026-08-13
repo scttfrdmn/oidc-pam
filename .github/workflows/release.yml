@@ -109,6 +109,12 @@ jobs:
             ./cmd/pam-module
           rm -f bin/pam_oidc.so-linux-${{ matrix.arch }}.h
 
+      # A c-shared build with no PAM entry points in it exits 0 (#140), so the
+      # artifact has to be inspected before it can be released. This step is what
+      # stops another release shipping a module PAM cannot use.
+      - name: Verify the PAM module is loadable
+        run: ./scripts/verify-pam-module.sh bin/pam_oidc.so-linux-${{ matrix.arch }}
+
       - name: Build PAM helper (CGO)
         env:
           GOOS: linux

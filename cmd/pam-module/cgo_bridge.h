@@ -57,7 +57,6 @@ typedef struct {
 // Function prototypes
 void parse_arguments(int argc, const char **argv, pam_oidc_options *opts);
 void log_pam_message(int priority, const char *format, ...);
-void log_pam_message_string(int priority, const char *message);
 int connect_to_broker(const char *socket_path);
 int get_user_info(pam_handle_t *pamh, const char **username, const char **service, const char **rhost, const char **tty);
 const char *classify_login_type(const char *service, const char *tty);

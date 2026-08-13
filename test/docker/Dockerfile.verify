@@ -1,10 +1,12 @@
 # Linux toolchain image for verifying the cgo/PAM packages.
 #
-# pkg/pam, cmd/pam-module and cmd/pam-helper need <security/pam_ext.h> and
-# <json-c/json.h>, which do not exist on macOS, so `go vet ./...` and
-# `go test ./...` cannot run on a developer's Mac. `make verify-linux` builds
-# this image and runs the full vet/test/lint sweep inside it, matching what the
-# `pam` and `lint` jobs in .github/workflows/ci.yml do.
+# cmd/pam-module needs <security/pam_ext.h> and <json-c/json.h>, which do not
+# exist on macOS. Its cgo is behind a //go:build linux tag so the rest of the tree
+# still builds and tests on a Mac (#141), which means the C bridge and the tests
+# that drive it are simply absent there. `make verify-linux` builds this image and
+# runs the full vet/test/lint sweep inside it, then builds the module and checks
+# it exports the PAM entry points — matching what the `pam`, `lint` and `build`
+# jobs in .github/workflows/ci.yml do.
 FROM golang:1.25
 
 ARG GOLANGCI_LINT_VERSION=v2.12.2

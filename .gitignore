@@ -74,8 +74,8 @@ coverage.html
 /deploy/production/
 
 # PAM module artifacts.
-# NOT *.h -- the cgo bridge headers (pkg/pam/cgo_bridge.h) are source files, and
-# ignoring them meant a new header would be silently skipped by `git add`.
+# NOT *.h -- the cgo bridge header (cmd/pam-module/cgo_bridge.h) is a source file,
+# and ignoring it meant a new header would be silently skipped by `git add`.
 *.o
 *.c.o
 
