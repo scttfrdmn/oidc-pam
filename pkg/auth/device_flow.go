@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,29 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 	"golang.org/x/oauth2"
+)
+
+// The two non-terminal responses the token endpoint gives while a device
+// authorization is still in progress (RFC 8628 §3.5). They are the *normal*
+// answer to any poll made before the user has finished with the browser, not
+// failures: the first poll happens a full polling interval after the code is
+// displayed, so the honest expectation is several pending answers and then a
+// grant. Callers match them with errors.Is; treating them as failures means no
+// device flow can ever complete, which is what #150 was.
+var (
+	ErrAuthorizationPending = errors.New("authorization_pending")
+	ErrSlowDown             = errors.New("slow_down")
+)
+
+// Polling interval bounds, in seconds. RFC 8628 §3.5 requires clients to wait at
+// least the interval the provider asks for, and to add slowDownIncrement to it on
+// each slow_down. The minimum also keeps time.NewTicker from panicking on a
+// provider-supplied 0, and the maximum bounds what a provider can make the broker
+// wait.
+const (
+	minPollingInterval = 5
+	maxPollingInterval = 3600
+	slowDownIncrement  = 5
 )
 
 // DeviceFlow represents an OAuth2 device authorization flow
@@ -300,13 +324,7 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		return nil, fmt.Errorf("provider returned invalid expires_in value: %d (must be 1–%d seconds)", deviceResp.ExpiresIn, maxDeviceCodeExpiry)
 	}
 
-	// RFC 8628 §3.5: clients MUST wait at least the interval seconds between polls.
-	// Clamp to [5, 3600]: prevents time.NewTicker panic on ≤0 and resource
-	// exhaustion from provider-supplied sub-second intervals.
-	const (
-		minPollingInterval = 5
-		maxPollingInterval = 3600
-	)
+	// Clamp the provider's interval to [minPollingInterval, maxPollingInterval].
 	if deviceResp.Interval < minPollingInterval {
 		deviceResp.Interval = minPollingInterval
 	} else if deviceResp.Interval > maxPollingInterval {
@@ -367,7 +385,7 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 
 	// Handle error responses
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("token error: %s", tokenResp.Error)
+		return nil, tokenEndpointError(tokenResp.Error)
 	}
 
 	// Check if we have a valid response
@@ -424,6 +442,21 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 		Msg("Device authorization completed")
 
 	return token, nil
+}
+
+// tokenEndpointError maps an OAuth error code from the token endpoint onto an
+// error value, wrapping the two non-terminal codes so a caller can recognise them
+// with errors.Is instead of comparing strings. The message keeps the
+// "token error: <code>" shape that the audit log and classifyPollError read.
+func tokenEndpointError(code string) error {
+	switch code {
+	case "authorization_pending":
+		return fmt.Errorf("token error: %w", ErrAuthorizationPending)
+	case "slow_down":
+		return fmt.Errorf("token error: %w", ErrSlowDown)
+	default:
+		return fmt.Errorf("token error: %s", code)
+	}
 }
 
 // GetUserInfo retrieves user information using the access token

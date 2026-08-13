@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Critical (#150): the broker abandoned every device flow on the first poll,
+  so no device login could ever complete.** RFC 8628 §3.5 makes
+  `authorization_pending` the *normal* answer to every poll before the user
+  finishes in the browser, but `PollDeviceAuthorization` returned it wrapped as
+  `"token error: authorization_pending"` while `pollDeviceAuthorization`
+  compared `err.Error()` against the bare `"authorization_pending"`. The
+  comparison never matched, so the pending answer fell through to the deny path:
+  audit `device_authorization_failed`, session deleted, goroutine gone —
+  typically about five seconds after the verification URL was displayed, leaving
+  the user with a code and a session that no longer existed. `slow_down` was
+  treated the same way, and the polling interval never grew as the RFC requires.
+  The two codes are now sentinel errors (`ErrAuthorizationPending`, `ErrSlowDown`)
+  wrapped with `%w` and matched with `errors.Is`, so the pending path continues
+  polling, `slow_down` adds 5 s to the interval and resets the ticker, and only
+  the device code's own expiry or a genuinely terminal code (`access_denied`,
+  `expired_token`, an invalid ID token) ends the flow. The audit message keeps
+  its `token error: <code>` shape.
+
+  The bug was invisible to unit tests on either side — the provider returned the
+  right code and the loop compared against a plausible string; what went untested
+  was the two halves agreeing. So the regression gate is an end-to-end one: see
+  **Added** below.
+
+### Added
+- `internal/testoidc`, an in-process OpenID Connect issuer for tests: discovery,
+  JWKS, RS256-signed ID tokens (real signatures, real `aud`/`iss`/`exp`/`nonce`,
+  so go-oidc's verifier is exercised rather than bypassed), the device
+  authorization endpoint and userinfo. Its point is `Script(...)`, which sets the
+  *sequence* of token-endpoint answers — a fake that grants on the first poll
+  cannot tell a working client from one that treats `authorization_pending` as
+  fatal, which is precisely #150.
+- `pkg/auth` tests driving `pollDeviceAuthorization` against that issuer:
+  pending-pending-grant reaches an active session with its tokens in the
+  encrypted store (this fails on the pre-fix code with the session already
+  deleted after one poll), `slow_down` slows the poll rate without ending the
+  flow, `access_denied` and `expired_token` stay terminal, the device code's
+  expiry bounds the loop, and stopping the broker abandons it. `Broker` gained an
+  unexported `pollIntervalUnit` so those tests do not have to wait out RFC 8628's
+  5-second interval floor.
+
 ### Security
 - Bumped the Go toolchain pin from 1.25.12 to 1.25.13. govulncheck reported four
   called standard-library vulnerabilities against 1.25.12, all fixed in 1.25.13:
