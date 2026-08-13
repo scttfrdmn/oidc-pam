@@ -56,13 +56,18 @@ type Session struct {
 	SourceIP         string
 	UserAgent        string
 	TokenFingerprint string
-	RefreshToken     string // OAuth2 refresh token for session renewal
-	SSHKeyID         string
-	SSHPublicKey     string
-	IsActive         bool
-	RiskScore        int
-	DeviceTrusted    bool
-	Metadata         map[string]interface{}
+	// TokenID identifies this session's entry in the TokenManager, which holds
+	// the access/refresh/ID tokens encrypted with AES-256-GCM. The tokens
+	// themselves are deliberately NOT fields on Session: Session is passed
+	// around, logged and copied, and a refresh token in it is a long-lived
+	// credential sitting in plaintext in the broker's heap.
+	TokenID       string
+	SSHKeyID      string
+	SSHPublicKey  string
+	IsActive      bool
+	RiskScore     int
+	DeviceTrusted bool
+	Metadata      map[string]interface{}
 }
 
 // AuthRequest represents an authentication request
@@ -494,7 +499,29 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 		}, nil
 	}
 
-	if session.RefreshToken == "" {
+	if session.TokenID == "" {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "NO_REFRESH_TOKEN",
+			ErrorMessage: "No refresh token available for this session",
+		}, nil
+	}
+
+	// The refresh token lives encrypted in the token store; decrypt it only for
+	// the duration of this call rather than keeping a copy on the session.
+	storedToken, err := b.tokenManager.GetToken(session.TokenID)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("session_id", sessionID).
+			Msg("Session has no usable stored token; cannot refresh")
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "NO_REFRESH_TOKEN",
+			ErrorMessage: "No refresh token available for this session",
+		}, nil
+	}
+	if storedToken.RefreshToken == "" {
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "NO_REFRESH_TOKEN",
@@ -505,7 +532,7 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer refreshCancel()
 
-	newToken, err := provider.RefreshToken(refreshCtx, session.RefreshToken)
+	newToken, err := provider.RefreshToken(refreshCtx, storedToken.RefreshToken)
 	if err != nil {
 		b.auditLogger.LogAuthEvent(security.AuditEvent{
 			EventType:    "token_refresh_failed",
@@ -523,13 +550,40 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 		}, nil
 	}
 
+	// Store the refreshed token and point the session at it. The previous entry
+	// is revoked afterwards: a rotated refresh token is no longer usable, and
+	// leaving it in the store would keep dead credential material in memory.
+	newTokenID, err := b.tokenManager.StoreToken(newToken, session.UserID, sessionID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("session_id", sessionID).
+			Msg("Failed to store refreshed token")
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "REFRESH_FAILED",
+			ErrorMessage: "Failed to store refreshed token",
+		}, nil
+	}
+
+	previousTokenID := session.TokenID
+
 	// Update session with new token data
 	session.TokenFingerprint = newToken.Fingerprint
-	session.RefreshToken = newToken.RefreshToken
+	session.TokenID = newTokenID
 	session.ExpiresAt = time.Now().Add(b.config.Authentication.TokenLifetime)
 	session.LastAccessed = time.Now()
 
 	b.setSession(session)
+
+	if previousTokenID != "" && previousTokenID != newTokenID {
+		if err := b.tokenManager.RevokeToken(previousTokenID); err != nil {
+			log.Debug().
+				Err(err).
+				Str("session_id", sessionID).
+				Msg("Could not revoke the pre-refresh token")
+		}
+	}
 
 	b.auditLogger.LogAuthEvent(security.AuditEvent{
 		EventType: "token_refreshed",
@@ -563,6 +617,16 @@ func (b *Broker) RevokeSession(sessionID, userID string) error {
 				Str("ssh_key_id", session.SSHKeyID).
 				Msg("Failed to revoke SSH key")
 		}
+	}
+
+	// Destroy the session's stored tokens. Dropping the session alone would leave
+	// its access and refresh tokens in the store until the 5-minute sweep, and a
+	// refresh token outlives the session it was issued for.
+	if err := b.tokenManager.RevokeSessionTokens(sessionID); err != nil {
+		log.Error().
+			Err(err).
+			Str("session_id", sessionID).
+			Msg("Failed to revoke stored tokens for session")
 	}
 
 	// Remove session
@@ -785,13 +849,40 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				return
 			}
 
+			// Hand the tokens to the token manager, which encrypts them with
+			// AES-256-GCM, and keep only its ID on the session. The session must
+			// never carry the refresh token itself: it is a long-lived credential,
+			// and Session is copied, passed around and reachable from a heap dump.
+			tokenID, err := b.tokenManager.StoreToken(token, session.UserID, session.ID)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("session_id", session.ID).
+					Msg("Rejected authentication: could not store tokens securely")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "TOKEN_STORE_FAILED")
+				}
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType:    "authentication_denied",
+					UserID:       session.UserID,
+					Email:        userInfo.Email,
+					SessionID:    session.ID,
+					Success:      false,
+					ErrorCode:    "TOKEN_STORE_FAILED",
+					ErrorMessage: err.Error(),
+					Timestamp:    time.Now(),
+				})
+				b.removeSession(session.ID)
+				return
+			}
+
 			// Clone before mutation: getSession returns the raw pointer stored in
 			// the map; writing to it without a lock races with concurrent readers.
 			updated := *session
 			updated.Email = userInfo.Email
 			updated.Groups = userInfo.Groups
 			updated.TokenFingerprint = token.Fingerprint
-			updated.RefreshToken = token.RefreshToken
+			updated.TokenID = tokenID
 			updated.IsActive = true
 			updated.DeviceTrusted = userInfo.DeviceTrusted
 
@@ -850,58 +941,77 @@ func (b *Broker) sessionCleanup(ctx context.Context) {
 		case <-b.stopChan:
 			return
 		case <-ticker.C:
-			now := time.Now()
+			b.expireSessions(time.Now())
+		}
+	}
+}
 
-			// Atomically collect and remove expired sessions under a single write lock
-			// to avoid TOCTOU race between identifying and removing sessions.
-			var expiredSessions []*Session
-			idleTimeout := b.config.Authentication.IdleTimeout
-			b.sessionMutex.Lock()
-			for id, session := range b.sessions {
-				idleExpired := idleTimeout > 0 && time.Since(session.LastAccessed) > idleTimeout
-				if session.ExpiresAt.Before(now) || idleExpired {
-					expiredSessions = append(expiredSessions, session)
-					delete(b.sessions, id)
-				}
-			}
-			b.sessionMutex.Unlock()
+// expireSessions removes every session that has passed its expiry or idle
+// timeout as of now, and tears down what each one owned. Separate from the
+// ticker loop so it can be tested directly.
+func (b *Broker) expireSessions(now time.Time) {
+	// Atomically collect and remove expired sessions under a single write lock
+	// to avoid TOCTOU race between identifying and removing sessions.
+	var expiredSessions []*Session
+	idleTimeout := b.config.Authentication.IdleTimeout
+	b.sessionMutex.Lock()
+	for id, session := range b.sessions {
+		idleExpired := idleTimeout > 0 && now.Sub(session.LastAccessed) > idleTimeout
+		if session.ExpiresAt.Before(now) || idleExpired {
+			expiredSessions = append(expiredSessions, session)
+			delete(b.sessions, id)
+		}
+	}
+	b.sessionMutex.Unlock()
 
-			if b.metrics != nil {
-				for _, session := range expiredSessions {
-					if session.IsActive {
-						b.metrics.ActiveSessions.Dec()
-					}
-				}
-			}
-
-			// Perform SSH key revocation and audit logging outside the lock.
-			// Sessions are already removed from the map, so no TOCTOU risk.
-			for _, session := range expiredSessions {
-				if session.SSHKeyID != "" {
-					if err := b.revokeSSHKey(session); err != nil {
-						log.Error().
-							Err(err).
-							Str("session_id", session.ID).
-							Str("ssh_key_id", session.SSHKeyID).
-							Msg("Failed to revoke SSH key for expired session")
-					}
-				}
-
-				b.auditLogger.LogAuthEvent(security.AuditEvent{
-					EventType: "session_expired",
-					UserID:    session.UserID,
-					SessionID: session.ID,
-					Success:   true,
-					Timestamp: now,
-				})
-			}
-
-			if len(expiredSessions) > 0 {
-				log.Info().
-					Int("count", len(expiredSessions)).
-					Msg("Cleaned up expired sessions")
+	if b.metrics != nil {
+		for _, session := range expiredSessions {
+			if session.IsActive {
+				b.metrics.ActiveSessions.Dec()
 			}
 		}
+	}
+
+	// Perform SSH key revocation and audit logging outside the lock.
+	// Sessions are already removed from the map, so no TOCTOU risk.
+	for _, session := range expiredSessions {
+		if session.SSHKeyID != "" {
+			if err := b.revokeSSHKey(session); err != nil {
+				log.Error().
+					Err(err).
+					Str("session_id", session.ID).
+					Str("ssh_key_id", session.SSHKeyID).
+					Msg("Failed to revoke SSH key for expired session")
+			}
+		}
+
+		// An expired session's tokens are dead credential material; the token
+		// store's own sweep would only catch them once the tokens themselves
+		// expire, which can be later than the session.
+		if b.tokenManager != nil {
+			if err := b.tokenManager.RevokeSessionTokens(session.ID); err != nil {
+				log.Error().
+					Err(err).
+					Str("session_id", session.ID).
+					Msg("Failed to revoke stored tokens for expired session")
+			}
+		}
+
+		if b.auditLogger != nil {
+			b.auditLogger.LogAuthEvent(security.AuditEvent{
+				EventType: "session_expired",
+				UserID:    session.UserID,
+				SessionID: session.ID,
+				Success:   true,
+				Timestamp: now,
+			})
+		}
+	}
+
+	if len(expiredSessions) > 0 {
+		log.Info().
+			Int("count", len(expiredSessions)).
+			Msg("Cleaned up expired sessions")
 	}
 }
 

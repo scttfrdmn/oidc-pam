@@ -87,31 +87,40 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 		Claims:       make(map[string]interface{}),
 	}
 
-	err = tm.StoreToken(testToken, "test-user", "test-session")
+	tokenID, err := tm.StoreToken(testToken, "test-user", "test-session")
 	if err != nil {
-		t.Logf("StoreToken returned error (expected due to encryption setup): %v", err)
+		t.Fatalf("StoreToken: %v", err)
+	}
+	if tokenID == "" {
+		t.Fatal("StoreToken returned an empty token ID")
 	}
 
-	// Test GetToken
-	retrievedToken, err := tm.GetToken("test-token-id")
+	// A round trip returns the original plaintext, so the ID is all a caller
+	// needs to keep.
+	retrievedToken, err := tm.GetToken(tokenID)
 	if err != nil {
-		t.Logf("GetToken returned error: %v", err)
+		t.Fatalf("GetToken(%q): %v", tokenID, err)
 	}
-	if retrievedToken != nil {
-		t.Log("Retrieved token successfully")
+	if retrievedToken.AccessToken != testToken.AccessToken {
+		t.Errorf("access token = %q, want %q", retrievedToken.AccessToken, testToken.AccessToken)
+	}
+	if retrievedToken.RefreshToken != testToken.RefreshToken {
+		t.Errorf("refresh token = %q, want %q", retrievedToken.RefreshToken, testToken.RefreshToken)
 	}
 
 	// Test ValidateToken
-	isValid, err := tm.ValidateToken("test-token-id", "test-user")
+	stored, err := tm.ValidateToken("test-fingerprint", "test-user")
 	if err != nil {
-		t.Logf("ValidateToken returned error: %v", err)
+		t.Fatalf("ValidateToken: %v", err)
 	}
-	t.Logf("Token validation result: %v", isValid)
+	if stored.ID != tokenID {
+		t.Errorf("ValidateToken returned token %q, want %q", stored.ID, tokenID)
+	}
 
 	// Test GetTokenStats
 	stats := tm.GetTokenStats()
-	if stats != nil {
-		t.Log("Retrieved token stats successfully")
+	if stats == nil {
+		t.Error("expected non-nil token stats")
 	}
 }
 
@@ -146,31 +155,6 @@ func TestTokenManagerRevocation(t *testing.T) {
 	err = tm.RevokeSessionTokens("test-session")
 	if err != nil {
 		t.Logf("RevokeSessionTokens returned error: %v", err)
-	}
-}
-
-func TestTokenManagerRefresh(t *testing.T) {
-	// Test token refresh functionality
-
-	cfg := &config.Config{
-		Security: config.SecurityConfig{
-			SecureTokenStorage: true,
-			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-		},
-	}
-
-	tm, err := NewTokenManager(cfg)
-	if err != nil {
-		t.Fatalf("Failed to create token manager: %v", err)
-	}
-
-	// Test RefreshToken
-	newToken, err := tm.RefreshToken("test-token-id", "test-user")
-	if err != nil {
-		t.Logf("RefreshToken returned error: %v", err)
-	}
-	if newToken != nil {
-		t.Log("Token refresh attempt completed")
 	}
 }
 
@@ -318,7 +302,7 @@ func TestValidateTokenConcurrent(t *testing.T) {
 		Fingerprint:  "concurrent-fp",
 		Claims:       make(map[string]interface{}),
 	}
-	if err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
+	if _, err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
 		t.Fatalf("Failed to store token: %v", err)
 	}
 
@@ -371,7 +355,7 @@ func storeTestToken(t *testing.T, tm *TokenManager, fp string) *Token {
 		Fingerprint: fp,
 		Claims:      make(map[string]interface{}),
 	}
-	if err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
+	if _, err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
 		t.Fatalf("StoreToken(%q): %v", fp, err)
 	}
 	return tok
@@ -429,7 +413,7 @@ func TestFingerprintIndexRemovedOnCleanup(t *testing.T) {
 		Fingerprint: "fp-cleanup-test",
 		Claims:      make(map[string]interface{}),
 	}
-	if err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
+	if _, err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
 
@@ -557,7 +541,7 @@ func BenchmarkValidateToken(b *testing.B) {
 			Fingerprint: fp,
 			Claims:      make(map[string]interface{}),
 		}
-		if err := tm.StoreToken(tok, "user", "sess"); err != nil {
+		if _, err := tm.StoreToken(tok, "user", "sess"); err != nil {
 			b.Fatalf("StoreToken: %v", err)
 		}
 	}
@@ -600,7 +584,7 @@ func BenchmarkValidateTokenSerial(b *testing.B) {
 			Fingerprint: fp,
 			Claims:      make(map[string]interface{}),
 		}
-		if err := tm.StoreToken(tok, "user", "sess"); err != nil {
+		if _, err := tm.StoreToken(tok, "user", "sess"); err != nil {
 			b.Fatalf("StoreToken: %v", err)
 		}
 	}
@@ -640,7 +624,7 @@ func TestTokenManagerAlwaysEncrypts(t *testing.T) {
 		Claims:       make(map[string]interface{}),
 	}
 
-	if err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
+	if _, err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
 		t.Fatalf("StoreToken failed: %v", err)
 	}
 

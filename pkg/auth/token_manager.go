@@ -16,7 +16,6 @@ import (
 
 // TokenManager handles token lifecycle management
 type TokenManager struct {
-	config     *config.Config
 	tokenStore *TokenStore
 	encryption *security.Encryption
 	stopChan   chan struct{}
@@ -61,7 +60,6 @@ func NewTokenManager(cfg *config.Config) (*TokenManager, error) {
 	}
 
 	return &TokenManager{
-		config:     cfg,
 		tokenStore: tokenStore,
 		encryption: encryption,
 		stopChan:   make(chan struct{}),
@@ -89,12 +87,15 @@ func (tm *TokenManager) Stop() error {
 	return nil
 }
 
-// StoreToken stores a token in the token store
-func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) error {
+// StoreToken encrypts a token and stores it, returning the ID the caller should
+// keep. Callers hold the ID rather than the token: the returned ID is a lookup
+// key with no value on its own, whereas an access or refresh token in a
+// long-lived struct is a usable credential.
+func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) (string, error) {
 	// Generate token ID
 	tokenID, err := tm.generateTokenID()
 	if err != nil {
-		return fmt.Errorf("failed to generate token ID: %w", err)
+		return "", fmt.Errorf("failed to generate token ID: %w", err)
 	}
 
 	// Encrypt token if encryption is enabled
@@ -107,20 +108,20 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) error
 		var err error
 		accessToken, err = tm.encryption.Encrypt(token.AccessToken)
 		if err != nil {
-			return fmt.Errorf("failed to encrypt access token: %w", err)
+			return "", fmt.Errorf("failed to encrypt access token: %w", err)
 		}
 
 		if token.RefreshToken != "" {
 			refreshToken, err = tm.encryption.Encrypt(token.RefreshToken)
 			if err != nil {
-				return fmt.Errorf("failed to encrypt refresh token: %w", err)
+				return "", fmt.Errorf("failed to encrypt refresh token: %w", err)
 			}
 		}
 
 		if token.IDToken != "" {
 			idToken, err = tm.encryption.Encrypt(token.IDToken)
 			if err != nil {
-				return fmt.Errorf("failed to encrypt ID token: %w", err)
+				return "", fmt.Errorf("failed to encrypt ID token: %w", err)
 			}
 		}
 
@@ -164,7 +165,7 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) error
 		Bool("encrypted", encrypted).
 		Msg("Token stored")
 
-	return nil
+	return tokenID, nil
 }
 
 // GetToken retrieves a token from the token store
@@ -273,30 +274,6 @@ func (tm *TokenManager) ValidateToken(tokenFingerprint, userID string) (*StoredT
 	// used for any security decision, so it is only updated under write lock
 	// paths (StoreToken, performCleanup).
 	return storedToken, nil
-}
-
-// RefreshToken refreshes a token. userID must match the token owner.
-func (tm *TokenManager) RefreshToken(tokenFingerprint, userID string) (*Token, error) {
-	// Find stored token
-	storedToken, err := tm.ValidateToken(tokenFingerprint, userID)
-	if err != nil {
-		return nil, fmt.Errorf("token validation failed: %w", err)
-	}
-
-	// Check if token is close to expiry
-	if time.Until(storedToken.ExpiresAt) > tm.config.Authentication.RefreshThreshold {
-		// Token doesn't need refresh yet
-		return tm.GetToken(storedToken.ID)
-	}
-
-	// This is a simplified implementation
-	// In a real implementation, we would use the refresh token to get a new access token
-	log.Debug().
-		Str("token_id", storedToken.ID).
-		Str("user_id", storedToken.UserID).
-		Msg("Token refresh requested")
-
-	return nil, fmt.Errorf("token refresh not implemented")
 }
 
 // RevokeToken revokes a token
