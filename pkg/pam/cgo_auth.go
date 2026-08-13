@@ -36,3 +36,18 @@ func performAuthentication(socketPath, username, service, rhost, tty string, tim
 	return PAMResultCode(C.perform_authentication(nil, cSocketPath, cUsername, cService, cRhost, cTTY,
 		C.int(timeoutSeconds)))
 }
+
+// classifyLoginTypeC exposes the C module's login-type classification so a Go
+// test can assert it agrees with GetLoginType. The two must match: the broker
+// applies per-login-type policy, and the C module and the Go client would
+// otherwise get different answers for the same login.
+func classifyLoginTypeC(service, tty string) string {
+	cService := C.CString(service)
+	cTTY := C.CString(tty)
+	defer func() {
+		C.free(unsafe.Pointer(cService))
+		C.free(unsafe.Pointer(cTTY))
+	}()
+
+	return C.GoString(C.classify_login_type(cService, cTTY))
+}

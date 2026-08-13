@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/scttfrdmn/oidc-pam/internal/brokerclient"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 	"github.com/scttfrdmn/oidc-pam/pkg/pam"
 )
@@ -23,6 +24,10 @@ var (
 
 const (
 	Name = "oidc-pam-helper"
+
+	// watchdogGrace is how much longer than the authentication timeout the
+	// outer watchdog waits before giving up on AuthenticateUser.
+	watchdogGrace = 10 * time.Second
 )
 
 func main() {
@@ -36,7 +41,7 @@ func main() {
 		debug       = flag.Bool("debug", false, "Enable debug logging")
 		showVersion = flag.Bool("version", false, "Show version information")
 		socketPath  = flag.String("socket", "/var/run/oidc-auth/broker.sock", "Path to broker socket")
-		timeout     = flag.Duration("timeout", 30*time.Second, "Authentication timeout")
+		timeout     = flag.Duration("timeout", brokerclient.DefaultAuthTimeout, "How long to wait for the user to complete the device authorization flow")
 		_           = flag.Bool("interactive", false, "Interactive mode (prompt for user input)")
 	)
 	flag.Parse()
@@ -102,6 +107,7 @@ func main() {
 
 	// Create PAM module
 	pamModule := pam.NewPAMModule(finalSocketPath, *debug)
+	pamModule.AuthTimeout = *timeout
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -141,7 +147,10 @@ func main() {
 			Msg("Authentication successful")
 		os.Exit(0)
 
-	case <-time.After(*timeout):
+	// A watchdog, not the authentication timeout: AuthenticateUser enforces
+	// *timeout itself and reports the expiry as a denial. The extra grace lets
+	// that specific error win the race, so the log says why the login failed.
+	case <-time.After(*timeout + watchdogGrace):
 		log.Error().
 			Dur("timeout", *timeout).
 			Msg("Authentication timed out")

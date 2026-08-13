@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Critical (#121): the Go client path also treated device-flow initiation as
+  authentication success.** `PAMModule.AuthenticateUser` returned nil as soon as
+  the broker replied `success: true`, which it does the moment it *starts* the
+  device flow, and `oidc-pam-helper` exited 0 on that — so `pam_exec`-style
+  integrations granted the login before the user had proved anything, exactly as
+  the C module did (#120). It now waits for the flow to complete and returns
+  `*PAMAuthFailure` on refusal and on an exhausted timeout.
+- **(#121)** New `internal/brokerclient`: the broker IPC protocol and the
+  device-flow completion logic in one **pure-Go, cgo-free** package, so the
+  wait/poll/deny behaviour is covered by `go test` on every platform rather than
+  living only in C that a developer laptop cannot compile. It dials per request
+  (the broker serves one request per connection), polls `check_session` with
+  `user_id`, honours `metadata.polling_interval` clamped to [1, 60] s, never
+  overshoots its budget, and distinguishes a broker *decision* (`DenialError`,
+  `TimeoutError`) from a failure to reach one (transport/parse errors → only
+  these become `PAM_AUTHINFO_UNAVAIL`).
+- **(#121)** The C module and the Go client disagreed on login-type
+  classification, so the broker could apply different per-login-type policy to
+  the same login depending on which client ran: the C side matched
+  `gdm`/`lightdm` as substrings, never matched `sddm`, and tested the TTY before
+  the service (classifying a display manager on `tty1` as `console`). The
+  classification is now a single documented function pinned to `GetLoginType` by
+  a test.
 - **Critical (#120): `pam_oidc.so` granted `PAM_SUCCESS` before device
   authorization completed.** `Broker.Authenticate` returns `success: true`
   *together with* `requires_device: true` when it has merely started the device
@@ -66,6 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#121)** `oidc-pam-helper -timeout` now bounds the device-flow wait rather
+  than only arming a watchdog (default 90 s, matching the PAM module's
+  `timeout=`); the outer watchdog fires 10 s later so an authentication that runs
+  out of budget reports a denial instead of being killed. `PAMModule.AuthTimeout`
+  exposes the same budget to embedders.
 - **(#120)** `timeout=<seconds>` module argument bounding the wait for device
   authorization (default 90, range 10–900). The default sits below sshd's
   default `LoginGraceTime` of 120 s so an expired flow is reported as a denial
