@@ -344,12 +344,13 @@ monitoring:
 
 #### SSH Configuration (`/etc/pam.d/ssh`)
 ```bash
-# Production SSH PAM configuration
+# Production SSH PAM configuration.
+# Nothing may follow `requisite pam_deny.so`: it returns immediately, so this
+# stack is OIDC-only. See "PAM stack semantics" below before changing it.
 auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 
@@ -364,9 +365,8 @@ session optional    pam_env.so
 # Production sudo PAM configuration
 auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_time.so
@@ -375,6 +375,43 @@ session required    pam_unix.so
 session optional    pam_oidc.so
 session optional    pam_systemd.so
 ```
+
+#### PAM stack semantics
+
+**All authorization happens in the `auth` phase.** `pam_sm_authenticate` is where
+the module talks to the broker, and the broker is where identity binding
+(`username_claim`), `require_groups`, risk policy and session limits are
+enforced. If the auth phase returns success, the user is authorized.
+
+**`pam_oidc.so` has no `account`-phase opinion** and returns `PAM_IGNORE` there —
+PAM does not count an ignored module toward the stack's result, so the account
+modules after it decide. Two consequences:
+
+- Use **`account optional pam_oidc.so`**, never `account sufficient`. A
+  `sufficient` module that returns success short-circuits the rest of the account
+  stack; earlier versions of this module returned `PAM_SUCCESS`, so `account
+  sufficient pam_oidc.so` silently disabled every account check after it —
+  `pam_time`, `pam_nologin`, `pam_access`, account expiry, `pam_unix`'s shadow
+  checks. If your `/etc/pam.d/*` still says `account sufficient pam_oidc.so`,
+  change it.
+- **Keep a real account module in the stack.** With `pam_oidc.so` as the only
+  account module, every module ignores and Linux-PAM returns
+  `PAM_PERM_DENIED` — it fails closed rather than admitting everyone, but the
+  account phase then decides nothing useful. The examples above pair it with
+  `pam_unix.so` and `pam_access.so`.
+
+**`password`** likewise: the module cannot change a password (change it at the
+identity provider) and returns `PAM_AUTHTOK_ERR`. List it as `optional` so it
+does not block password changes for local accounts.
+
+**Nothing may follow `requisite pam_deny.so`.** `requisite` returns to the
+application immediately on failure, so a `pam_unix.so` line after it is dead
+configuration, not an emergency fallback. To allow Unix passwords when the broker
+or IdP is unavailable, remove `pam_deny.so` and let `pam_unix.so` decide —
+accepting that a user with a local password then bypasses all OIDC policy. The
+more common arrangement is to leave this stack OIDC-only and keep SSH public-key
+access as the break-glass path, since sshd's pubkey authentication does not
+consult the PAM auth stack at all.
 
 ### 4. System Service Configuration
 

@@ -10,11 +10,11 @@
 # Authentication stack
 auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
-auth    optional    pam_group.so
 
-# Account management
-account sufficient  pam_oidc.so
+# Account management. pam_oidc.so returns PAM_IGNORE here -- it has no
+# account-phase opinion, and authorization is decided in the auth phase by the
+# broker. The modules below are what actually decide.
+account optional    pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_time.so
@@ -26,8 +26,9 @@ session optional    pam_systemd.so
 session optional    pam_env.so
 session optional    pam_limits.so
 
-# Password management (disabled for OIDC)
-password sufficient pam_oidc.so
+# Password management. pam_oidc.so cannot change a password (change it at the
+# identity provider); it returns PAM_AUTHTOK_ERR, so keep it 'optional'.
+password optional   pam_oidc.so
 password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 
 # CONFIGURATION NOTES:
@@ -116,7 +117,8 @@ password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 # 2. Root account access via console
 # 3. SSH root access with public key authentication
 # 4. Single-user mode boot for system recovery
-# 5. Traditional Unix authentication as fallback
+# 5. A service whose PAM stack still consults pam_unix.so (this one does not:
+#    the requisite pam_deny.so above refuses anything OIDC did not accept)
 
 # INTEGRATION WITH EXTERNAL SYSTEMS:
 # Consider integrating with external approval systems:

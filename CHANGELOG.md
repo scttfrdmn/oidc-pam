@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#122): `pam_sm_acct_mgmt` rubber-stamped the account stack.** It
+  returned `PAM_SUCCESS` while performing no account-phase authorization at all,
+  and the shipped configs listed it as `account sufficient pam_oidc.so`. A
+  `sufficient` module that succeeds ends the phase, so that combination silently
+  disabled every account check after it — `pam_time`, `pam_nologin`,
+  `pam_access`, account expiry, `pam_unix`'s shadow checks — for every user. It
+  now returns `PAM_IGNORE`: PAM does not count an ignored module toward the
+  stack's result, so the modules after it decide, and a stack where *every*
+  module ignores yields `PAM_PERM_DENIED` rather than admitting everyone.
 - **Critical (#121): the Go client path also treated device-flow initiation as
   authentication success.** `PAMModule.AuthenticateUser` returned nil as soon as
   the broker replied `success: true`, which it does the moment it *starts* the
@@ -65,6 +74,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenPAM.
 
 ### Fixed (BREAKING for PAM configs)
+- **(#122)** The example configs (`configs/pam/{ssh,login,su,sudo}`, the
+  DEPLOYMENT.md snippets, `test-projects/ssh-server`) now use `account optional
+  pam_oidc.so` and `password optional pam_oidc.so`. **Existing `/etc/pam.d/*`
+  files that say `account sufficient pam_oidc.so` should be changed to
+  `optional`**: with the `PAM_IGNORE` fix above such a line no longer
+  short-circuits, but as written it still advertises an authorization the module
+  does not perform. `password` is `optional` because `pam_sm_chauthtok` returns
+  `PAM_AUTHTOK_ERR` (change passwords at the IdP) and as `required` would block
+  password changes for local accounts too.
+- **(#122)** Removed unreachable `auth required pam_unix.so` / `auth optional
+  pam_group.so` lines that followed `auth requisite pam_deny.so` in the `ssh`,
+  `su`, `sudo` and ssh-server-test configs, and corrected the comments — in
+  several places the docs described that dead line as the emergency Unix
+  fallback. `requisite` returns to the application immediately, so nothing after
+  `pam_deny.so` ever runs: those stacks are OIDC-only. `configs/pam/README.md`
+  and DEPLOYMENT.md now explain the phase semantics, how to enable a real
+  fallback and what it costs, and why SSH public keys are the usual break-glass
+  path.
 - **(#119) `pam_oidc.so` connected to the wrong socket and ignored its module
   arguments.** The compiled-in `SOCKET_PATH` was
   `/var/run/oidc-auth-broker.sock` while the broker listens on

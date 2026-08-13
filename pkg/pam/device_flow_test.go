@@ -410,3 +410,24 @@ func TestLoginTypeClassificationMatchesGo(t *testing.T) {
 		})
 	}
 }
+
+// TestAcctMgmtHasNoOpinion pins pam_sm_acct_mgmt's return value. The module
+// performs no account-phase authorization — the broker decides during the auth
+// phase — so it must answer PAM_IGNORE ("no opinion"), never PAM_SUCCESS.
+//
+// This is a regression test for a real misconfiguration hazard: PAM_SUCCESS from a
+// module marked `sufficient` short-circuits the rest of the account stack, and the
+// shipped configs used `account sufficient pam_oidc.so`. Together they disabled
+// every account check that followed — pam_time, pam_nologin, pam_access, account
+// expiry, pam_unix's shadow checks — for every user.
+func TestAcctMgmtHasNoOpinion(t *testing.T) {
+	got := acctMgmtVerdict()
+
+	if got == PAMSuccess {
+		t.Fatal("pam_sm_acct_mgmt returns PAM_SUCCESS: with `account sufficient pam_oidc.so` " +
+			"that short-circuits every account module after it")
+	}
+	if got != PAMIgnore {
+		t.Errorf("pam_sm_acct_mgmt returned %d, want PAM_IGNORE (%d)", got, PAMIgnore)
+	}
+}
