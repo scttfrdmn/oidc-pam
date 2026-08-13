@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -345,6 +347,92 @@ func (km *KeyManager) CleanupExpiredKeys() error {
 	}
 
 	return nil
+}
+
+// KeyInfo is the public metadata of one managed key pair, for operator-facing
+// listings. It deliberately carries no key material: `oidc-admin keys` wants to
+// know which users have keys, how strong they are and when they expire.
+type KeyInfo struct {
+	Username string
+	// KeyType is the SSH algorithm name from the public key itself
+	// (e.g. "ssh-rsa"), not the manager's configured key type — an existing key
+	// may predate a configuration change.
+	KeyType string
+	// KeySize is the key's strength in bits, or 0 if it cannot be determined
+	// from the public key.
+	KeySize   int
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	Expired   bool
+}
+
+// ListKeyInfo returns metadata for every managed key pair.
+//
+// A key whose files cannot be read or parsed is skipped and counted in the
+// second return value rather than failing the whole listing: one half-written
+// directory should not make the listing unavailable, but a silently short list
+// would read as "these are all the keys".
+func (km *KeyManager) ListKeyInfo() ([]KeyInfo, int, error) {
+	users, err := km.ListKeys()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list keys: %w", err)
+	}
+
+	infos := make([]KeyInfo, 0, len(users))
+	unreadable := 0
+	for _, username := range users {
+		key, err := km.LoadKey(username)
+		if err != nil {
+			log.Warn().
+				Str("username", username).
+				Err(err).
+				Msg("Skipping key that could not be read while listing keys")
+			unreadable++
+			continue
+		}
+
+		keyType, keySize := publicKeyStrength(key.PublicKey)
+		infos = append(infos, KeyInfo{
+			Username:  username,
+			KeyType:   keyType,
+			KeySize:   keySize,
+			CreatedAt: key.CreatedAt,
+			ExpiresAt: key.ExpiresAt,
+			Expired:   km.IsKeyExpired(key),
+		})
+	}
+
+	return infos, unreadable, nil
+}
+
+// publicKeyStrength reports an authorized_keys line's algorithm name and size in
+// bits. An unparseable line yields ("unknown", 0); a parseable one whose size we
+// cannot derive keeps its algorithm name and a size of 0, since the algorithm is
+// still worth showing.
+func publicKeyStrength(publicKey []byte) (string, int) {
+	parsed, _, _, _, err := ssh.ParseAuthorizedKey(publicKey)
+	if err != nil {
+		return "unknown", 0
+	}
+
+	keyType := parsed.Type()
+
+	cryptoKey, ok := parsed.(ssh.CryptoPublicKey)
+	if !ok {
+		return keyType, 0
+	}
+
+	switch pub := cryptoKey.CryptoPublicKey().(type) {
+	case *rsa.PublicKey:
+		return keyType, pub.N.BitLen()
+	case *ecdsa.PublicKey:
+		return keyType, pub.Curve.Params().BitSize
+	case ed25519.PublicKey:
+		// Ed25519 keys have one size; there is no parameter to read.
+		return keyType, ed25519.PublicKeySize * 8
+	default:
+		return keyType, 0
+	}
 }
 
 // parseMetadata parses key metadata from a string

@@ -410,3 +410,123 @@ func BenchmarkLoadKey(b *testing.B) {
 		_, _ = km.LoadKey(username)
 	}
 }
+
+func TestListKeyInfoReportsAlgorithmSizeAndExpiry(t *testing.T) {
+	tempDir := t.TempDir()
+
+	km := NewKeyManager(tempDir)
+	// 2048 bits rather than the 4096-bit default: this test is about reading the
+	// size back off the public key, and RSA generation dominates its runtime.
+	km.SetKeySize(2048)
+
+	km.SetExpiration(-time.Hour) // already expired
+	expired, err := km.GenerateKey("expired_user")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := km.SaveKey("expired_user", expired); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+
+	km.SetExpiration(time.Hour)
+	active, err := km.GenerateKey("active_user")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := km.SaveKey("active_user", active); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+
+	infos, unreadable, err := km.ListKeyInfo()
+	if err != nil {
+		t.Fatalf("ListKeyInfo: %v", err)
+	}
+	if unreadable != 0 {
+		t.Errorf("unreadable = %d, want 0", unreadable)
+	}
+	if len(infos) != 2 {
+		t.Fatalf("got %d keys, want 2", len(infos))
+	}
+
+	byUser := make(map[string]KeyInfo, len(infos))
+	for _, info := range infos {
+		byUser[info.Username] = info
+	}
+
+	for username, wantExpired := range map[string]bool{"expired_user": true, "active_user": false} {
+		info, ok := byUser[username]
+		if !ok {
+			t.Fatalf("%s missing from listing", username)
+		}
+		if info.KeyType != "ssh-rsa" {
+			t.Errorf("%s key type = %q, want ssh-rsa", username, info.KeyType)
+		}
+		if info.KeySize != 2048 {
+			t.Errorf("%s key size = %d, want 2048", username, info.KeySize)
+		}
+		if info.Expired != wantExpired {
+			t.Errorf("%s expired = %v, want %v", username, info.Expired, wantExpired)
+		}
+		if info.CreatedAt.IsZero() || info.ExpiresAt.IsZero() {
+			t.Errorf("%s has zero timestamps: created=%v expires=%v", username, info.CreatedAt, info.ExpiresAt)
+		}
+	}
+}
+
+// A key directory that cannot be read must not take the whole listing down with
+// it, but it must be counted: a silently short list reads as "these are all the
+// keys".
+func TestListKeyInfoSkipsAndCountsUnreadableKeys(t *testing.T) {
+	tempDir := t.TempDir()
+
+	km := NewKeyManager(tempDir)
+	km.SetKeySize(2048)
+
+	key, err := km.GenerateKey("good_user")
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := km.SaveKey("good_user", key); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+
+	// A directory with a private key but no metadata: what a half-finished
+	// SaveKey leaves behind. ListKeys finds it, LoadKey cannot read it.
+	brokenDir := filepath.Join(tempDir, "broken_user")
+	if err := os.MkdirAll(brokenDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenDir, "id_rsa"), []byte("not a key"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	infos, unreadable, err := km.ListKeyInfo()
+	if err != nil {
+		t.Fatalf("ListKeyInfo: %v", err)
+	}
+	if unreadable != 1 {
+		t.Errorf("unreadable = %d, want 1", unreadable)
+	}
+	if len(infos) != 1 || infos[0].Username != "good_user" {
+		t.Fatalf("got %+v, want just good_user", infos)
+	}
+}
+
+func TestListKeyInfoOnMissingBaseDir(t *testing.T) {
+	km := NewKeyManager(filepath.Join(t.TempDir(), "does-not-exist"))
+
+	infos, unreadable, err := km.ListKeyInfo()
+	if err != nil {
+		t.Fatalf("ListKeyInfo on a missing base dir should not error: %v", err)
+	}
+	if len(infos) != 0 || unreadable != 0 {
+		t.Errorf("got %d keys / %d unreadable, want 0/0", len(infos), unreadable)
+	}
+}
+
+func TestPublicKeyStrengthOnUnparseableKey(t *testing.T) {
+	keyType, keySize := publicKeyStrength([]byte("this is not an authorized_keys line"))
+	if keyType != "unknown" || keySize != 0 {
+		t.Errorf("got (%q, %d), want (\"unknown\", 0)", keyType, keySize)
+	}
+}
