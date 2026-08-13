@@ -345,16 +345,16 @@ monitoring:
 #### SSH Configuration (`/etc/pam.d/ssh`)
 ```bash
 # Production SSH PAM configuration
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml service=ssh
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
 auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account sufficient  pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 session required    pam_systemd.so
 session optional    pam_env.so
 ```
@@ -362,17 +362,17 @@ session optional    pam_env.so
 #### Sudo Configuration (`/etc/pam.d/sudo`)
 ```bash
 # Production sudo PAM configuration
-auth    sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml operation=sudo target_user=%u
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
 auth    required    pam_unix.so try_first_pass
 
-account sufficient  pam_oidc.so config=/etc/oidc-auth/broker.yaml
+account sufficient  pam_oidc.so
 account required    pam_unix.so
 account required    pam_access.so
 account required    pam_time.so
 
 session required    pam_unix.so
-session optional    pam_oidc.so config=/etc/oidc-auth/broker.yaml
+session optional    pam_oidc.so
 session optional    pam_systemd.so
 ```
 

@@ -10,7 +10,11 @@
 
 // Global variables
 static int debug_enabled = 0;
-static char config_path[256] = "/etc/oidc-auth/pam.conf";
+
+// The compiled-in default must fit in pam_oidc_options.socket_path, which is
+// itself sized to the platform's sockaddr_un.sun_path.
+_Static_assert(sizeof(SOCKET_PATH) <= MAX_SOCKET_PATH,
+               "default SOCKET_PATH does not fit in pam_oidc_options.socket_path");
 
 // Helper function to log messages
 void log_pam_message(int priority, const char *format, ...) {
@@ -43,19 +47,28 @@ void log_pam_message_string(int priority, const char *message) {
 int connect_to_broker(const char *socket_path) {
     int sock;
     struct sockaddr_un addr;
-    
+    size_t path_len;
+
     log_pam_message(LOG_DEBUG, "Connecting to broker at %s", socket_path);
-    
+
+    // Refuse rather than silently truncate: a truncated path would connect to
+    // the wrong socket, or to none at all with a confusing error.
+    path_len = strlen(socket_path);
+    if (path_len == 0 || path_len >= sizeof(addr.sun_path)) {
+        log_pam_message(LOG_ERR, "Invalid broker socket path length: %zu", path_len);
+        return -1;
+    }
+
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to create socket: %s", strerror(errno));
         return -1;
     }
-    
+
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-    
+    memcpy(addr.sun_path, socket_path, path_len + 1);
+
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         log_pam_message(LOG_ERR, "Failed to connect to broker: %s", strerror(errno));
         close(sock);
@@ -297,17 +310,53 @@ int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t r
 }
 
 // Parse module arguments
-static void parse_arguments(int argc, const char **argv) {
+// Parse the module arguments from /etc/pam.d/<service> into opts, which is
+// always fully initialized to the defaults first.
+//
+// These arguments come from a root-owned PAM configuration file and are
+// therefore trusted, unlike oidc-pam-helper's argv, which may come from an
+// unprivileged caller (see L-6). Recognized arguments:
+//
+//   debug          Log at LOG_DEBUG to syslog.
+//   socket=<path>  Absolute path to the broker's Unix socket. Defaults to
+//                  SOCKET_PATH, which matches the broker's own default for
+//                  server.socket_path.
+//
+// Anything else is ignored with a warning, so a typo or a stale argument shows
+// up in the log instead of silently doing nothing.
+void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     int i;
-    
+
+    // Defaults first, so a caller can rely on opts being complete even when
+    // argc is 0 or an argument is rejected below.
+    memset(opts, 0, sizeof(*opts));
+    memcpy(opts->socket_path, SOCKET_PATH, sizeof(SOCKET_PATH));
+
     for (i = 0; i < argc; i++) {
         if (strcmp(argv[i], "debug") == 0) {
             debug_enabled = 1;
             log_pam_message(LOG_DEBUG, "Debug mode enabled");
+        } else if (strncmp(argv[i], "socket=", 7) == 0) {
+            const char *path = argv[i] + 7;
+            size_t len = strlen(path);
+
+            if (path[0] != '/') {
+                log_pam_message(LOG_ERR, "Ignoring socket= argument: path must be absolute (got '%s'); using %s",
+                                path, opts->socket_path);
+            } else if (len >= sizeof(opts->socket_path)) {
+                log_pam_message(LOG_ERR, "Ignoring socket= argument: path is %zu bytes, limit is %zu; using %s",
+                                len, sizeof(opts->socket_path) - 1, opts->socket_path);
+            } else {
+                memcpy(opts->socket_path, path, len + 1);
+                log_pam_message(LOG_DEBUG, "Using broker socket: %s", opts->socket_path);
+            }
         } else if (strncmp(argv[i], "config=", 7) == 0) {
-            strncpy(config_path, argv[i] + 7, sizeof(config_path) - 1);
-            config_path[sizeof(config_path) - 1] = '\0';
-            log_pam_message(LOG_DEBUG, "Using config file: %s", config_path);
+            // Accepted for compatibility with configs shipped before v0.4.3.
+            // This module reads no configuration file of its own; everything
+            // comes from the broker over the socket.
+            log_pam_message(LOG_WARNING, "Ignoring config=%s: pam_oidc reads no configuration file", argv[i] + 7);
+        } else {
+            log_pam_message(LOG_WARNING, "Ignoring unrecognized module argument: %s", argv[i]);
         }
     }
 }
@@ -326,18 +375,19 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     log_pam_message(LOG_INFO, "OIDC PAM authentication started (version %s)", PAM_MODULE_VERSION);
     
     // Parse module arguments
-    parse_arguments(argc, argv);
-    
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
+
     // Get user information
     retval = get_user_info(pamh, &username, &service, &rhost, &tty);
     if (retval != PAM_SUCCESS) {
         return retval;
     }
-    
+
     log_pam_message(LOG_INFO, "Authenticating user: %s", username);
-    
+
     // Connect to broker
-    sock = connect_to_broker(SOCKET_PATH);
+    sock = connect_to_broker(opts.socket_path);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to connect to authentication broker");
         return PAM_AUTHINFO_UNAVAIL;
@@ -413,7 +463,8 @@ PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const cha
     log_pam_message(LOG_DEBUG, "pam_sm_setcred called with flags: %d", flags);
     
     // Parse arguments
-    parse_arguments(argc, argv);
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
     
     // For OIDC authentication, we don't need to set traditional credentials
     // The broker handles token management
@@ -428,7 +479,8 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const c
     log_pam_message(LOG_DEBUG, "pam_sm_acct_mgmt called with flags: %d", flags);
     
     // Parse arguments
-    parse_arguments(argc, argv);
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
     
     // Get username
     retval = pam_get_user(pamh, &username, NULL);
@@ -455,7 +507,8 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *pamh, int flags, int argc, cons
     log_pam_message(LOG_DEBUG, "pam_sm_open_session called with flags: %d", flags);
     
     // Parse arguments
-    parse_arguments(argc, argv);
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
     
     // Get username
     retval = pam_get_user(pamh, &username, NULL);
@@ -482,7 +535,8 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, con
     log_pam_message(LOG_DEBUG, "pam_sm_close_session called with flags: %d", flags);
     
     // Parse arguments
-    parse_arguments(argc, argv);
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
     
     // Get username
     retval = pam_get_user(pamh, &username, NULL);
@@ -508,7 +562,8 @@ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const c
     log_pam_message(LOG_DEBUG, "pam_sm_chauthtok called with flags: %d", flags);
     
     // Parse arguments
-    parse_arguments(argc, argv);
+    pam_oidc_options opts;
+    parse_arguments(argc, argv, &opts);
     
     // OIDC authentication doesn't support password changes through PAM
     // Password changes should be done through the identity provider

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (BREAKING for PAM configs)
+- **(#119) `pam_oidc.so` connected to the wrong socket and ignored its module
+  arguments.** The compiled-in `SOCKET_PATH` was
+  `/var/run/oidc-auth-broker.sock` while the broker listens on
+  `/var/run/oidc-auth/broker.sock`, so a default install could never reach the
+  broker and every authentication returned `PAM_AUTHINFO_UNAVAIL`. The default
+  is now derived from, and matches, the broker's `server.socket_path` default.
+- **(#119)** Added the `socket=<path>` module argument for non-default
+  deployments. It must be absolute and must fit in `sockaddr_un.sun_path`;
+  anything else is rejected with a log line and the default is kept, rather than
+  being silently truncated to a path naming a different socket. `MAX_SOCKET_PATH`
+  is now taken from the platform's `sun_path` (108 on Linux, 104 on Darwin)
+  instead of being hardcoded.
+- **(#119)** Unrecognized module arguments are now logged at `LOG_WARNING`
+  instead of being silently dropped. **The example configs previously passed
+  `config=`, `operation=` and `target_user=`, none of which the module has ever
+  implemented** (and PAM does not expand `%u` in module arguments, so
+  `target_user=%u` was always literal). These have been removed from
+  `configs/pam/*`, `configs/pam/common-auth`, QUICK-START.md, DEPLOYMENT.md and
+  the ssh-server test project; `configs/pam/README.md` now documents the two
+  arguments that do exist (`debug`, `socket=`) and explicitly lists the ones that
+  never did. `config=` is still accepted, with a warning, so existing PAM stacks
+  keep working.
+
 ### Added
 - **(#118) CI coverage for the PAM/cgo packages.** A new `PAM (cgo)` job installs
   `libpam0g-dev`/`libjson-c-dev` and runs `go vet ./pkg/pam ./cmd/pam-module
