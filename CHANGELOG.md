@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **(#118) CI coverage for the PAM/cgo packages.** A new `PAM (cgo)` job installs
+  `libpam0g-dev`/`libjson-c-dev` and runs `go vet ./pkg/pam ./cmd/pam-module
+  ./cmd/pam-helper` plus `go test -race ./pkg/pam/...`; the `Lint` job now lints
+  `./...` (every package, PAM included) instead of an allowlist that omitted
+  `pkg/pam`, `cmd/pam-module`, `cmd/pam-helper` and `pkg/metrics`. Previously the
+  security-critical PAM module was never vetted, linted, or tested by CI.
+- `make verify-linux` plus `test/docker/Dockerfile.verify`: runs the full
+  vet/test/lint sweep — including the cgo packages, which cannot compile on
+  macOS — in a Linux container. Documented in CONTRIBUTING.md.
+- `-Wall -Wextra` on the cgo `CFLAGS` for `pkg/pam` and `cmd/pam-module`, and
+  `(void)` markers on the genuinely unused PAM entry-point parameters so the C
+  bridge compiles warning-free.
+
+### Fixed
+- **(#118)** `oidc-pam-helper -version` now prints the build date and git commit
+  (the `buildDate`/`gitCommit` ldflags targets were set by the Makefile but never
+  read, which is what surfaced them as `unused` once linting covered the package).
+- **(#118)** `TestServerInvalidSocketPath` no longer depends on the test process
+  being unprivileged: it points the socket inside a regular file (`ENOTDIR`)
+  rather than at a merely absent directory, which root would simply create.
+- **(#118)** `test/integration` used a raw passphrase for
+  `security.token_encryption_key`, invalid since the v0.4.0 breaking change; it
+  now uses a base64 32-byte test key.
+
 ## [0.4.2] - 2026-07-09
 
 ### Security

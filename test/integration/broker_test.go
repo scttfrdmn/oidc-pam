@@ -184,7 +184,10 @@ func createTestConfig(testDir string) *config.Config {
 			MaxConcurrentSessions: 10,
 		},
 		Security: config.SecurityConfig{
-			TokenEncryptionKey: "test-encryption-key-32-bytes-long!",
+			// base64 of "0123456789abcdef0123456789abcdef" — since v0.4.0 the
+			// key must decode to exactly 32 bytes, so a raw passphrase is
+			// rejected at broker construction.
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 			AuditEnabled:       true,
 		},
 		Audit: config.AuditConfig{

@@ -62,10 +62,10 @@ Enhancement suggestions are welcome! Please:
 
 ### Prerequisites
 
-- Go 1.21 or higher
-- PAM development libraries
+- Go 1.25 or higher
+- PAM development libraries (`libpam0g-dev libjson-c-dev`, or `pam-devel json-c-devel`)
 - systemd (for service management)
-- Docker (for integration tests)
+- Docker (for integration tests, and for `make verify-linux` on macOS)
 
 ### Local Development
 
@@ -92,6 +92,21 @@ make lint
 # Install development version
 sudo make install-dev
 ```
+
+### Verifying the PAM/cgo packages
+
+`pkg/pam`, `cmd/pam-module` and `cmd/pam-helper` are cgo packages that need
+`<security/pam_ext.h>` and `<json-c/json.h>`, so they cannot be built on macOS —
+`go build ./...` fails there with `'security/pam_ext.h' file not found`. Run the
+same vet/test/lint sweep CI runs inside a Linux container instead:
+
+```bash
+make verify-linux
+```
+
+This builds `test/docker/Dockerfile.verify` and runs `go vet ./...`,
+`go test -race ./pkg/... ./internal/...` and `golangci-lint run ./...` — which
+includes the PAM packages. CI covers them in the `PAM (cgo)` and `Lint` jobs.
 
 ### Project Structure
 

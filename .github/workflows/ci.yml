@@ -30,19 +30,43 @@ jobs:
 
       - name: Run go vet
         run: |
-          # Vet all non-PAM packages (PAM packages require CGO and PAM headers)
-          # Note: cmd/pam-helper imports pkg/pam so it's also excluded
-          go vet ./pkg/auth ./pkg/config ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin
+          # PAM/cgo packages are vetted and tested in the separate `pam` job,
+          # which installs the PAM and json-c development headers.
+          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc ./cmd/broker ./cmd/oidc-admin
 
       - name: Run tests
         run: |
-          # Run all non-PAM tests (PAM tests require Linux PAM libraries)
           go test -race -coverprofile=coverage.out -covermode=atomic \
-            ./pkg/auth ./pkg/config ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc
+            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/policy ./pkg/security ./pkg/ssh ./internal/ipc
 
       - name: Check test coverage
         run: |
           go tool cover -func=coverage.out
+
+  pam:
+    name: PAM (cgo)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.12'
+          cache: true
+
+      - name: Install PAM development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libjson-c-dev
+
+      - name: Run go vet
+        run: go vet ./pkg/pam ./cmd/pam-module ./cmd/pam-helper
+
+      - name: Run tests
+        run: go test -race ./pkg/pam/...
 
   build:
     name: Build
@@ -90,12 +114,17 @@ jobs:
           go-version: '1.25.12'
           cache: true
 
+      - name: Install PAM development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libjson-c-dev
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
-          # Lint only non-PAM packages (PAM packages require CGO and PAM development libraries)
-          args: --timeout=5m ./pkg/auth/... ./pkg/config/... ./pkg/policy/... ./pkg/security/... ./pkg/ssh/... ./internal/... ./cmd/broker/... ./cmd/oidc-admin/...
+          # Every package, including the cgo/PAM ones (hence the headers above).
+          args: --timeout=5m ./...
 
   validate:
     name: Validate

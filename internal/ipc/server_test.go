@@ -187,8 +187,15 @@ func TestServerMultipleConnections(t *testing.T) {
 }
 
 func TestServerInvalidSocketPath(t *testing.T) {
-	// Test with invalid socket path
-	invalidPath := "/invalid/path/that/does/not/exist/test.sock"
+	// Use a path whose parent is a regular file: MkdirAll then fails with
+	// ENOTDIR for any uid. A merely non-existent directory is not enough —
+	// running as root (as the container-based `make verify-linux` does) it
+	// would simply be created.
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatalf("Failed to create blocking file: %v", err)
+	}
+	invalidPath := filepath.Join(blocker, "test.sock")
 	broker := createTestBroker(t)
 	server, err := NewServer(invalidPath, broker, 0660, "", false, 0, 0)
 	if err != nil {
