@@ -164,18 +164,22 @@ func TestTokenManagerCore(t *testing.T) {
 		Claims:       make(map[string]interface{}),
 	}
 
-	// Test token operations (these will fail due to encryption setup, but test the code paths)
-	err = tokenManager.StoreToken(testToken, "test-user", "test-session")
+	tokenID, err := tokenManager.StoreToken(testToken, "test-user", "test-session")
 	if err != nil {
-		t.Logf("StoreToken returned error: %v", err)
+		t.Fatalf("StoreToken: %v", err)
+	}
+	if tokenID == "" {
+		t.Fatal("StoreToken returned an empty token ID")
 	}
 
 	// Test ValidateToken
-	isValid, err := tokenManager.ValidateToken("test-fingerprint", "test-user")
+	stored, err := tokenManager.ValidateToken("test-fingerprint", "test-user")
 	if err != nil {
-		t.Logf("ValidateToken returned error: %v", err)
+		t.Fatalf("ValidateToken: %v", err)
 	}
-	t.Logf("Token validation result: %v", isValid)
+	if stored.UserID != "test-user" {
+		t.Errorf("stored token user = %q, want test-user", stored.UserID)
+	}
 
 	// Test GetTokenStats
 	stats := tokenManager.GetTokenStats()
