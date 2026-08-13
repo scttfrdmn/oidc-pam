@@ -869,10 +869,15 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					b.metrics.RecordAuth(provider.Name, "failure", classifyPollError(err))
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
-					EventType:    "device_authorization_failed",
-					UserID:       session.UserID,
-					SessionID:    session.ID,
-					Success:      false,
+					EventType: "device_authorization_failed",
+					UserID:    session.UserID,
+					SessionID: session.ID,
+					Provider:  provider.Name,
+					Success:   false,
+					// The same bounded code the metric is labelled with, so the audit
+					// trail can be filtered and correlated with the metric instead of
+					// only carrying a free-text message.
+					ErrorCode:    classifyPollError(err),
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -1024,15 +1029,22 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 
 			// Record the login location so future logins from the same
 			// /24 subnet or country are not flagged as unusual.
-			b.policyEngine.RecordLocation(session.UserID, session.SourceIP)
+			b.policyEngine.RecordLocation(updated.UserID, updated.SourceIP)
 
-			// Audit log
+			// Audit log.
+			//
+			// Read from `updated`, not `session`: the identity this flow resolved was
+			// written to the clone above, and `session` is still the pre-mutation
+			// original with an empty Email and nil Groups. Auditing it recorded every
+			// successful login without the identity it authenticated (#153) — while
+			// the denial paths, which build their events from `userInfo` directly,
+			// carried it correctly.
 			b.auditLogger.LogAuthEvent(security.AuditEvent{
 				EventType: "authentication_successful",
-				UserID:    session.UserID,
-				Email:     session.Email,
-				Groups:    session.Groups,
-				SessionID: session.ID,
+				UserID:    updated.UserID,
+				Email:     updated.Email,
+				Groups:    updated.Groups,
+				SessionID: updated.ID,
 				Provider:  provider.Name,
 				Success:   true,
 				Timestamp: time.Now(),

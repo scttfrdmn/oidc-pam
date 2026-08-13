@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Medium (#153): every `authentication_successful` record was written without
+  the identity it authenticated.** The device-flow poll loop clones the session
+  before mutating it (the map holds the raw pointer, so writing through it would
+  race with readers) and writes the email and groups from the provider onto the
+  clone — but the success audit event was built from the *original*, so it reached
+  the audit trail with `email: ""` and `groups: null` on every login. The denial
+  events, built from the provider's user info directly, carried the identity
+  correctly, so an operator reviewing the trail could see who had been refused but
+  not who had got in. The event now reads the clone it belongs to, as does the
+  location the policy engine records.
+
+  `device_authorization_failed` also gains the `provider` and the same bounded
+  `error_code` its metric is already labelled with (`classifyPollError`), so a
+  refusal can be filtered and correlated rather than only carrying free text.
+
+  The `pkg/auth` device-flow tests now run against a real file-backed audit logger
+  and assert on what it wrote, since a disabled logger cannot show a wrong record.
 - **High (#152): no login ever got an SSH key, which is the one thing the broker
   exists to hand out.** `Broker.generateSSHKey` files the on-disk key pair under
   the *session* ID, deliberately, so that concurrent sessions for one user do not
