@@ -1,7 +1,7 @@
 package main
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../pkg/pam -I/usr/include/security
+#cgo CFLAGS: -I${SRCDIR}/../../pkg/pam -I/usr/include/security -Wall -Wextra
 #cgo LDFLAGS: -lpam -ljson-c
 #include "cgo_bridge.h"
 */

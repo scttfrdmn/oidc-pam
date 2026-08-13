@@ -44,6 +44,8 @@ func main() {
 	// Show version information
 	if *showVersion {
 		fmt.Printf("%s version %s\n", Name, version)
+		fmt.Printf("  Build date: %s\n", buildDate)
+		fmt.Printf("  Git commit: %s\n", gitCommit)
 		os.Exit(0)
 	}
 

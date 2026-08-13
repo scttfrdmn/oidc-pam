@@ -1,4 +1,4 @@
-.PHONY: build test install clean lint fmt vet tidy help
+.PHONY: build test install clean lint fmt vet tidy verify-linux help
 
 # Build variables
 BINARY_DIR := bin
@@ -65,6 +65,22 @@ test-integration:
 test-e2e:
 	@echo "Running end-to-end tests..."
 	go test $(GO_TEST_FLAGS) ./test/e2e/...
+
+## Verify everything (vet + test + lint, all packages) in a Linux container.
+## The cgo/PAM packages cannot be built on macOS, so this is the only way to
+## reproduce CI's `pam` and `lint` jobs locally.
+verify-linux:
+	@echo "Building verification image..."
+	docker build -t oidc-pam-verify -f test/docker/Dockerfile.verify test/docker
+	@echo "Running vet, tests and lint in Linux container..."
+	docker run --rm \
+		-v "$(CURDIR)":/src \
+		-v oidc-pam-gomod:/go/pkg/mod \
+		-v oidc-pam-gocache:/root/.cache \
+		-w /src oidc-pam-verify \
+		sh -c 'go vet ./... \
+			&& go test -race ./pkg/... ./internal/... \
+			&& golangci-lint run --timeout=5m ./...'
 
 ## Install binaries to system locations
 install: build
@@ -173,6 +189,7 @@ help:
 	@echo "  test-unit       Run unit tests only"
 	@echo "  test-integration Run integration tests"
 	@echo "  test-e2e        Run end-to-end tests"
+	@echo "  verify-linux    Run vet+test+lint for ALL packages (incl. cgo/PAM) in Docker"
 	@echo "  install         Install binaries to system"
 	@echo "  install-dev     Install development version"
 	@echo "  clean           Clean build artifacts"

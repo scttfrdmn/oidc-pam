@@ -320,7 +320,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     json_object *response_obj, *success_obj, *instructions_obj, *requires_device_obj;
     const char *instructions;
     int success, requires_device;
-    
+
+    (void)flags; // PAM_SILENT / PAM_DISALLOW_NULL_AUTHTOK are not honored
+
     log_pam_message(LOG_INFO, "OIDC PAM authentication started (version %s)", PAM_MODULE_VERSION);
     
     // Parse module arguments
@@ -406,6 +408,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
 // PAM credential setting function
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {
+    (void)pamh; // no PAM items are read or set in this phase
+
     log_pam_message(LOG_DEBUG, "pam_sm_setcred called with flags: %d", flags);
     
     // Parse arguments
@@ -499,6 +503,8 @@ PAM_EXTERN int pam_sm_close_session(pam_handle_t *pamh, int flags, int argc, con
 
 // PAM password change function
 PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv) {
+    (void)pamh; // password changes are not supported; nothing is read from PAM
+
     log_pam_message(LOG_DEBUG, "pam_sm_chauthtok called with flags: %d", flags);
     
     // Parse arguments
