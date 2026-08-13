@@ -272,7 +272,19 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	})
 }
 
-// RemoveExpiredKeys removes expired OIDC PAM keys from authorized_keys
+// RemoveExpiredKeys removes broker-issued keys older than 24 hours from a user's
+// authorized_keys.
+//
+// Called from the broker's session-expiry pass. Its job is the keys no session
+// accounts for: sessions live only in the broker's memory, so a restart orphans
+// every key issued before it, leaving a working credential with nothing left to
+// revoke it.
+//
+// The 24-hour cutoff is fixed and is not the configured session lifetime. It is
+// read from the `@oidc-pam-<timestamp>` comment the broker writes, so a key whose
+// comment is missing or malformed is retained rather than removed — cleanup fails
+// safe, never early. Authoritative expiry is the broker session; this is
+// best-effort maintenance.
 func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 	if err := validateUsername(username); err != nil {
 		return fmt.Errorf("invalid username: %w", err)
@@ -360,7 +372,12 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 	})
 }
 
-// ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file
+// ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file.
+//
+// Operator-facing: nothing in the authentication path calls this. It exists so
+// that an administrator investigating a user's access can see which
+// authorized_keys entries this broker is responsible for, distinguished from the
+// user's own keys by the `@oidc-pam-<timestamp>` comment.
 func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error) {
 	if err := validateUsername(username); err != nil {
 		return nil, fmt.Errorf("invalid username: %w", err)
@@ -393,7 +410,12 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 	return oidcKeys, nil
 }
 
-// BackupAuthorizedKeys creates a backup of the authorized_keys file
+// BackupAuthorizedKeys creates a backup of the authorized_keys file.
+//
+// Operator-facing recovery API, paired with RestoreAuthorizedKeys; the broker
+// does not call it during authentication. The key-management functions rewrite a
+// file the user also owns, so a copy taken before a manual intervention is worth
+// having.
 func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	if err := validateUsername(username); err != nil {
 		return fmt.Errorf("invalid username: %w", err)
@@ -442,7 +464,13 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	return nil
 }
 
-// RestoreAuthorizedKeys restores the authorized_keys file from backup
+// RestoreAuthorizedKeys restores the authorized_keys file from the backup taken
+// by BackupAuthorizedKeys.
+//
+// Operator-facing recovery API; the broker does not call it. Note that it
+// restores whatever was in the file at backup time, which will reinstate any
+// broker-issued keys that were present then — run the expiry sweep afterwards if
+// that matters.
 func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
 	if err := validateUsername(username); err != nil {
 		return fmt.Errorf("invalid username: %w", err)
