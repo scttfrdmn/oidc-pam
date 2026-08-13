@@ -115,6 +115,31 @@ int get_user_info(pam_handle_t *pamh, const char **username, const char **servic
     return PAM_SUCCESS;
 }
 
+// Classify the login for the broker's per-login-type policies. This must agree
+// with GetLoginType in cgo_wrapper.go: the C module and the Go client would
+// otherwise select different policies for the same login. See
+// TestLoginTypeClassificationMatchesGo.
+const char *classify_login_type(const char *service, const char *tty) {
+    if (service == NULL) {
+        service = "";
+    }
+    if (tty == NULL) {
+        tty = "";
+    }
+
+    if (strcmp(service, "sshd") == 0) {
+        return "ssh";
+    }
+    if (strcmp(service, "gdm") == 0 || strcmp(service, "lightdm") == 0 ||
+        strcmp(service, "sddm") == 0) {
+        return "gui";
+    }
+    if (strncmp(tty, "tty", 3) == 0) {
+        return "console";
+    }
+    return "unknown";
+}
+
 // Send authentication request to broker
 int send_auth_request(int sock, const char *username, const char *service, const char *rhost, const char *tty) {
     json_object *request = json_object_new_object();
@@ -125,15 +150,7 @@ int send_auth_request(int sock, const char *username, const char *service, const
     json_object *service_obj = json_object_new_string(service);
     json_object *tty_obj = json_object_new_string(tty);
 
-    // Determine login type based on service and TTY.
-    const char *login_type_str = "unknown";
-    if (strcmp(service, "sshd") == 0) {
-        login_type_str = "ssh";
-    } else if (strstr(tty, "tty") != NULL) {
-        login_type_str = "console";
-    } else if (strstr(service, "gdm") != NULL || strstr(service, "lightdm") != NULL) {
-        login_type_str = "gui";
-    }
+    const char *login_type_str = classify_login_type(service, tty);
 
     // Add metadata
     json_object_object_add(metadata, "service", service_obj);

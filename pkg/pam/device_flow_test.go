@@ -371,3 +371,42 @@ func TestPerformAuthenticationRejectsOverlongSessionID(t *testing.T) {
 		t.Fatalf("expected no polling, got %d requests", n)
 	}
 }
+
+// TestLoginTypeClassificationMatchesGo pins the C module's login-type
+// classification to GetLoginType's. The broker applies per-login-type policy, so
+// if pam_oidc.so and the Go client disagreed, the same login would be evaluated
+// against different rules depending on which client handled it. The C side used
+// to differ on both counts covered here: it matched "gdm"/"lightdm" as
+// substrings but not "sddm" at all, and it tested the TTY before the service, so
+// a display manager on tty1 was classified "console".
+func TestLoginTypeClassificationMatchesGo(t *testing.T) {
+	cases := []struct {
+		service string
+		tty     string
+	}{
+		{"sshd", "pts/0"},
+		{"sshd", "tty1"},
+		{"gdm", "tty1"},
+		{"lightdm", "tty7"},
+		{"sddm", "tty1"},
+		{"gdm3", "tty1"},
+		{"login", "tty1"},
+		{"login", "tty"},
+		{"login", "tty12"},
+		{"login", "pts/0"},
+		{"su", "unknown"},
+		{"sudo", ""},
+		{"", ""},
+		{"SSHD", "pts/0"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.service+"/"+tc.tty, func(t *testing.T) {
+			want := GetLoginType(tc.service, tc.tty)
+			if got := classifyLoginTypeC(tc.service, tc.tty); got != want {
+				t.Errorf("C classify_login_type(%q, %q) = %q, Go GetLoginType = %q",
+					tc.service, tc.tty, got, want)
+			}
+		})
+	}
+}
