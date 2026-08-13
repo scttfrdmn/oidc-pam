@@ -492,7 +492,12 @@ func TestBrokerAuthenticateScenarios(t *testing.T) {
 	}
 }
 
-// Test pollDeviceAuthorization method
+// Test pollDeviceAuthorization method.
+//
+// This is a smoke test only — it needs network dependencies it does not have,
+// so it returns early. The poll loop's actual behaviour (pending polls,
+// slow_down, terminal errors, expiry) is covered in device_poll_test.go against
+// an in-process issuer.
 func TestBrokerPollDeviceAuthorization(t *testing.T) {
 	cfg := &config.Config{
 		OIDC: config.OIDCConfig{

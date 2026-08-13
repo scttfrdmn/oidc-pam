@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -37,6 +38,22 @@ type Broker struct {
 	pendingFlows          int64                // atomic counter of in-progress device authorization goroutines
 	version               string               // build version, set via SetVersion; reported by Status
 	startedAt             time.Time            // when Start ran; zero until then. Reported by Status
+
+	// pollIntervalUnit is how much real time one second of a provider's
+	// polling interval is worth. Zero means time.Second, which is what
+	// production always uses; tests shrink it so a flow that must survive
+	// several authorization_pending polls finishes in milliseconds instead of
+	// the ~15 s that RFC 8628's 5 s floor would otherwise cost.
+	pollIntervalUnit time.Duration
+}
+
+// pollUnit is the real-time duration of one second of a device flow's polling
+// interval. See the pollIntervalUnit field.
+func (b *Broker) pollUnit() time.Duration {
+	if b.pollIntervalUnit <= 0 {
+		return time.Second
+	}
+	return b.pollIntervalUnit
 }
 
 // SetMetrics attaches a Metrics instance to the broker and its policy engine.
@@ -798,7 +815,10 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 	defer b.wg.Done()
 	defer atomic.AddInt64(&b.pendingFlows, -1)
 
-	ticker := time.NewTicker(time.Duration(deviceFlow.PollingInterval) * time.Second)
+	// interval is not fixed: RFC 8628 §3.5 lets the provider ask for a slower
+	// poll rate mid-flow with slow_down, and requires the client to comply.
+	interval := deviceFlow.PollingInterval
+	ticker := time.NewTicker(time.Duration(interval) * b.pollUnit())
 	defer ticker.Stop()
 
 	timeout := time.NewTimer(time.Until(deviceFlow.ExpiresAt))
@@ -818,10 +838,30 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			token, err := provider.PollDeviceAuthorization(pollCtx, deviceFlow.DeviceCode, deviceFlow.Nonce)
 			pollCancel()
 			if err != nil {
-				// Handle specific error types
-				if err.Error() == "authorization_pending" {
-					continue // Keep polling
+				// The user has not finished at the IdP yet. This is the normal
+				// answer to every poll before the last one, so it must not end the
+				// flow — only the deadline above does. (#150: this used to be a
+				// string comparison against an error that never matched, so the
+				// first pending poll deleted the session, roughly five seconds
+				// after the verification URL was displayed.)
+				if errors.Is(err, ErrAuthorizationPending) {
+					continue
 				}
+
+				// The provider is asking to be polled less often, and RFC 8628 §3.5
+				// requires compliance rather than a retry at the old rate.
+				if errors.Is(err, ErrSlowDown) {
+					if interval < maxPollingInterval {
+						interval = min(interval+slowDownIncrement, maxPollingInterval)
+						ticker.Reset(time.Duration(interval) * b.pollUnit())
+					}
+					log.Debug().
+						Str("session_id", session.ID).
+						Int("polling_interval", interval).
+						Msg("Provider asked to slow down device authorization polling")
+					continue
+				}
+
 				// Other errors mean failure. Use a bounded error-code enum for the
 				// metric label (never the raw error string) to avoid Prometheus
 				// cardinality explosion and leaking transient infra detail.
