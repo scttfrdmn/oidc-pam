@@ -1308,7 +1308,8 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 	}
 
 	// Remove from authorized_keys (best effort — do not abort on failure)
-	if err := b.authorizedKeysManager.RemovePublicKey(session.UserID, sshKey.PublicKey); err != nil {
+	removed, err := b.authorizedKeysManager.RemovePublicKey(session.UserID, sshKey.PublicKey)
+	if err != nil {
 		log.Warn().
 			Err(err).
 			Str("session_id", session.ID).
@@ -1324,11 +1325,54 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 		return fmt.Errorf("failed to delete SSH key files: %w", err)
 	}
 
+	// The authorized_keys line is what grants the access, so only its removal is a
+	// revocation. A no-match means the credential is still authorized, and #165 was
+	// exactly this outcome being reported as "SSH key revoked" with a success metric:
+	// the audit trail asserted a revocation that had not happened, for a line that
+	// (having been fused with a comment) could no longer be removed by anything.
+	// Still best effort — the session is gone either way — but audited as the failure
+	// it is, so an operator can find the host and the file.
+	if !removed {
+		log.Warn().
+			Str("session_id", session.ID).
+			Str("user_id", session.UserID).
+			Str("ssh_key_id", session.SSHKeyID).
+			Msg("SSH key files deleted but no matching authorized_keys entry was removed")
+
+		if b.auditLogger != nil {
+			b.auditLogger.LogAuthEvent(security.AuditEvent{
+				EventType:    "ssh_key_revocation_incomplete",
+				UserID:       session.UserID,
+				Email:        session.Email,
+				SessionID:    session.ID,
+				Success:      false,
+				ErrorCode:    "AUTHORIZED_KEYS_ENTRY_NOT_REMOVED",
+				ErrorMessage: "no authorized_keys line matched the revoked key; it may still authorize access",
+				Timestamp:    time.Now(),
+			})
+		}
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("revoke", "failure")
+		}
+
+		return nil
+	}
+
 	log.Info().
 		Str("session_id", session.ID).
 		Str("ssh_key_id", session.SSHKeyID).
 		Msg("SSH key revoked")
 
+	if b.auditLogger != nil {
+		b.auditLogger.LogAuthEvent(security.AuditEvent{
+			EventType: "ssh_key_revoked",
+			UserID:    session.UserID,
+			Email:     session.Email,
+			SessionID: session.ID,
+			Success:   true,
+			Timestamp: time.Now(),
+		})
+	}
 	if b.metrics != nil {
 		b.metrics.RecordSSHKeyOp("revoke", "success")
 	}

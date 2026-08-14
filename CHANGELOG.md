@@ -45,6 +45,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allowed_roles` on its own; and the three-way composition with `require_groups`.
   Re-applying the filter makes four of them fail, one of them (`required but not
   allowed`) by demonstrating the interaction above.
+- **High (#165): after any expiry sweep, the next login's SSH key became
+  permanently unrevocable while the audit log reported it as revoked.** The sweep
+  rewrote `authorized_keys` from a `bufio.Scanner`, which strips newlines, and
+  joined the survivors without restoring the final one — so the file was left
+  unterminated. `AddPublicKey` appends with `O_APPEND`, so the user's next login
+  fused its `# Added by OIDC PAM on …` comment onto the last surviving key line.
+  sshd still honours the key on such a line, but nothing can remove it again: the
+  sweep can no longer parse the timestamp out of `…@oidc-pam-1770000000# Added by…`
+  and so retains the key (fail-safe by design), and targeted revocation compares
+  the whole line and no longer matches. `RemovePublicKey` returned `nil` for "no
+  such line" exactly as it did for a real removal, so the broker went on to log
+  `SSH key revoked` at Info and record a revoke-success metric for a removal that
+  changed nothing. No attacker is needed: one expired key plus one later login.
+
+  - Both rewrite paths now go through one writer, `writeAuthorizedKeysLines`, which
+    guarantees the file ends in exactly one newline. The two paths previously
+    derived the file's tail independently — `RemovePublicKey` split on `"\n"` and
+    happened to be correct, the sweep did not — and sharing the writer is what
+    stops them disagreeing again.
+  - `AddPublicKey` terminates an unterminated last line before appending, so a file
+    left that way by anything else (a user's editor, a broker from before this fix)
+    cannot fuse the next key either.
+  - `RemovePublicKey` now returns `(removed bool, err error)`. A caller cannot
+    silently mistake "there was no such line" for "the line is gone"; `removed=false`
+    with a nil error means the entry is still there.
+  - `revokeSSHKey` audits the two outcomes separately: `ssh_key_revoked`
+    (`success=true`) only when an `authorized_keys` line was actually removed, and
+    otherwise `ssh_key_revocation_incomplete` with
+    `ErrorCode=AUTHORIZED_KEYS_ENTRY_NOT_REMOVED` and a revoke-**failure** metric,
+    naming the user and session so an operator can find the file.
+  - Note for operators: entries already fused by this defect are not repaired by
+    the fix — they are indistinguishable from a legitimate key whose comment field
+    contains a `#`. Grep for `# Added by OIDC PAM` on a line that does not start
+    with `#` and delete those lines by hand.
 - **High (#164): if the identity provider stopped returning the configured
   `username_claim`, the authorization decision moved silently to `sub`.** An absent
   `preferred_username` or `sub` claim was substituted with `userInfo.Subject`, and an

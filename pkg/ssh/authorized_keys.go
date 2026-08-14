@@ -225,6 +225,34 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
 	return nil
 }
 
+// writeAuthorizedKeysLines renders the surviving lines back to authorized_keys,
+// guaranteeing the file ends in exactly one newline.
+//
+// (#165) Both rewrite paths go through this because they used to disagree, and one
+// of them was wrong: RemovePublicKey split on "\n" — which keeps a trailing empty
+// element, so Join restored the final newline — while RemoveExpiredKeys used a
+// bufio.Scanner, which drops it. A file left without a final newline is not merely
+// untidy: AddPublicKey appends with O_APPEND, so the next login fused its
+// "# Added by OIDC PAM" comment onto the last surviving key line. The resulting
+// entry still authorizes its holder but can never be removed again — the expiry
+// sweep can no longer parse its timestamp and targeted revocation no longer matches
+// the line — while the broker audited the failed removal as a success.
+//
+// Sharing one write path is the point: two callers deriving the file's tail
+// independently is what allowed them to differ in the first place.
+func writeAuthorizedKeysLines(sshDir, path string, lines []string) error {
+	// Trailing blanks are dropped so that a caller's choice of line splitting
+	// cannot change the file's tail, then the last real line is terminated.
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	var content []byte
+	if len(lines) > 0 {
+		content = []byte(strings.Join(lines, "\n") + "\n")
+	}
+	return writeAuthorizedKeysAtomic(sshDir, path, content)
+}
+
 // AuthorizedKeysManager manages authorized_keys files for users
 type AuthorizedKeysManager struct {
 	baseDir     string
@@ -288,8 +316,15 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	return withFileLock(lockPath, akm.lockTimeout, func() error {
 		// Read existing authorized_keys file
 		var existingKeys []string
+		// (#165) Whether the file needs a newline before this append. The rewrite
+		// paths now always leave one, but the file belongs to the user and can be
+		// edited by anything: appending to a file whose last line is unterminated
+		// fuses the comment below onto that line, producing an entry no remover can
+		// ever match again. Cheap to check here, and it is the last chance to.
+		needsSeparator := false
 		if data, err := os.ReadFile(authorizedKeysPath); err == nil {
 			existingKeys = strings.Split(string(data), "\n")
+			needsSeparator = len(data) > 0 && data[len(data)-1] != '\n'
 		}
 
 		// Check if key already exists
@@ -309,6 +344,12 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 			return fmt.Errorf("failed to open authorized_keys file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
+
+		if needsSeparator {
+			if _, err := file.WriteString("\n"); err != nil {
+				return fmt.Errorf("failed to terminate the last authorized_keys line: %w", err)
+			}
+		}
 
 		// Add timestamp comment
 		timestamp := time.Now().Format("2006-01-02 15:04:05")
@@ -331,10 +372,18 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	})
 }
 
-// RemovePublicKey removes a public key from a user's authorized_keys file
-func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []byte) error {
+// RemovePublicKey removes a public key from a user's authorized_keys file. It
+// reports whether a matching line was actually found and removed.
+//
+// (#165) The removed flag is not decoration. This used to return only an error, and
+// nil for both "the line is gone" and "there was no such line", so the broker logged
+// "SSH key revoked" and recorded a revoke-success metric for a removal that changed
+// nothing — the audit trail asserted a revocation that had not happened while the
+// credential stayed usable. Callers must distinguish the two: removed=false, err=nil
+// means the entry is still there, if it was ever there at all.
+func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []byte) (bool, error) {
 	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+		return false, fmt.Errorf("invalid username: %w", err)
 	}
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
@@ -343,10 +392,11 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 
 	// Check if .ssh directory exists; if not, nothing to remove
 	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
-		return nil
+		return false, nil
 	}
 
-	return withFileLock(lockPath, akm.lockTimeout, func() error {
+	removed := false
+	err := withFileLock(lockPath, akm.lockTimeout, func() error {
 		// Read existing authorized_keys file
 		data, err := os.ReadFile(authorizedKeysPath)
 		if err != nil {
@@ -361,7 +411,6 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 		keyToRemove := strings.TrimSpace(string(publicKey))
 
 		var filteredLines []string
-		removed := false
 
 		for _, line := range lines {
 			trimmedLine := strings.TrimSpace(line)
@@ -380,8 +429,7 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 		}
 
 		// Write filtered content back atomically, refusing to follow symlinks (C-2).
-		newContent := strings.Join(filteredLines, "\n")
-		if err := writeAuthorizedKeysAtomic(sshDir, authorizedKeysPath, []byte(newContent)); err != nil {
+		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath, filteredLines); err != nil {
 			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
@@ -392,6 +440,10 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
 }
 
 // RemoveExpiredKeys removes broker-issued keys older than 24 hours from a user's
@@ -479,8 +531,9 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 
 		if removedCount > 0 {
 			// Write filtered content back atomically, refusing to follow symlinks (C-2).
-			newContent := strings.Join(filteredLines, "\n")
-			if err := writeAuthorizedKeysAtomic(sshDir, authorizedKeysPath, []byte(newContent)); err != nil {
+			// The scanner has stripped every line's newline, so the shared writer is
+			// what puts the file's final one back (#165).
+			if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath, filteredLines); err != nil {
 				return fmt.Errorf("failed to write authorized_keys file: %w", err)
 			}
 
