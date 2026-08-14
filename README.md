@@ -69,7 +69,7 @@ bundled installer. The installer places the binaries, an example config, and the
 systemd unit; it does **not** modify PAM unless you pass `--configure-pam`.
 
 ```bash
-VERSION=v0.4.0
+VERSION=v0.5.0
 ARCH=amd64   # or arm64
 
 curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
@@ -95,7 +95,8 @@ cosign verify-blob \
 
 gh attestation verify oidc-pam-${VERSION}-linux-${ARCH}.tar.gz \
   --repo scttfrdmn/oidc-pam \
-  --signer-workflow scttfrdmn/oidc-pam/.github/workflows/release.yml
+  --signer-workflow scttfrdmn/oidc-pam/.github/workflows/release.yml \
+  --source-ref refs/tags/${VERSION}
 ```
 
 Both must succeed before you install. See

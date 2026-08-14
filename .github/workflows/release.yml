@@ -64,6 +64,17 @@ jobs:
             fail=1
           fi
 
+          # The README's download snippet must name this version too. It is not a
+          # cosmetic string: every curl, tar and cosign command in that block
+          # interpolates it, so a stale value tells readers to download the wrong
+          # release and to verify a signature it does not have. This drifted to two
+          # versions behind precisely because only the badge was checked (#180).
+          snippet=$(grep -oE '^VERSION=v[0-9][^ ]*' README.md | head -1 | sed 's/^VERSION=v//')
+          if [ "$snippet" != "$VERSION" ]; then
+            echo "::error::README download snippet says VERSION=v$snippet but the tag is '$VERSION'. Use scripts/release.sh to cut releases."
+            fail=1
+          fi
+
           # CHANGELOG must have a section header for this version.
           if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [${VERSION}]' section. Use scripts/release.sh to cut releases."
@@ -499,8 +510,11 @@ jobs:
           sha256sum --ignore-missing -c SHA256SUMS
 
           # 3. The SLSA build provenance: which workflow, commit and builder made it.
+          #    --repo alone passes for any attestation this repository ever made;
+          #    --signer-workflow pins the workflow and --source-ref the tag.
           gh attestation verify "\${TARBALL}" --repo ${GITHUB_REPOSITORY} \\
-            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml \\
+            --source-ref refs/tags/${VERSION}
           \`\`\`
 
           Each command must print \`Verified OK\` (cosign) or a successful
