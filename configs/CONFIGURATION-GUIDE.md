@@ -566,6 +566,9 @@ absent.
 | `server.require_peer_auth` | `true` | Verify the peer's credentials over `SO_PEERCRED` and accept uid 0 only. Turning this off lets any local process talk to the broker; there is no reason to. |
 | `server.metrics_addr` | *(unset)* | TCP address for the Prometheus `/metrics` endpoint, e.g. `127.0.0.1:9090`. Unset means no listener. The endpoint is unauthenticated — bind it to loopback. |
 | `authentication.idle_timeout` | *(unset)* | Expire a session this long after its last use, in addition to `token_lifetime`. Unset means only `token_lifetime` applies. |
+| `authentication.max_pending_auths_per_source` | `5` | How many logins one account may have awaiting device approval at once from one source address. Clamped to 1–32; `0` means the default, not "unlimited". See below. |
+| `authentication.pending_auth_lifetime` | `15m` | How long a login that never completes keeps its slot. Clamped to 1m–1h. See below. |
+| `authentication.require_local_account` | `true` | Refuse a login for an account this host does not have before contacting the provider. See below. |
 | `authentication.allow_privileged_accounts` | *(empty)* | The named exceptions to "no OIDC identity may log in as uid < 1000". See above. |
 | `authentication.geoip_database_path` | *(unset)* | MaxMind GeoLite2 database for `geo_restrictions`. Without it every country code is empty, so an `allowed_countries` restriction denies everyone. |
 | `authentication.location_history.*` | 90d, 10 entries, memory | Window, per-user cap and `persist_path` for the "unusual location" risk signal. |
@@ -575,6 +578,37 @@ absent.
 | `audit.overflow_strategy` | `block` | What happens when that channel is full: `block` (backpressure), `sync` (write inline), or `drop` (discard and count). `drop` loses audit records and must be chosen deliberately. |
 | `audit.outputs[].type` | — | `file`, `stdout`, `syslog` or `http`. Any other value is refused at startup. |
 | `audit.enabled` | `true` | Whether to audit at all. With no `audit.outputs` alongside it the broker refuses to start, rather than accepting events and discarding them (#210). |
+
+### Logins Nobody Has Completed Yet
+
+Between showing a verification URL and the user approving it, the broker is
+holding a login that has proved nothing about who asked for it: sshd runs the PAM
+stack for whatever username a remote client offers, before that client has
+authenticated. The three settings above bound what such a login may cost.
+
+`max_pending_auths_per_source` is counted per (account, source address) pair, not
+per account. The account is the part of the request a client chooses freely, so a
+cap on it alone can be filled on somebody else's behalf — which is what #163
+was: unfinished logins counted towards `max_concurrent_sessions`, so a handful of
+connection attempts naming one account locked its owner out. They no longer count
+towards it. Raise this if your users routinely open more than five terminals at
+once and see `TOO_MANY_PENDING_AUTHS`; the value is clamped to 32 because a
+per-source cap as large as the host-wide pool is not a cap.
+
+`pending_auth_lifetime` is the broker's own deadline on an unfinished login,
+replacing the device code's `expires_in` — a number the provider chooses, and may
+set as high as 24 hours. The PAM module gives up after 90 seconds, so anything
+still pending after that is a login nobody is waiting for. Shortening it below a
+minute is not possible; a user who has to fetch their phone needs the window.
+
+`require_local_account` refuses a login naming an account this host does not have
+before the provider is contacted. Such a login could never have succeeded — sshd
+needs a passwd entry, and the identity binding resolves the account again at the
+end of the flow — so all this changes is what it costs to ask: without it, every
+ssh scanner on the internet starts device authorizations against your identity
+provider. The trade is that a remote client can tell a real local account from an
+invented one by whether it is offered a device code. Set it to `false` if that
+matters more to you than the requests.
 
 ## Authentication Policies
 

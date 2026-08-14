@@ -1,8 +1,8 @@
 package auth
 
 import (
+	"fmt"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,9 +85,38 @@ func TestEveryRefusedLoginIsAuditedWithItsErrorCode(t *testing.T) {
 			wantCode:      "RATE_LIMITED",
 			wantReasonHas: "pending device authorization flows",
 			setup: func(_ *testing.T, env *denialTestEnv) {
-				// The cap is checked after the flow is started, so this is the state a
-				// host under a flood of unfinished logins is in.
-				atomic.StoreInt64(&env.broker.pendingFlows, 100)
+				// (#163) A full pool refuses only a requester that already holds as many
+				// unfinished logins as its largest holder does — otherwise it displaces
+				// one and admits this login, which is what stops the pool being a
+				// host-wide lockout. So: ninety-nine other pairs holding one each, and
+				// one already held by this pair.
+				for i := 0; i < 99; i++ {
+					env.broker.setSession(pendingSessionFixture(
+						fmt.Sprintf("other-%d", i), fmt.Sprintf("user-%d", i), "198.51.100.4"))
+				}
+				env.broker.setSession(pendingSessionFixture("mine", "testuser", "192.0.2.10"))
+			},
+			req: &AuthRequest{UserID: "testuser", SourceIP: "192.0.2.10", LoginType: "ssh"},
+		},
+		{
+			name:          "this account and address are at their pending-flow cap",
+			wantCode:      "TOO_MANY_PENDING_AUTHS",
+			wantReasonHas: "awaiting device approval",
+			setup: func(_ *testing.T, env *denialTestEnv) {
+				for i := 0; i < defaultMaxPendingAuthsPerSource; i++ {
+					env.broker.setSession(pendingSessionFixture(
+						fmt.Sprintf("pending-%d", i), "testuser", "192.0.2.10"))
+				}
+			},
+			req: &AuthRequest{UserID: "testuser", SourceIP: "192.0.2.10", LoginType: "ssh"},
+		},
+		{
+			name:          "the account does not exist on this host",
+			wantCode:      "NO_LOCAL_ACCOUNT",
+			wantReasonHas: "no such local account",
+			setup: func(_ *testing.T, env *denialTestEnv) {
+				env.broker.config.Authentication.RequireLocalAccount = true
+				env.broker.lookupLocalUID = func(string) (int, bool, error) { return 0, false, nil }
 			},
 			req: &AuthRequest{UserID: "testuser", SourceIP: "192.0.2.10", LoginType: "ssh"},
 		},

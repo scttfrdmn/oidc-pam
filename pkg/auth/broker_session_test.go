@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -366,21 +367,20 @@ func TestAuthenticateTooManySessions(t *testing.T) {
 	// Set max concurrent sessions to 2
 	broker.config.Authentication.MaxConcurrentSessions = 2
 
-	// Create 2 sessions (should succeed)
+	// Two logins the user has already completed. They have to be *established*
+	// sessions: max_concurrent_sessions bounds the access one identity holds, and
+	// since #163 a login still waiting for device approval does not count towards it
+	// — otherwise anyone who can reach the broker fills a chosen account's limit with
+	// logins nobody approved.
 	for i := 0; i < 2; i++ {
-		req := &AuthRequest{
-			UserID:     "test-user",
-			SourceIP:   "127.0.0.1",
-			TargetHost: "test-host",
-			LoginType:  "ssh",
-		}
-		resp, err := broker.Authenticate(req)
-		if err != nil {
-			t.Fatalf("Authenticate call %d failed: %v", i+1, err)
-		}
-		if resp.ErrorCode == "TOO_MANY_SESSIONS" {
-			t.Fatalf("Authenticate call %d should not hit session limit", i+1)
-		}
+		broker.setSession(&Session{
+			ID:        fmt.Sprintf("established-%d", i),
+			UserID:    "test-user",
+			SourceIP:  "127.0.0.1",
+			IsActive:  true,
+			CreatedAt: time.Now(),
+			ExpiresAt: time.Now().Add(time.Hour),
+		})
 	}
 
 	// 3rd session should be rejected
@@ -600,6 +600,11 @@ func TestAuthenticateSessionIDUniqueness(t *testing.T) {
 	broker, server := newTestBrokerWithDeviceServer(t)
 	defer server.Close()
 	defer func() { close(broker.stopChan); broker.wg.Wait() }()
+
+	// Ten logins in flight for one account from one address is above the per-source
+	// pending cap this suite otherwise defaults to (#163), and this test is about the
+	// IDs, not the cap.
+	broker.config.Authentication.MaxPendingAuthsPerSource = 10
 
 	seen := make(map[string]bool)
 	for i := 0; i < 10; i++ {

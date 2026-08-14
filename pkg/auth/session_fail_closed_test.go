@@ -35,6 +35,18 @@ func TestDeviceFlowWillNotActivateASessionThatIsGone(t *testing.T) {
 	// The operator revokes it while the provider round-trip is in flight.
 	env.broker.removeSession(env.session.ID)
 
+	// A revocation now also cancels the flow's polling (#163), and a flow that
+	// notices the cancellation stops before it has anything to withdraw. This test is
+	// about the other ordering, which is still reachable and is the one that can leave
+	// a credential behind: the revocation landed while this goroutine was inside the
+	// token request, so it had already passed the select that watches for
+	// cancellation and runs to completion regardless. Re-arming the channel after the
+	// revocation is how that ordering is made deterministic — the flow has not
+	// started, so nothing else can be reading it — and it leaves the pointer-identity
+	// check at the end of the flow as the only thing standing between a revoked
+	// session and an active one with a key installed.
+	env.session.cancel = make(chan struct{})
+
 	env.run(t)
 
 	if session := env.activeSession(); session != nil {

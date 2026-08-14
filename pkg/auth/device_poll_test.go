@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -154,6 +153,10 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 		LastAccessed: time.Now(),
 		SourceIP:     "192.0.2.10",
 		IsActive:     false,
+		// (#163) Every pending session the broker mints carries the channel that
+		// tells its poll loop to stop, so a fixture that stands in for one has to
+		// have it too.
+		cancel: make(chan struct{}),
 	}
 	broker.setSession(session)
 
@@ -223,7 +226,6 @@ func (e *pollTestEnv) run(t *testing.T) time.Duration {
 	t.Helper()
 
 	e.broker.wg.Add(1)
-	atomic.AddInt64(&e.broker.pendingFlows, 1)
 
 	started := time.Now()
 	done := make(chan struct{})
