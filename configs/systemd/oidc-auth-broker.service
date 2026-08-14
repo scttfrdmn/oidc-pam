@@ -43,7 +43,21 @@ ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oid
 # host installed by hand does not fail on a missing state directory.
 StateDirectory=oidc-pam
 StateDirectoryMode=0700
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+# CAP_CHOWN is what lets the broker hand a newly written authorized_keys to the
+# account it belongs to. CapabilityBoundingSet caps the *effective* set even for
+# User=root, so without it every chown(2) to another uid returned EPERM, every SSH
+# key provisioning failed, and — on a host wired with configs/pam/ssh — every login
+# was denied (#202).
+#
+# CI never saw it: the containerized e2e harness runs with Docker's default
+# capability set, which includes CAP_CHOWN, so the harness was structurally more
+# permissive than the host this unit describes (see #189).
+#
+# Granting this is only safe because the handover goes through fchown(2) on an
+# already-open descriptor rather than chown(2) on a path the account can replace
+# with a symlink (#203). Do not grant it back without that; the two changes landed
+# in the same commit for this reason.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Logging
 StandardOutput=journal

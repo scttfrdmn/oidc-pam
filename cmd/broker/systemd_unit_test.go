@@ -65,6 +65,22 @@ func TestShippedUnitLetsTheBrokerWriteWhereItMust(t *testing.T) {
 			"every issued key", got)
 	}
 
+	// CapabilityBoundingSet caps the effective set even for User=root, so a capability
+	// missing from this list is one the broker does not have. Handing a newly written
+	// authorized_keys to its owner needs CAP_CHOWN; without it every chown(2) to
+	// another uid returns EPERM, provisioning fails, and every login through
+	// configs/pam/ssh is denied (#202).
+	//
+	// This assertion exists because nothing else could catch it: the e2e harness runs
+	// in a container with Docker's default capability set, which includes CAP_CHOWN,
+	// so it is strictly more permissive than the host this unit describes.
+	caps := strings.Fields(settings["CapabilityBoundingSet"])
+	if !slices.Contains(caps, "CAP_CHOWN") {
+		t.Errorf("CapabilityBoundingSet=%q omits CAP_CHOWN, so the broker cannot give an "+
+			"account its own authorized_keys and every SSH login is denied (#202)",
+			settings["CapabilityBoundingSet"])
+	}
+
 	// The hardening that is not in the way stays on, so this test cannot be
 	// satisfied by simply removing the sandbox.
 	for setting, want := range map[string]string{
