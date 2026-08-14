@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -32,15 +31,11 @@ func authResponse(t *testing.T, v any) *Response {
 	return response
 }
 
-// skipIfNotRootOnLinux skips the test when running on Linux as a non-root user.
-// The IPC server's verifyPeerCredentials unconditionally requires UID 0 on Linux,
-// so any test that connects to the socket will be rejected when run as non-root.
-func skipIfNotRootOnLinux(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "linux" && os.Getuid() != 0 {
-		t.Skip("verifyPeerCredentials requires UID 0 on Linux; skipping on non-root runner")
-	}
-}
+// There is deliberately no skipIfNotRootOnLinux helper any more. It skipped every
+// test that spoke to the socket unless the suite ran as root on Linux, which no run
+// of this project's CI has ever done, so the trust boundary's own tests were absent
+// rather than passing. startSocketTestServer replaces the peer-credential lookup
+// instead, so they run (#189).
 
 func TestNewServer(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "ipc-test-*")
@@ -108,32 +103,12 @@ func TestServerLifecycle(t *testing.T) {
 	}
 }
 
+// A peer that writes something other than a request does not take the server down.
+//
+// Non-JSON is the case that reaches the new malformed-request accounting first, since
+// it fails at the decode rather than in the validator.
 func TestServerConnection(t *testing.T) {
-	skipIfNotRootOnLinux(t)
-	tempDir, err := os.MkdirTemp("", "ipc-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
-	socketPath := filepath.Join(tempDir, "test.sock")
-	broker := createTestBroker(t)
-	server, err := NewServer(socketPath, broker, 0660, "", false, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
-
-	// Start server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go func() {
-		_ = server.Start(ctx)
-	}()
-
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
-	defer func() { _ = server.Stop() }()
+	_, socketPath := startSocketTestServer(t, createTestBroker(t), 0, 0)
 
 	// Test connection
 	conn, err := net.Dial("unix", socketPath)
@@ -142,42 +117,27 @@ func TestServerConnection(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Write test data
-	testData := []byte("test message")
-	if _, err := conn.Write(testData); err != nil {
-		t.Errorf("Failed to write data: %v", err)
+	if _, err := conn.Write([]byte("test message")); err != nil {
+		t.Fatalf("Failed to write data: %v", err)
 	}
 
-	// Test that connection is handled (server should not crash)
-	time.Sleep(100 * time.Millisecond)
+	// The peer gets an answer, rather than the connection being dropped or the
+	// server going down. This used to sleep and assert nothing at all, which is
+	// what let it keep its root-on-Linux skip unnoticed.
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		t.Fatalf("no response to a non-JSON request: %v", err)
+	}
+	if resp.ErrorCode != "INVALID_REQUEST" {
+		t.Errorf("got error_code=%q, want INVALID_REQUEST", resp.ErrorCode)
+	}
+	if resp.Success {
+		t.Error("a request that did not decode was answered with success")
+	}
 }
 
 func TestServerMultipleConnections(t *testing.T) {
-	skipIfNotRootOnLinux(t)
-	tempDir, err := os.MkdirTemp("", "ipc-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
-	socketPath := filepath.Join(tempDir, "test.sock")
-	broker := createTestBroker(t)
-	server, err := NewServer(socketPath, broker, 0660, "", false, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
-
-	// Start server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go func() {
-		_ = server.Start(ctx)
-	}()
-
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
-	defer func() { _ = server.Stop() }()
+	_, socketPath := startSocketTestServer(t, createTestBroker(t), 0, 0)
 
 	// Test multiple simultaneous connections
 	var conns []net.Conn
@@ -281,30 +241,7 @@ func TestServerDoubleStop(t *testing.T) {
 }
 
 func TestServerConnectionHandling(t *testing.T) {
-	skipIfNotRootOnLinux(t)
-	tempDir, err := os.MkdirTemp("", "ipc-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
-	socketPath := filepath.Join(tempDir, "test.sock")
-	broker := createTestBroker(t)
-	server, err := NewServer(socketPath, broker, 0660, "", false, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
-
-	// Start server
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go func() {
-		_ = server.Start(ctx)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	defer func() { _ = server.Stop() }()
+	_, socketPath := startSocketTestServer(t, createTestBroker(t), 0, 0)
 
 	// Connect and verify connection is handled
 	conn, err := net.Dial("unix", socketPath)
