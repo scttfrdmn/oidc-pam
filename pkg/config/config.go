@@ -247,8 +247,16 @@ type TLSVerification struct {
 
 // RateLimiting contains rate limiting settings
 type RateLimiting struct {
+	// MaxRequestsPerMinute is the budget for starting an authentication, per
+	// requested account — not a host-wide total. (#160) It was applied per peer
+	// uid, which is always 0 on a socket that only root may use, so a single
+	// bucket governed the whole machine and any caller could spend every login's
+	// budget. Requests about an existing session (check_session and friends) draw
+	// on a separate, larger budget so that a login already in flight can finish.
 	MaxRequestsPerMinute int `mapstructure:"max_requests_per_minute"`
-	MaxConcurrentAuths   int `mapstructure:"max_concurrent_auths"`
+
+	// MaxConcurrentAuths caps authentications in progress at once, host-wide.
+	MaxConcurrentAuths int `mapstructure:"max_concurrent_auths"`
 }
 
 // CloudConfig contains cloud provider integration settings

@@ -8,8 +8,17 @@ import (
 )
 
 const (
-	// maxRequestSize is the maximum allowed size for a JSON request (1 MB).
-	maxRequestSize = 1 << 20
+	// maxRequestSize is the maximum allowed size for a JSON request (64 KiB).
+	//
+	// The largest request these limits permit is around 40 KiB: 32 metadata entries
+	// of maxMetadataKeyLen + maxMetadataValueLen, plus the fixed fields. 64 KiB
+	// leaves room for JSON syntax and for a field to grow, and nothing legitimate
+	// comes close.
+	//
+	// It was 1 MiB, which mattered once rate limiting moved to after the decode
+	// (#160): this bound times maxConcurrentConnections is how much a peer can make
+	// the broker allocate before any limit has an opinion. 8 MiB, not 128 MiB.
+	maxRequestSize = 64 << 10
 
 	// maxUserIDLen is the maximum length for a Unix user ID.
 	maxUserIDLen = 32

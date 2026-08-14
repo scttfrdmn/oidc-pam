@@ -498,6 +498,52 @@ case_nonroot_ipc_rejected() {
     expect_no_audit authentication_successful
 }
 
+# #160: the request budget is per account, not per host. It used to be keyed on
+# the peer's uid, which is 0 for every caller on a root-only socket, so one bucket
+# governed the whole machine: an unauthenticated client opening SSH connections to
+# any syntactically valid username emptied it, and every login on the host was then
+# refused with PAM_MAXTRIES — with no password fallback in the shipped stack.
+#
+# The requests here name bob and go straight to the socket, because that is the
+# cheap version of the attack: no SSH, no credentials, nothing but a username.
+#
+# This runs after case_nonroot_ipc_rejected on purpose. It leaves pending device
+# flows behind, and that case asserts the issuer has not been polled at all.
+case_rate_limit_is_per_account() {
+    reset_state alice || return 1
+
+    # Must match max_requests_per_minute in broker.yaml, which is deliberately low
+    # so this case is quick. One request over the budget, so the last is refused —
+    # which is also what makes the assertion below fail loudly rather than quietly
+    # pass if that figure changes.
+    local budget=12
+    local request='{"type":"authenticate","user_id":"bob","login_type":"ssh","target_host":"client"}'
+    local response="" i
+    for ((i = 0; i <= budget; i++)); do
+        response="$(printf '%s' "${request}" | timeout 5 nc -U "${SOCKET}")"
+    done
+
+    if grep -q 'RATE_LIMIT_EXCEEDED' <<<"${response}"; then
+        log "bob's budget is spent after $((budget + 1)) requests naming him"
+    else
+        fail "$((budget + 1)) requests naming bob did not exhaust his budget: ${response:-<nothing>}"
+        return 1
+    fi
+
+    # And alice, who was never named, logs in normally. This is the assertion the
+    # unfixed broker fails: her authenticate drew on the same bucket bob's requests
+    # had just emptied.
+    #
+    # The approval also completes bob's pending flows, which are refused as
+    # IDENTITY_MISMATCH — the identity is alice's — and so write no keys.
+    control approve >/dev/null
+    attempt_login alice
+
+    expect_login_ok || return 1
+    expect_audit authentication_successful
+    expect_oidc_key_for alice
+}
+
 # With no broker there is no opinion to be had: the module must report that it
 # could not reach one (PAM_AUTHINFO_UNAVAIL) and the login must be refused, at
 # once rather than after the device-flow budget.
@@ -532,6 +578,7 @@ CASES=(
     group_denied
     account_stack_denies
     nonroot_ipc_rejected
+    rate_limit_is_per_account
     broker_down
 )
 

@@ -72,7 +72,7 @@ type Response struct {
 }
 
 // NewServer creates a new IPC server. maxRequestsPerMinute and
-// maxConcurrentAuths configure per-UID rate limiting and the global
+// maxConcurrentAuths configure per-account rate limiting and the global
 // concurrent auth cap respectively. Values <= 0 disable that limit.
 func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, socketGroup string, requirePeerAuth bool, maxRequestsPerMinute, maxConcurrentAuths int) (*Server, error) {
 	return &Server{
@@ -250,7 +250,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Verify peer credentials if required
-	var peerUID uint32
 	if s.requirePeerAuth {
 		uid, gid, err := getPeerCredentials(conn)
 		if err != nil {
@@ -268,21 +267,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 			s.sendErrorResponse(conn, "PEER_AUTH_DENIED", "Only root processes are allowed to connect")
 			return
 		}
-		peerUID = uid
 		log.Debug().
 			Uint32("uid", uid).
 			Uint32("gid", gid).
 			Msg("Peer credentials verified")
 	}
 
-	// Apply per-UID rate limiting
-	if !s.rateLimiter.AllowRequest(peerUID) {
-		log.Warn().
-			Uint32("uid", peerUID).
-			Msg("Rate limit exceeded for UID")
-		s.sendErrorResponse(conn, "RATE_LIMIT_EXCEEDED", clientErrorMessage("RATE_LIMIT_EXCEEDED"))
-		return
-	}
+	// Rate limiting happens in handleRequest, once the request has been decoded and
+	// validated: the limits are keyed on the account a request names, which is not
+	// known before then. It used to happen here, keyed on the peer uid — a value
+	// that can only ever be 0, so the whole host shared one bucket (#160).
 
 	log.Debug().
 		Str("remote_addr", conn.RemoteAddr().String()).
@@ -350,6 +344,20 @@ func responseSucceeded(response any) bool {
 // in internal/adminapi: a session listing does not fit into the fields of an
 // authentication response.
 func (s *Server) handleRequest(request *Request) any {
+	if class, limited := rateClassFor(request.Type); limited {
+		if !s.rateLimiter.Allow(class, request.UserID) {
+			log.Warn().
+				Str("request_type", request.Type).
+				Str("user_id", request.UserID).
+				Msg("Rate limit exceeded for account")
+			return &Response{
+				Success:      false,
+				ErrorCode:    "RATE_LIMIT_EXCEEDED",
+				ErrorMessage: clientErrorMessage("RATE_LIMIT_EXCEEDED"),
+			}
+		}
+	}
+
 	switch request.Type {
 	case "authenticate":
 		if !s.rateLimiter.AcquireAuth() {
@@ -383,6 +391,26 @@ func (s *Server) handleRequest(request *Request) any {
 			ErrorCode:    "INVALID_REQUEST_TYPE",
 			ErrorMessage: clientErrorMessage("INVALID_REQUEST_TYPE"),
 		}
+	}
+}
+
+// rateClassFor maps a request type to the budget it is charged against, and
+// reports whether it is charged at all.
+//
+// The administrative reads (status, sessions_list, keys_list) are not: they name no
+// account, so every one of them would share a single bucket, which is the shape of
+// the bug this replaced. They are already bounded by being root-only on a
+// local socket, and an operator running `oidc-admin` in a loop is not a threat
+// model — whereas an operator whose `oidc-admin status` is refused while they are
+// diagnosing an incident is a real cost.
+func rateClassFor(requestType string) (RateClass, bool) {
+	switch requestType {
+	case "authenticate":
+		return ClassAuthenticate, true
+	case "check_session", "refresh_session", "revoke_session":
+		return ClassSession, true
+	default:
+		return "", false
 	}
 }
 
