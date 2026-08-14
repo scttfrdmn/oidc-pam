@@ -838,17 +838,12 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 						}
 					}
 
-					// Enforce allowlist if configured — drop groups not in the set.
-					if len(mapping.AllowedGroups) > 0 {
-						allowed := make(map[string]bool, len(mapping.AllowedGroups))
-						for _, g := range mapping.AllowedGroups {
-							allowed[strings.ToLower(g)] = true
-						}
-						if !allowed[strings.ToLower(groupStr)] {
-							continue
-						}
-					}
-
+					// allowed_groups is deliberately *not* applied here. It used to drop
+					// every group outside the set, which left a user who was in none of
+					// them holding an empty group list and authenticating normally — an
+					// option named allowed_* that denied nothing (#166). It is a login
+					// gate now, enforced once in Broker.verifyGroupAuthorization, and
+					// this function's job is only to report the identity as it is.
 					userInfo.Groups = append(userInfo.Groups, groupStr)
 				}
 			}
@@ -860,16 +855,8 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 		if roles, ok := claims[mapping.RolesClaim].([]interface{}); ok {
 			for _, role := range roles {
 				if roleStr, ok := role.(string); ok {
-					// Enforce allowlist if configured — drop roles not in the set.
-					if len(mapping.AllowedRoles) > 0 {
-						allowed := make(map[string]bool, len(mapping.AllowedRoles))
-						for _, r := range mapping.AllowedRoles {
-							allowed[strings.ToLower(r)] = true
-						}
-						if !allowed[strings.ToLower(roleStr)] {
-							continue
-						}
-					}
+					// As with allowed_groups above: allowed_roles denies the login in
+					// the broker rather than trimming this list (#166).
 					userInfo.Roles = append(userInfo.Roles, roleStr)
 				}
 			}

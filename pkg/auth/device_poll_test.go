@@ -810,6 +810,191 @@ func TestAbsentUsernameClaimRefusedOnTheRealPath(t *testing.T) {
 	}
 }
 
+// TestAllowedGroupsDenyTheLogin is the acceptance gate for #166: a user in none of
+// a provider's allowed_groups must be refused, not admitted with a trimmed group
+// list.
+//
+// The old code applied the allowlist inside claim extraction, where the only thing
+// it could do was drop groups. An identity in none of the allowed groups therefore
+// arrived at the enforcement point with Groups == nil — which
+// verifyRequiredGroups happily accepts when require_groups is empty, as it is in
+// every shipped config — and got a session and a login key. This has to run through
+// the poll loop for the same reason #158 did: the check was never the problem, its
+// position on the login path was.
+func TestAllowedGroupsDenyTheLogin(t *testing.T) {
+	env := newPollTestEnv(t)
+
+	// The issuer's identity is in "researchers" and nothing else, and
+	// require_groups is deliberately left empty: allowed_groups alone has to
+	// refuse this login.
+	env.provider.Config.UserMapping.AllowedGroups = []string{"hpc-admins"}
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("a user in none of the allowed_groups was authenticated: %+v", session)
+	}
+
+	event := env.auditEvent(t, "authentication_denied")
+	if event.ErrorCode != "GROUP_NOT_ALLOWED" {
+		t.Errorf("denial recorded with error_code %q, want GROUP_NOT_ALLOWED "+
+			"(nothing was missing from a required set; the identity is outside the permitted one)",
+			event.ErrorCode)
+	}
+	if event.Success {
+		t.Error("the denial event is recorded with success=true")
+	}
+	// The record has to name what the identity actually held, or an operator cannot
+	// tell which group to add. The old projection would have emptied this.
+	if len(event.Groups) != 1 || event.Groups[0] != "researchers" {
+		t.Errorf("audited groups = %v, want [researchers] — the groups the identity has, "+
+			"not the ones that survived a filter", event.Groups)
+	}
+	for _, e := range env.auditEvents(t) {
+		if e.EventType == "authentication_successful" {
+			t.Fatal("a user in none of the allowed_groups was recorded as a successful login (#166)")
+		}
+	}
+
+	authorizedKeys := filepath.Join(env.homeDir, env.session.UserID, ".ssh", "authorized_keys")
+	if data, err := os.ReadFile(authorizedKeys); err == nil && strings.Contains(string(data), "@oidc-pam-") {
+		t.Errorf("a refused login installed a login key:\n%s", data)
+	}
+}
+
+// The other half of #166's semantics: allowed_groups is a gate, so a user who is in
+// one of the allowed groups gets in — and keeps every group the IdP gave them.
+// Trimming the list here would leave the session, the audit trail and any
+// require_groups check downstream reasoning about an identity the IdP never
+// asserted.
+func TestAllowedGroupsAdmitAMemberWithAllItsGroups(t *testing.T) {
+	env := newPollTestEnv(t)
+
+	env.idp.SetClaims(map[string]any{
+		"sub":                "test-subject",
+		"preferred_username": "testuser",
+		"email":              "testuser@example.org",
+		"groups":             []string{"researchers", "hpc-users"},
+	})
+	// Case-insensitively matching one of the two is enough; the allowlist is a
+	// disjunction, and it does not have to name "hpc-users" for that group to
+	// survive.
+	env.provider.Config.UserMapping.AllowedGroups = []string{"Researchers"}
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	session := env.activeSession()
+	if session == nil || !session.IsActive {
+		t.Fatal("a member of an allowed group was refused")
+	}
+	if len(session.Groups) != 2 || session.Groups[0] != "researchers" || session.Groups[1] != "hpc-users" {
+		t.Errorf("session groups = %v, want [researchers hpc-users]: allowed_groups gates the login, "+
+			"it does not filter the claim (#166)", session.Groups)
+	}
+}
+
+// An unset allowlist restricts nothing. This is the shipped default and what every
+// deployment that has never set the key relies on, so it is worth an explicit gate
+// rather than an inference from the other tests passing.
+func TestEmptyAllowedGroupsRestrictNothing(t *testing.T) {
+	env := newPollTestEnv(t)
+	env.provider.Config.UserMapping.AllowedGroups = nil
+	env.provider.Config.UserMapping.AllowedRoles = nil
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session == nil || !session.IsActive {
+		t.Error("an empty allowed_groups refused a login; empty means unrestricted")
+	}
+}
+
+// allowed_roles is the same gate over a different claim, and it was the same defect.
+func TestAllowedRolesDenyTheLogin(t *testing.T) {
+	env := newPollTestEnv(t)
+
+	env.provider.Config.UserMapping.RolesClaim = "roles"
+	env.provider.Config.UserMapping.AllowedRoles = []string{"cluster-admin"}
+	env.idp.SetClaims(map[string]any{
+		"sub":                "test-subject",
+		"preferred_username": "testuser",
+		"email":              "testuser@example.org",
+		"groups":             []string{"researchers"},
+		"roles":              []string{"guest"},
+	})
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("a user holding none of the allowed_roles was authenticated: %+v", session)
+	}
+	if event := env.auditEvent(t, "authentication_denied"); event.ErrorCode != "GROUP_NOT_ALLOWED" {
+		t.Errorf("denial recorded with error_code %q, want GROUP_NOT_ALLOWED", event.ErrorCode)
+	}
+}
+
+// require_groups and allowed_groups now meet in one function, so the composition of
+// the two has to be pinned: each refuses on its own, each refusal keeps its own
+// error code, and satisfying one does not excuse the other.
+func TestRequireGroupsAndAllowedGroupsCompose(t *testing.T) {
+	tests := []struct {
+		name          string
+		required      []string
+		allowed       []string
+		wantSession   bool
+		wantErrorCode string
+	}{
+		{
+			name:        "satisfies both",
+			required:    []string{"researchers"},
+			allowed:     []string{"researchers"},
+			wantSession: true,
+		},
+		{
+			// In an allowed group, but missing a group the policy demands.
+			name:          "allowed but not required",
+			required:      []string{"hpc-admins"},
+			allowed:       []string{"researchers"},
+			wantErrorCode: "GROUP_DENIED",
+		},
+		{
+			// Holds everything require_groups asks for and is still outside the
+			// permitted set. This is the case the old code could not express at all.
+			name:          "required but not allowed",
+			required:      []string{"researchers"},
+			allowed:       []string{"hpc-admins"},
+			wantErrorCode: "GROUP_NOT_ALLOWED",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newPollTestEnv(t)
+			env.requiredGroups = tc.required
+			env.provider.Config.UserMapping.AllowedGroups = tc.allowed
+			env.idp.Script(testoidc.Grant)
+
+			env.run(t)
+
+			session := env.activeSession()
+			if tc.wantSession {
+				if session == nil || !session.IsActive {
+					t.Fatal("the login was refused although it satisfies both group settings")
+				}
+				return
+			}
+			if session != nil {
+				t.Errorf("the session survived a refused login: %+v", session)
+			}
+			if event := env.auditEvent(t, "authentication_denied"); event.ErrorCode != tc.wantErrorCode {
+				t.Errorf("denial recorded with error_code %q, want %q", event.ErrorCode, tc.wantErrorCode)
+			}
+		})
+	}
+}
+
 // TestPrivilegedAccountRefusedOnTheRealPath drives #159 through the whole device
 // flow, not just the binding function: a completed, approved authorization whose
 // identity exactly matches a privileged local account must still be refused, leave
