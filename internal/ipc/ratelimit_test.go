@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -189,6 +190,26 @@ func TestConcurrentAuthLimit(t *testing.T) {
 	// Now should succeed again
 	if !rl.AcquireAuth() {
 		t.Fatal("should succeed after release")
+	}
+}
+
+// A concurrency cap larger than an int32 must still be a cap. `int32(n)` wrapped
+// it to a negative number, and AcquireAuth reads <= 0 as "limit disabled", so the
+// largest values an operator could write in the config were the ones that removed
+// the limit entirely. math.MaxInt64 is not a plausible setting; a fat-fingered extra
+// digit on a five-digit one is, and both take the same path (#189).
+func TestAnOversizedConcurrencyCapIsStillACap(t *testing.T) {
+	for _, configured := range []int{math.MaxInt32 + 1, math.MaxInt64} {
+		rl := NewRateLimiter(0, configured)
+		if rl.maxConcurrentAuths <= 0 {
+			t.Errorf("max_concurrent_auths=%d became %d, which AcquireAuth treats as no limit at all",
+				configured, rl.maxConcurrentAuths)
+		}
+		if !rl.AcquireAuth() {
+			t.Errorf("max_concurrent_auths=%d refused the first authentication", configured)
+		}
+		rl.ReleaseAuth()
+		rl.Stop()
 	}
 }
 
