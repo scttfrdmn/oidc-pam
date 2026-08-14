@@ -749,6 +749,19 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 		return fmt.Errorf("refusing to install an SSH key that expired at %s", expiresAt.UTC().Format(time.RFC3339))
 	}
 
+	// (#199) Nothing below this point can tell whether the host's sshd will honour the
+	// entry it is about to write. The entry carries `expiry-time=`, and an sshd older
+	// than minOpenSSHVersion does not ignore an option it does not know — it refuses
+	// the whole entry. So on such a host every write here succeeded, the file looked
+	// correct, the broker reported the login as successful, and the user was then told
+	// `Permission denied (publickey)` by sshd with nothing recording why. Refusing
+	// before anything is written turns that into one error, on the login that caused
+	// it, naming the version found and the version needed. See sshdSupportsKeyExpiry
+	// for why an undetermined version is not refused.
+	if err := sshdSupportsKeyExpiry(); err != nil {
+		return err
+	}
+
 	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
 	if err != nil {
 		return err
