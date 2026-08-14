@@ -1,0 +1,49 @@
+# Server side of the end-to-end harness: the broker and the fake identity
+# provider it talks to. One image, two services — docker-compose.yml runs it
+# twice with different commands — so the certificate the fake presents and the
+# certificate the broker trusts cannot drift apart.
+#
+# Built from the repository working tree, so what a pull request changed is what
+# the harness tests.
+
+FROM golang:1.25.13-bookworm AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# CGO is not needed on this side: the cgo in the tree is confined to
+# cmd/pam-module, which belongs to the client image.
+RUN CGO_ENABLED=0 go build -trimpath -o /out/oidc-auth-broker ./cmd/broker \
+    && CGO_ENABLED=0 go build -trimpath -o /out/oidc-admin ./cmd/oidc-admin \
+    && CGO_ENABLED=0 go build -trimpath -o /out/fakeoidc ./test/e2e/fakeoidc
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# The fake issuer has to serve TLS: the broker refuses a plain-http issuer for
+# any host but localhost, and container-to-container is not localhost. Generate
+# one self-signed certificate here and use it for both roles — the fake presents
+# it, and broker.yaml points trusted_ca_bundle at the same file. The SAN matters:
+# the broker connects to the compose service name.
+RUN mkdir -p /etc/fakeoidc /etc/oidc-auth \
+    && openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+        -keyout /etc/fakeoidc/tls.key -out /etc/fakeoidc/tls.crt \
+        -subj "/CN=fakeoidc" -addext "subjectAltName=DNS:fakeoidc" \
+    && chmod 0600 /etc/fakeoidc/tls.key \
+    && cp /etc/fakeoidc/tls.crt /etc/oidc-auth/fakeoidc.crt
+
+COPY --from=builder /out/oidc-auth-broker /out/oidc-admin /out/fakeoidc /usr/local/bin/
+COPY test/e2e/broker.yaml /etc/oidc-auth/broker.yaml
+
+# The broker writes SSH keys here and audit records to /harness/audit, which
+# docker-compose.yml mounts as a volume shared with the client container.
+RUN mkdir -p /var/lib/oidc-pam/ssh-keys /var/log/oidc-auth /harness/audit
+
+CMD ["/usr/local/bin/oidc-auth-broker", "--config", "/etc/oidc-auth/broker.yaml", "--log-level", "debug"]

@@ -1,0 +1,77 @@
+# Client side of the end-to-end harness: sshd with pam_oidc.so in its auth
+# stack, and the local accounts a login is attempted for.
+#
+# This is the half no unit test can stand in for. The module is a shared object
+# libpam dlopens and looks up six symbols in; it reaches the broker over a Unix
+# socket; and what PAM does with its return code depends on the control flag in
+# /etc/pam.d/sshd. All three of those only exist once something actually logs in.
+
+FROM golang:1.25.13-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpam0g-dev libjson-c-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /out/pam_oidc.so ./cmd/pam-module
+
+# A module can build cleanly and export none of the pam_sm_* entry points (#140),
+# in which case every login in this harness would fail for a reason that has
+# nothing to do with the code under test. Fail the build instead.
+RUN ./scripts/verify-pam-module.sh /out/pam_oidc.so
+
+FROM debian:bookworm-slim
+
+# libjson-c5 is bookworm's runtime for the libjson-c-dev the builder linked
+# against; the number is a soname, so it moves with the Debian release.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openssh-server \
+        openssh-client \
+        libpam-modules \
+        libjson-c5 \
+        ca-certificates \
+        curl \
+        jq \
+        netcat-openbsd \
+        busybox \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/pam_oidc.so /tmp/pam_oidc.so
+
+# Install next to the distribution's own PAM modules. Ask dpkg where those are
+# rather than hardcoding a multiarch triplet, so this image works on amd64 and
+# arm64 without a build argument.
+RUN moddir="$(dirname "$(dpkg -L libpam-modules | grep -m1 '/pam_permit\.so$')")" \
+    && install -m 0644 /tmp/pam_oidc.so "${moddir}/pam_oidc.so" \
+    && rm /tmp/pam_oidc.so \
+    && echo "installed pam_oidc.so into ${moddir}"
+
+# Two unprivileged accounts: alice is who the harness logs in as, bob exists so
+# a case can tell "refused" apart from "no such user".
+#
+# --password '*' leaves the account without a usable password but *not* locked.
+# The obvious '!' marks it locked, and some sshd builds refuse a locked account
+# before PAM is ever consulted — which would make every case pass for the wrong
+# reason.
+RUN useradd --create-home --shell /bin/bash --password '*' alice \
+    && useradd --create-home --shell /bin/bash --password '*' bob
+
+COPY test/e2e/sshd_config.d/oidc-pam.conf /etc/ssh/sshd_config.d/oidc-pam.conf
+COPY test/e2e/pam-sshd /etc/pam.d/sshd
+COPY test/e2e/pam-sshd-account-deny /harness/pam-sshd-account-deny
+COPY test/e2e/pam-sshd /harness/pam-sshd
+COPY test/e2e/cases.sh /harness/cases.sh
+COPY test/e2e/entrypoint.sh /harness/entrypoint.sh
+
+RUN chmod 0755 /harness/cases.sh /harness/entrypoint.sh \
+    && mkdir -p /harness/logs /harness/audit /run/sshd
+
+CMD ["/harness/entrypoint.sh"]

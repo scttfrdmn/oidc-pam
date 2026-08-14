@@ -1,0 +1,513 @@
+#!/usr/bin/env bash
+#
+# The end-to-end cases. Runs inside the client container as root, one case per
+# invocation: cases.sh <case-name>. run-tests.sh drives it and restarts the
+# broker in between, so each case starts from a broker with no sessions.
+#
+# Every case is an SSH login that either happens or does not. That is the whole
+# point: the defects this exists to catch (#120, #122, #150) all lived in the
+# space between components — a return code PAM interprets differently than the
+# module meant, an error string one half formats and the other compares — and
+# each of them passed every unit test on both sides.
+#
+# No `set -e`: a case asserts on failing logins, so a non-zero exit from ssh is
+# data, not an error.
+
+set -uo pipefail
+
+CONTROL="http://fakeoidc:8080/control"
+SOCKET="/var/run/oidc-auth/broker.sock"
+AUDIT_LOG="/harness/audit/audit.log"
+MODULE_LOG="/harness/logs/pam.log"
+PAM_FILE="/etc/pam.d/sshd"
+
+# Must match timeout= in pam-sshd. The module bounds the whole device flow with
+# it, so it is both how long a never-approved login takes to be refused and the
+# ceiling a refusal-for-another-reason has to come in under.
+LOGIN_TIMEOUT=15
+
+# The broker polls the issuer at RFC 8628's 5-second floor, and the module polls
+# the broker at the interval the broker reports (also 5). So a login that is
+# approved immediately still takes one or two of those before it completes, and
+# nothing here can be asserted to sub-5-second precision.
+POLL_INTERVAL=5
+
+failures=0
+
+log()  { printf '    %s\n' "$*"; }
+fail() { printf '    FAIL: %s\n' "$*"; failures=$((failures + 1)); }
+
+# ---------------------------------------------------------------------------
+# Talking to the fake issuer
+# ---------------------------------------------------------------------------
+
+control() { curl -fsS "${CONTROL}/$1"; }
+
+state_field() { control state | jq -r ".$1"; }
+
+# reset_state puts the issuer back to "the user has not approved anything yet",
+# with an identity that matches the local account the case logs in as, and
+# records where the audit log has got to so later assertions only see this
+# case's events.
+reset_state() {
+    local username="${1:-alice}"
+    control reset >/dev/null || { fail "could not reach the fake issuer's control API"; return 1; }
+    control "identity?username=${username}" >/dev/null
+    AUDIT_MARK=$(wc -l <"${AUDIT_LOG}" 2>/dev/null || echo 0)
+    MODULE_MARK=$(wc -l <"${MODULE_LOG}" 2>/dev/null || echo 0)
+    log "issuer reset: pending, identity ${username}"
+}
+
+# wait_for_polls waits until the issuer has been polled at least n times, which
+# is how a case knows the broker really is in the flow. Approving before that
+# would test a race rather than a device flow.
+wait_for_polls() {
+    local want="$1" deadline=$((SECONDS + ${2:-30})) polls
+    while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+        polls="$(state_field polls)"
+        if [[ "${polls}" =~ ^[0-9]+$ ]] && [[ "${polls}" -ge "${want}" ]]; then
+            log "issuer has been polled ${polls} time(s)"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "the issuer was never polled ${want} time(s): the broker did not start the device flow"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Logging in
+# ---------------------------------------------------------------------------
+
+# ssh_login runs one login attempt. Only keyboard-interactive is offered, so a
+# refusal cannot be papered over by another method, and the outer timeout is a
+# backstop: a login that hangs past every deadline in the system is a failure,
+# not a reason to wedge the suite.
+ssh_login() {
+    local user="$1"
+    timeout 90 ssh \
+        -F /dev/null \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o PreferredAuthentications=keyboard-interactive \
+        -o PubkeyAuthentication=no \
+        -o PasswordAuthentication=no \
+        -o NumberOfPasswordPrompts=1 \
+        -o ConnectTimeout=5 \
+        "${user}@127.0.0.1" 'echo LOGIN_OK' </dev/null 2>&1
+}
+
+# attempt_login runs a login to completion, and sets:
+#   LOGIN_EXIT     ssh's exit status (0 only if the login succeeded)
+#   LOGIN_ELAPSED  wall-clock seconds it took
+#   LOGIN_OUTPUT   everything ssh printed, including what PAM told the user
+attempt_login() {
+    local user="$1" start="${SECONDS}"
+    LOGIN_OUTPUT="$(ssh_login "${user}")"
+    LOGIN_EXIT=$?
+    LOGIN_ELAPSED=$((SECONDS - start))
+    log "login as ${user}: exit ${LOGIN_EXIT} after ${LOGIN_ELAPSED}s"
+}
+
+# start_login runs a login in the background, for the cases that need to look at
+# the system while the user is still deciding.
+start_login() {
+    local user="$1"
+    LOGIN_FILE="$(mktemp)"
+    LOGIN_START="${SECONDS}"
+    ssh_login "${user}" >"${LOGIN_FILE}" 2>&1 &
+    LOGIN_PID=$!
+    log "login as ${user} started in the background (pid ${LOGIN_PID})"
+}
+
+# reap_login waits for a background login and fills in the same variables
+# attempt_login sets.
+reap_login() {
+    wait "${LOGIN_PID}"
+    LOGIN_EXIT=$?
+    LOGIN_ELAPSED=$((SECONDS - LOGIN_START))
+    LOGIN_OUTPUT="$(cat "${LOGIN_FILE}")"
+    rm -f "${LOGIN_FILE}"
+    log "background login finished: exit ${LOGIN_EXIT} after ${LOGIN_ELAPSED}s"
+}
+
+# ---------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------
+
+expect_login_ok() {
+    if [[ "${LOGIN_EXIT}" -ne 0 ]]; then
+        fail "expected the login to succeed, got exit ${LOGIN_EXIT}"
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+        return 1
+    fi
+    if ! grep -q 'LOGIN_OK' <<<"${LOGIN_OUTPUT}"; then
+        fail "ssh exited 0 but the remote command did not run"
+        return 1
+    fi
+    log "login succeeded"
+}
+
+expect_login_refused() {
+    if [[ "${LOGIN_EXIT}" -eq 0 ]]; then
+        fail "expected the login to be REFUSED, but it succeeded — $*"
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+        return 1
+    fi
+    log "login refused, as required"
+}
+
+expect_elapsed_at_least() {
+    if [[ "${LOGIN_ELAPSED}" -lt "$1" ]]; then
+        fail "the login finished after ${LOGIN_ELAPSED}s, expected at least $1s: $2"
+    fi
+}
+
+expect_elapsed_below() {
+    if [[ "${LOGIN_ELAPSED}" -ge "$1" ]]; then
+        fail "the login took ${LOGIN_ELAPSED}s, expected less than $1s: $2"
+    fi
+}
+
+audit_since_mark() { tail -n "+$((AUDIT_MARK + 1))" "${AUDIT_LOG}" 2>/dev/null; }
+
+module_log_since_mark() { tail -n "+$((MODULE_MARK + 1))" "${MODULE_LOG}" 2>/dev/null; }
+
+# expect_audit waits for a pattern in the events this case produced. The audit
+# logger writes through a buffered channel, so the record can land a moment after
+# the login it describes.
+expect_audit() {
+    local pattern="$1" deadline=$((SECONDS + 15))
+    while [[ "${SECONDS}" -lt "${deadline}" ]]; do
+        if audit_since_mark | grep -q "${pattern}"; then
+            log "audit log contains ${pattern}"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "the broker's audit log never recorded ${pattern}"
+    audit_since_mark | tail -5 | sed 's/^/      audit: /'
+    return 1
+}
+
+expect_no_audit() {
+    sleep 2 # give a record that should not exist time to show up
+    if audit_since_mark | grep -q "$1"; then
+        fail "the audit log contains $1, which this case must not produce"
+        audit_since_mark | grep "$1" | sed 's/^/      audit: /'
+    else
+        log "audit log does not contain $1, as required"
+    fi
+}
+
+expect_module_log() {
+    if module_log_since_mark | grep -q "$1"; then
+        log "the module logged: $1"
+    else
+        fail "the module never logged $1"
+        module_log_since_mark | grep -i 'pam_oidc' | tail -5 | sed 's/^/      syslog: /'
+    fi
+}
+
+expect_no_module_log() {
+    if module_log_since_mark | grep -q "$1"; then
+        fail "the module logged $1, which this case must not produce"
+        module_log_since_mark | grep "$1" | sed 's/^/      syslog: /'
+    else
+        log "the module did not log $1, as required"
+    fi
+}
+
+expect_oidc_key_for() {
+    local user="$1" keys="/home/$1/.ssh/authorized_keys"
+    if [[ ! -f "${keys}" ]]; then
+        fail "${keys} does not exist: the broker did not install a login key"
+        return 1
+    fi
+    local count
+    count="$(grep -c '@oidc-pam-' "${keys}")"
+    if [[ "${count}" -ne 1 ]]; then
+        fail "${keys} has ${count} @oidc-pam- key(s), expected exactly 1"
+        sed 's/^/      authorized_keys: /' "${keys}"
+        return 1
+    fi
+    log "${user} has exactly one @oidc-pam- key in authorized_keys"
+}
+
+expect_no_oidc_key_for() {
+    local keys="/home/$1/.ssh/authorized_keys"
+    if [[ -f "${keys}" ]] && grep -q '@oidc-pam-' "${keys}"; then
+        fail "${keys} gained an @oidc-pam- key for a login that was refused"
+        sed 's/^/      authorized_keys: /' "${keys}"
+    else
+        log "$1 has no @oidc-pam- key, as required"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Cases
+# ---------------------------------------------------------------------------
+
+# #120, the bypass itself: while the user has not approved anything, the login
+# must still be waiting. It must not have returned success, and no session may
+# have been created.
+#
+# This is the case that fails against the unfixed module: it returned PAM_SUCCESS
+# as soon as the broker said requires_device, so the login was already over —
+# granted — by the time the issuer had been polled once.
+case_waits_while_pending() {
+    reset_state alice || return 1
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+
+    # Give a bypass every chance to show itself: the broker has polled, so the
+    # module has had a full poll interval in which it could wrongly have
+    # succeeded.
+    sleep "${POLL_INTERVAL}"
+
+    if ! kill -0 "${LOGIN_PID}" 2>/dev/null; then
+        reap_login
+        fail "the login finished after ${LOGIN_ELAPSED}s while the user had approved nothing (exit ${LOGIN_EXIT})"
+        if [[ "${LOGIN_EXIT}" -eq 0 ]]; then
+            fail "and it SUCCEEDED: this is the #120 device-flow bypass"
+        fi
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+        return 1
+    fi
+    log "the login is still waiting, as required"
+    expect_no_oidc_key_for alice
+    expect_no_audit authentication_successful
+
+    # Let it finish rather than leaving an SSH connection and a broker goroutine
+    # behind for the next case.
+    #
+    # Whether it now succeeds is deliberately not asserted. Everything above —
+    # waiting for the first poll, then a full poll interval, then looking at the
+    # filesystem and the audit log — has already spent most of the module's
+    # device-flow budget, so an approval this late can legitimately land after the
+    # deadline. That an approval grants the login is case_approved_login's claim,
+    # and it approves as soon as the flow is up.
+    control approve >/dev/null
+    reap_login
+}
+
+# The happy path, end to end: approve while the login is waiting and it must
+# complete, install exactly one login key, and be recorded.
+case_approved_login() {
+    reset_state alice || return 1
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+
+    control approve >/dev/null
+    reap_login
+
+    expect_login_ok || return 1
+    expect_oidc_key_for alice
+    expect_audit authentication_successful
+
+    # The user has to be told where to go, or the device flow is unusable by a
+    # human even when it works.
+    if grep -q 'fakeoidc:8443/activate\|WDJB-MJHT' <<<"${LOGIN_OUTPUT}"; then
+        log "the verification URL or user code reached the client"
+    else
+        fail "the client was never shown the verification URL or user code"
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+    fi
+}
+
+# #120's other half: a device flow nobody ever approves must end in a refusal,
+# not in a grant and not in a hang. The module's own timeout= is what bounds it.
+case_never_approved() {
+    reset_state alice || return 1
+
+    attempt_login alice
+
+    expect_login_refused "the user approved nothing"
+    expect_elapsed_at_least "${LOGIN_TIMEOUT}" \
+        "it must wait for the whole device-flow budget before giving up, not fail early for some unrelated reason"
+    expect_no_oidc_key_for alice
+    expect_no_audit authentication_successful
+}
+
+# A refusal at the identity provider is terminal (RFC 8628): the broker must stop
+# polling and drop the session, and the login must be refused *because of that
+# denial* rather than by eventually running out of time — a login that merely
+# timed out looks identical from the outside.
+#
+# So the evidence is what the two components recorded, not the clock. The module
+# logs a refusal and a timeout differently, and asserting on that is both exact
+# and honest: wall-clock elapsed here also contains the SSH handshake and sshd's
+# post-failure delay, several seconds that sit outside the module's budget and
+# have nothing to do with how promptly the denial was noticed.
+case_denied_by_provider() {
+    reset_state alice || return 1
+
+    control deny >/dev/null
+    attempt_login alice
+
+    expect_login_refused "the identity provider answered access_denied"
+    expect_audit device_authorization_failed
+    expect_module_log 'Broker refused authentication'
+    expect_no_module_log 'Device authorization not completed within'
+    expect_no_oidc_key_for alice
+    expect_no_audit authentication_successful
+}
+
+# #90: the OIDC identity must be bound to the local account being logged into.
+# An ID token for carol cannot log in as alice, however valid it is.
+case_identity_mismatch() {
+    reset_state carol || return 1
+
+    control approve >/dev/null
+    attempt_login alice
+
+    expect_login_refused "the ID token says carol, the login is for alice"
+    expect_audit IDENTITY_MISMATCH
+    expect_no_oidc_key_for alice
+}
+
+# #92: require_groups is enforced. Same user, same approval, no group.
+case_group_denied() {
+    reset_state alice || return 1
+    control 'identity?username=alice&groups=' >/dev/null
+
+    control approve >/dev/null
+    attempt_login alice
+
+    expect_login_refused "alice is in none of the required groups"
+    expect_audit GROUP_DENIED
+    expect_no_oidc_key_for alice
+}
+
+# #122: the account phase still decides. The auth phase succeeds here — the user
+# approves and the broker is happy — and the login must be refused anyway
+# because an account module below pam_oidc.so says no.
+case_account_stack_denies() {
+    reset_state alice || return 1
+
+    # run-tests.sh puts the default stack back before every case, so an early
+    # return here cannot leak this one into the next case.
+    cp /harness/pam-sshd-account-deny "${PAM_FILE}"
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+    control approve >/dev/null
+    reap_login
+    cp /harness/pam-sshd "${PAM_FILE}"
+
+    expect_login_refused "an 'account required' module refused, whatever the auth phase decided"
+    # The auth phase really did succeed, or this case would prove nothing: the
+    # broker completed the flow and recorded it.
+    expect_audit authentication_successful
+}
+
+# The IPC socket is root-only, enforced by the broker rather than by file
+# permissions alone (broker.yaml deliberately makes the socket world-writable so
+# that this is what gets tested).
+#
+# Two probes, because of #154. The broker closes the connection with the peer's
+# request still unread, and Linux discards a queued response when a socket is
+# closed with unread data — so a non-root peer that *sends* a request reliably
+# gets nothing back at all, while one that connects and sends nothing does receive
+# the refusal. Both halves are worth asserting: the first probe shows the broker
+# does refuse a non-root peer and with which code, the second shows that a
+# non-root request is not served regardless of what comes back.
+#
+# The code is PERMISSION_DENIED, not PEER_AUTH_DENIED: two peer checks run in
+# sequence and the unconditional one always answers first, which is the other half
+# of #154. This asserts what the broker actually sends today, so the case fails
+# loudly when that is fixed rather than quietly passing on a changed guarantee.
+case_nonroot_ipc_rejected() {
+    reset_state alice || return 1
+
+    local refusal
+    refusal="$(runuser -u alice -- \
+        bash -c "timeout 5 nc -U '${SOCKET}' </dev/null" 2>&1)"
+    log "broker answered a silent non-root peer: ${refusal:-<nothing>}"
+    if grep -q 'PERMISSION_DENIED' <<<"${refusal}"; then
+        log "the broker refused a non-root peer"
+    else
+        fail "a non-root process was not refused with PERMISSION_DENIED"
+    fi
+
+    local request='{"type":"authenticate","user_id":"alice","login_type":"ssh","target_host":"client"}'
+    local response
+    response="$(runuser -u alice -- \
+        bash -c "printf '%s' '${request}' | timeout 5 nc -U '${SOCKET}'" 2>&1)"
+    log "broker answered a non-root authenticate request: ${response:-<nothing>}"
+    if grep -q '"success":true' <<<"${response}"; then
+        fail "the broker started an authentication for a non-root process"
+    fi
+
+    # And nothing was started on its behalf: a served request would have begun a
+    # device flow, which polls the issuer within a few seconds.
+    sleep "${POLL_INTERVAL}"
+    local polls
+    polls="$(state_field polls)"
+    if [[ "${polls}" != "0" ]]; then
+        fail "the issuer was polled ${polls} time(s): the broker began a device flow for a non-root peer"
+    else
+        log "the issuer was never polled, as required"
+    fi
+    expect_no_audit authentication_successful
+}
+
+# With no broker there is no opinion to be had: the module must report that it
+# could not reach one (PAM_AUTHINFO_UNAVAIL) and the login must be refused, at
+# once rather than after the device-flow budget.
+#
+# run-tests.sh stops the broker before running this, and it runs last.
+case_broker_down() {
+    if [[ -S "${SOCKET}" ]]; then
+        fail "the broker socket still exists; run-tests.sh must stop the broker before this case"
+        return 1
+    fi
+    MODULE_MARK=$(wc -l <"${MODULE_LOG}" 2>/dev/null || echo 0)
+    AUDIT_MARK=$(wc -l <"${AUDIT_LOG}" 2>/dev/null || echo 0)
+
+    attempt_login alice
+
+    expect_login_refused "there is no broker to authenticate against"
+    expect_elapsed_below "${LOGIN_TIMEOUT}" \
+        "an unreachable broker is known immediately; there is nothing to wait for"
+    expect_module_log 'Failed to connect to'
+}
+
+# ---------------------------------------------------------------------------
+
+CASES=(
+    waits_while_pending
+    approved_login
+    never_approved
+    denied_by_provider
+    identity_mismatch
+    group_denied
+    account_stack_denies
+    nonroot_ipc_rejected
+    broker_down
+)
+
+if [[ "${1:-}" == "--list" ]]; then
+    printf '%s\n' "${CASES[@]}"
+    exit 0
+fi
+
+name="${1:-}"
+if [[ -z "${name}" ]]; then
+    echo "usage: cases.sh <case-name>|--list" >&2
+    exit 2
+fi
+if ! declare -F "case_${name}" >/dev/null; then
+    echo "cases.sh: unknown case ${name}" >&2
+    exit 2
+fi
+
+"case_${name}"
+
+if [[ "${failures}" -ne 0 ]]; then
+    echo "    ${failures} assertion(s) failed in ${name}"
+    exit 1
+fi
+exit 0

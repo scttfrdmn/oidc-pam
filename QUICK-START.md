@@ -11,7 +11,7 @@ This is an **alpha release** intended for testing and evaluation purposes only. 
 ### System Requirements
 - Linux system with PAM support (Ubuntu 20.04+, CentOS 8+, RHEL 8+)
 - Go 1.21+ (for building from source)
-- Docker and Docker Compose (for testing with Keycloak)
+- Docker and Docker Compose (for `make test-e2e`)
 - Root or sudo access for PAM configuration
 
 ### OIDC Provider
@@ -47,17 +47,22 @@ make build
 sudo make install
 ```
 
-## Quick Test Setup with Keycloak
+## Quick Test Setup
 
-### 1. Start Keycloak Test Environment
+### 1. See it work before installing anything
 
 ```bash
-# Start Keycloak with test configuration
-docker-compose -f docker-compose.test.yml up -d
-
-# Wait for Keycloak to start
-docker-compose -f docker-compose.test.yml logs -f keycloak
+# Real sshd, real PAM stack, real broker, a fake issuer, in Docker
+make test-e2e
 ```
+
+Every case is an actual SSH login against the built `pam_oidc.so`, so this is
+also the fastest way to see what a device-flow login looks like end to end. See
+[test/e2e/README.md](test/e2e/README.md).
+
+For the steps below you need an OIDC provider of your own with the device
+authorization flow enabled — any of Keycloak, Okta, Entra ID, Auth0 or Google
+will do. `configs/production/` has a worked example per provider.
 
 ### 2. Configure OIDC Broker
 
@@ -65,7 +70,7 @@ docker-compose -f docker-compose.test.yml logs -f keycloak
 # Copy example configuration
 sudo cp configs/production/broker-minimal.yaml /etc/oidc-auth/broker.yaml
 
-# Edit configuration for Keycloak
+# Point it at your provider
 sudo nano /etc/oidc-auth/broker.yaml
 ```
 
@@ -73,10 +78,10 @@ Update the configuration:
 ```yaml
 oidc:
   providers:
-    - name: "keycloak"
-      issuer: "http://localhost:8080/realms/test-realm"
+    - name: "primary"
+      issuer: "https://your-oidc-provider.example.com"
       client_id: "oidc-pam-client"
-      client_secret: "test-secret"
+      client_secret: "your-client-secret"
       scopes: ["openid", "email", "profile", "groups"]
 
 logging:

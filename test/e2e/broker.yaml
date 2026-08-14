@@ -1,0 +1,77 @@
+# Broker configuration for the end-to-end harness.
+#
+# It differs from a production config in exactly three ways, each deliberate and
+# each noted below: the issuer is the harness's fake, the socket is world
+# writable so the SO_PEERCRED check can be exercised from a non-root process, and
+# the token encryption key is a fixed test value. Everything else is what an
+# operator would deploy, because a harness running a special code path proves
+# nothing about the shipped one.
+
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  # 438 decimal is 0666. YAML's handling of leading-zero integers is
+  # version-dependent, so write it as decimal and say what it means.
+  #
+  # Production ships 0660 (root plus one group). Here any process can *connect*,
+  # so that the harness can assert the broker itself refuses a non-root peer
+  # (see case_nonroot_ipc_rejected) instead of the kernel refusing it at open
+  # time — which would leave require_peer_auth untested.
+  socket_mode: 438
+  require_peer_auth: true
+  log_level: "debug"
+
+oidc:
+  providers:
+    - name: "fakeoidc"
+      # https, and the same host the device/token endpoints are served from:
+      # the broker rejects a plain-http issuer for anything but localhost, and
+      # rejects an endpoint whose host differs from the issuer's.
+      issuer: "https://fakeoidc:8443"
+      client_id: "oidc-pam-e2e"
+      scopes:
+        - "openid"
+        - "profile"
+        - "email"
+        - "groups"
+      enabled_for_login: true
+      priority: 1
+      user_mapping:
+        username_claim: "preferred_username"
+        email_claim: "email"
+        groups_claim: "groups"
+
+authentication:
+  token_lifetime: 1h
+  refresh_threshold: 15m
+  max_concurrent_sessions: 10
+  # The group the fake issuer puts in its default claims. case_group_denied
+  # removes it, and the login must then be refused with GROUP_DENIED.
+  require_groups:
+    - "researchers"
+
+security:
+  # 32 bytes of base64, the same fixed test value the unit tests use. A real
+  # deployment generates its own; the harness needs the value to be constant so
+  # a failure is never "the key changed".
+  token_encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+  verify_audience: true
+  tls_verification:
+    # The fake issuer's self-signed certificate, generated in Dockerfile.broker.
+    # This is how the harness gets TLS without a certificate authority: the
+    # broker trusts exactly this one certificate, and nothing else.
+    trusted_ca_bundle: "/etc/oidc-auth/fakeoidc.crt"
+  rate_limiting:
+    max_requests_per_minute: 600
+    max_concurrent_auths: 20
+
+audit:
+  enabled: true
+  format: "json"
+  outputs:
+    # On a volume the client container also mounts, so a case can assert on the
+    # event the broker recorded rather than only on what SSH did.
+    - type: "file"
+      path: "/harness/audit/audit.log"
+      format: "json"
+    - type: "stdout"
+      format: "json"
