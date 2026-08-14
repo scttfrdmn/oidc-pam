@@ -448,7 +448,7 @@ func TestBackupAuthorizedKeys(t *testing.T) {
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
+	backupPath := akm.BackupPath(username)
 
 	// Create .ssh directory and authorized_keys file
 	err = os.MkdirAll(sshDir, 0700)
@@ -469,13 +469,52 @@ func TestBackupAuthorizedKeys(t *testing.T) {
 	}
 
 	// Verify backup file exists and has correct content
-	backupData, err := os.ReadFile(backupPath)
+	backupData, err := os.ReadFile(backupPath) // #nosec G304 -- test temp dir
 	if err != nil {
 		t.Errorf("Failed to read backup file: %v", err)
 	}
 
 	if string(backupData) != originalContent {
 		t.Errorf("Backup content doesn't match original. Expected: %s, Got: %s", originalContent, string(backupData))
+	}
+}
+
+// (#228) The backup must not be written into the directory it is a backup of. A copy
+// of authorized_keys in the user's own .ssh, owned by the user, is a file the user can
+// edit — so RestoreAuthorizedKeys read a key list from a place its subject controls
+// and installed it as the authorized one, which is a self-service way to reinstate any
+// key the broker had revoked. It also has to survive the home directory, which a
+// backup inside the home does not.
+func TestBackupDoesNotLandInTheUsersSSHDir(t *testing.T) {
+	base := t.TempDir()
+	akm := newTestManager(t, base)
+	username := "testuser"
+	sshDir := filepath.Join(base, username, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "authorized_keys"),
+		[]byte("ssh-rsa AAAAB3NzaC1yc2E testuser@example.com\n"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := akm.BackupAuthorizedKeys(username); err != nil {
+		t.Fatalf("BackupAuthorizedKeys: %v", err)
+	}
+
+	entries, err := os.ReadDir(sshDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "authorized_keys" {
+			t.Errorf("backup left %s in the user's own .ssh, where the user can edit it; "+
+				"backups belong in the broker's state directory (#228)", filepath.Join(sshDir, e.Name()))
+		}
+	}
+
+	if _, err := os.Stat(akm.BackupPath(username)); err != nil {
+		t.Errorf("expected the backup in the broker's backup directory: %v", err)
 	}
 }
 
@@ -509,12 +548,15 @@ func TestRestoreAuthorizedKeys(t *testing.T) {
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
+	backupPath := akm.BackupPath(username)
 
 	// Create .ssh directory and backup file
 	err = os.MkdirAll(sshDir, 0700)
 	if err != nil {
 		t.Fatalf("Failed to create .ssh directory: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0700); err != nil {
+		t.Fatalf("Failed to create backup directory: %v", err)
 	}
 
 	backupContent := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... backup@example.com\n"
@@ -735,5 +777,63 @@ func TestRemoveExpiredKeysNonExistentFile(t *testing.T) {
 	err = akm.RemoveExpiredKeys(username)
 	if err != nil {
 		t.Errorf("Expected no error when removing expired keys from non-existent file, got: %v", err)
+	}
+}
+
+// (#228) The broker hands over what it created and preserves what it found. A
+// root-owned authorized_keys — a hardened deployment, an operator who wrote it with
+// sudo, a configuration-management system that owns it — must not become the user's by
+// the act of the broker writing to it. The contents would stay correct and the only
+// visible change would be that the user could now edit the list of keys that authorize
+// them, which is what root ownership was there to prevent.
+//
+// The chown itself cannot be exercised here: chownFileToAccount is a no-op for a
+// non-root process, so an unprivileged test can never observe an ownership change (that
+// half belongs in the e2e suite, which runs as root in a container). What *is* testable
+// unprivileged is the decision, which is where the defect was — the old code did not
+// make one, it chowned unconditionally.
+func TestOwnershipOfAnExistingAuthorizedKeysIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Geteuid()
+
+	// A file that does not exist yet: the broker is creating it, so it is the
+	// broker's to give away (#171 — a root-created file in someone's home that stays
+	// root's leaves them unable to manage their own keys).
+	absent := filepath.Join(dir, "not-there")
+	handOver, err := targetShouldBeHandedToAccount(absent, Account{Username: "alice", UID: me})
+	if err != nil {
+		t.Fatalf("targetShouldBeHandedToAccount(absent): %v", err)
+	}
+	if !handOver {
+		t.Error("a file the broker is about to create would not be given to the account, " +
+			"so the user could not edit their own authorized_keys (#171)")
+	}
+
+	// A file that already belongs to the account: handing it over is a no-op, and
+	// saying so keeps the two cases distinguishable.
+	own := filepath.Join(dir, "theirs")
+	if err := os.WriteFile(own, nil, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	handOver, err = targetShouldBeHandedToAccount(own, Account{Username: "alice", UID: me})
+	if err != nil {
+		t.Fatalf("targetShouldBeHandedToAccount(own): %v", err)
+	}
+	if !handOver {
+		t.Error("a file already owned by the account was not identified as the account's")
+	}
+
+	// A file owned by somebody other than the account. Unprivileged, the only such
+	// file this test can make is one owned by *this* uid attributed to a different
+	// account, which exercises the same comparison the root-owned case does: the
+	// existing owner is not the account, so the ownership stands.
+	handOver, err = targetShouldBeHandedToAccount(own, Account{Username: "alice", UID: me + 1})
+	if err != nil {
+		t.Fatalf("targetShouldBeHandedToAccount(other): %v", err)
+	}
+	if handOver {
+		t.Errorf("an authorized_keys owned by uid %d would be handed to uid %d. The broker "+
+			"must preserve an ownership it did not create — otherwise its first write "+
+			"downgrades a root-owned key list to a user-editable one (#228).", me, me+1)
 	}
 }

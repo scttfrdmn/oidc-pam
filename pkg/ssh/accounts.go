@@ -135,6 +135,21 @@ func lookupViaGetent(username string) (Account, error) {
 		return Account{}, ErrUnknownAccount
 	}
 	// name:passwd:uid:gid:gecos:home:shell
+	//
+	// (#229) The home directory is taken from the *end* of the line, not from index 5.
+	// Only GECOS can legitimately contain a colon — an smbldap- or AD-populated GECOS
+	// routinely does, e.g. "Smith, Jane:Engineering" — and getent prints whatever NSS
+	// handed it without escaping, so such a line splits into more than seven fields
+	// and everything after GECOS shifts right. The count check here is `< 7`, so the
+	// line was *accepted*: index 5 then held the tail of the GECOS rather than the
+	// home directory, and the broker went on to write an authorized_keys under a path
+	// like "Engineering" — or, since userPaths refuses a home that does not exist,
+	// denied the login with an error about a home directory nobody had configured.
+	//
+	// Counting home and shell from the right resolves the ambiguity correctly for any
+	// number of colons in GECOS, and is identical to the old behaviour on a well-formed
+	// seven-field line. It is wrong only if the *home directory or shell* contains a
+	// colon, which no passwd database does.
 	fields := strings.Split(strings.SplitN(line, "\n", 2)[0], ":")
 	if len(fields) < 7 {
 		return Account{}, fmt.Errorf("getent returned a passwd line with %d fields: %q", len(fields), line)
@@ -142,7 +157,8 @@ func lookupViaGetent(username string) (Account, error) {
 	if fields[0] != username {
 		return Account{}, fmt.Errorf("getent answered for %q when asked about %q", fields[0], username)
 	}
-	return accountFromStrings(username, fields[5], fields[2], fields[3])
+	home := fields[len(fields)-2]
+	return accountFromStrings(username, home, fields[2], fields[3])
 }
 
 // accountFromStrings builds an Account from the string fields both lookups
