@@ -615,6 +615,62 @@ case_home_lock_does_not_block_login() {
     expect_oidc_key_for alice
 }
 
+# #162: a long verification URI must not break the login.
+#
+# The URI reaches the module three times over — as device_url, as text in the
+# instructions, and as QR art whose size grows with it — and the module reads the
+# whole response into a fixed buffer. At 8 KiB, with the art also serialized into a
+# separate qr_code field, a URI of a few hundred bytes pushed an ordinary device
+# response past the buffer; what arrived was a truncated prefix, json-c refused it,
+# and *every* login on the host was refused with nothing in syslog but "Failed to
+# parse broker response" and a PAM result indistinguishable from a broker that was
+# not running.
+#
+# Every provider in the wild hands out a URI of around 30 bytes, which is why
+# neither the unit tests nor this harness caught it. So the issuer is asked for a
+# long one here, and the assertion is simply that the login works — plus the two
+# things that say *why* it worked: the URL still reached the user, and the module
+# never had to fall back on a parse failure.
+case_long_verification_uri() {
+    reset_state alice || return 1
+
+    # 400 bytes of padding: comfortably over the old 8 KiB buffer once rendered as
+    # QR art, and within the 512-byte cap the broker now enforces on what a provider
+    # may return (validateDeviceAuthLengths, pkg/auth/device_flow.go) — so this is a
+    # login the broker must complete, not one it should reject.
+    control 'verification-uri?pad=400' >/dev/null
+    if [[ "$(state_field uri_padding)" != "400" ]]; then
+        fail "the issuer did not take the verification-uri padding; this case would prove nothing"
+        return 1
+    fi
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+
+    control approve >/dev/null
+    reap_login
+
+    expect_login_ok || return 1
+    expect_oidc_key_for alice
+    expect_audit authentication_successful
+
+    # The padded URL itself has to have reached the client: a response that quietly
+    # dropped the instructions would pass everything above while leaving a real user
+    # with nowhere to go.
+    if grep -q 'fakeoidc:8443/activate?p=pppp' <<<"${LOGIN_OUTPUT}"; then
+        log "the padded verification URL reached the client"
+    else
+        fail "the client was never shown the padded verification URL"
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+    fi
+
+    # The #162 symptoms. The first is what a truncated response looks like from the
+    # module; the second is the module refusing a response too big for its buffer,
+    # which the broker must have prevented by degrading the response instead.
+    expect_no_module_log 'Failed to parse broker response'
+    expect_no_module_log 'does not fit this module'
+}
+
 # With no broker there is no opinion to be had: the module must report that it
 # could not reach one (PAM_AUTHINFO_UNAVAIL) and the login must be refused, at
 # once rather than after the device-flow budget.
@@ -641,6 +697,7 @@ case_broker_down() {
 CASES=(
     waits_while_pending
     approved_login
+    long_verification_uri
     never_approved
     denied_by_provider
     identity_mismatch

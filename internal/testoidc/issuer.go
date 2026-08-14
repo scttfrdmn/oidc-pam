@@ -46,12 +46,13 @@ type Issuer struct {
 	kid      string
 	clientID string
 
-	mu        sync.Mutex
-	issuerURL string
-	script    []Outcome
-	polls     int
-	claims    map[string]any
-	devices   map[string]string // device_code -> nonce received at the device endpoint
+	mu          sync.Mutex
+	issuerURL   string
+	script      []Outcome
+	polls       int
+	claims      map[string]any
+	devices     map[string]string // device_code -> nonce received at the device endpoint
+	uriPadBytes int               // extra bytes in verification_uri, see SetVerificationURIPadding
 }
 
 // DefaultClaims is the claim set a fresh Issuer puts in ID tokens and returns
@@ -155,15 +156,38 @@ func (i *Issuer) NextOutcome() Outcome {
 	return i.script[min(i.polls, len(i.script)-1)]
 }
 
+// SetVerificationURIPadding makes the device endpoint return a verification_uri
+// padded with n extra bytes of query string.
+//
+// Real providers hand out short URIs, which is why nothing caught #162: the
+// verification URI reaches the PAM module three times over — as device_url, as
+// text in the instructions, and as QR art that grows with it — and a URI of a few
+// hundred bytes was enough to push the response past the module's response buffer.
+// A harness that only ever sees a 29-byte URI cannot tell that this is broken.
+func (i *Issuer) SetVerificationURIPadding(n int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.uriPadBytes = n
+}
+
+// VerificationURIPadding is the padding currently in effect, so a harness can
+// report it as part of the issuer's state.
+func (i *Issuer) VerificationURIPadding() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.uriPadBytes
+}
+
 // Reset returns the issuer to its initial state: default claims, no polls
-// recorded, and no device codes outstanding. The script is left alone, since a
-// harness sets it per case.
+// recorded, no device codes outstanding, and an unpadded verification URI. The
+// script is left alone, since a harness sets it per case.
 func (i *Issuer) Reset() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.polls = 0
 	i.claims = DefaultClaims()
 	i.devices = make(map[string]string)
+	i.uriPadBytes = 0
 }
 
 // Handler serves the OIDC endpoints. The paths are also what the discovery
@@ -227,12 +251,18 @@ func (i *Issuer) handleDevice(w http.ResponseWriter, r *http.Request) {
 	// it echoed in the ID token; remember it per device code.
 	i.devices[deviceCode] = r.Form.Get("nonce")
 	base := i.issuerURL
+	pad := i.uriPadBytes
 	i.mu.Unlock()
+
+	verificationURI := base + "/activate"
+	if pad > 0 {
+		verificationURI += "?p=" + strings.Repeat("p", pad)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_code":      deviceCode,
 		"user_code":        "WDJB-MJHT",
-		"verification_uri": base + "/activate",
+		"verification_uri": verificationURI,
 		"expires_in":       600,
 		"interval":         5,
 	})

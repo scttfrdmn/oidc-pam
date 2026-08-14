@@ -39,6 +39,8 @@ func clientErrorMessage(code string) string {
 		return "Maximum concurrent sessions reached"
 	case "KEY_LIST_FAILED":
 		return "Failed to list managed SSH keys"
+	case "RESPONSE_TOO_LARGE":
+		return "Authentication response too large to send"
 	default:
 		return "An error occurred"
 	}

@@ -136,6 +136,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without testing anything), and `alice@example.org` refused for local `alice`.
 
 ### Fixed
+- **High (#162): a verification URL longer than about 100 characters made every
+  login on the host fail, with nothing to go on but "Failed to parse broker
+  response".** The module read a broker response into an 8 KiB buffer, and the
+  verification URI reached it three times over: as `device_url`, as text inside
+  `instructions`, and as QR art whose size grows with the URI — art the broker
+  serialized *twice*, once as its own `qr_code` field and again embedded in the
+  instructions. An ordinary device response therefore sat about 20 bytes from the
+  limit. Past it, what arrived was a truncated prefix, `json_tokener_parse` refused
+  it, and the login was refused with `PAM_AUTHINFO_UNAVAIL` — the same result as a
+  broker that is not running, so the shipped stack's `auth requisite pam_deny.so`
+  left the operator with no password fallback and no diagnosis. Every provider in
+  the wild hands out a short URI, which is why nothing caught this.
+
+  - The QR art is serialized once, inside `instructions`. The redundant `qr_code`
+    field is gone from the IPC response (and from `internal/brokerclient`, which
+    declared it and never read it).
+  - The broker now owns the size of what it sends. A device response that would not
+    fit the module's buffer is re-rendered **without the QR art** — a login the user
+    completes by typing the URL beats a response that cannot be parsed — and at the
+    write site a response that still does not fit is replaced by a small, parseable
+    `RESPONSE_TOO_LARGE` failure rather than a truncated prefix of the real one.
+    Admin payloads are deliberately exempt: `oidc-admin` decodes a stream, and
+    `sessions_list` on a busy host is legitimately larger than the module's buffer.
+  - The buffer is 16 KiB, the bound the **oauth2-pam wire protocol (version 1)**
+    sets on a response. That project owns the broker↔module contract and this one
+    consumes it (#179), so the size is taken from there rather than chosen here.
+    `MAX_RESPONSE_SIZE` and `internal/ipc`'s `maxResponseSize` are held equal by a
+    test that reads the C header, so the two cannot drift; the second, unused
+    `MAX_BUFFER_SIZE` macro that had the same value is gone.
+  - `receive_auth_response` no longer reports success on a full buffer with no end
+    of message. That case is now distinguished from a transport failure and reported
+    as `PAM_SERVICE_ERR` ("error in service module"), not `PAM_AUTHINFO_UNAVAIL`
+    ("could not reach an opinion"), with the size in syslog. Both fail closed, but
+    they no longer look alike to whoever is reading the log.
+  - The broker bounds what a provider can hand it: `verification_uri` and
+    `verification_uri_complete` at 512 bytes, `user_code` at 64, rejected with an
+    error naming the provider's field — the input side of the same problem, where
+    the error can still say where the value came from.
+  - Tests in three places, since this defect lived between them: a Go test that
+    marshals the worst-case response the broker's own validation permits and asserts
+    it fits (with the art, and without); a cgo test that an oversized response is
+    reported distinctly rather than as an unreachable broker; and an e2e case that
+    logs in against an issuer handing out a 400-byte verification URI, asserting the
+    URL still reaches the user and the module never falls back on a parse failure.
+    `fakeoidc` grew a `/control/verification-uri?pad=N` route for it, because a
+    harness that only ever sees a 29-byte URI cannot tell that this is broken.
 - **High (#158): `require_groups` written the way every document tells operators
   to write it enforced nothing.** Group membership was checked against the global
   `authentication.require_groups`, but the configuration in QUICK-START.md,

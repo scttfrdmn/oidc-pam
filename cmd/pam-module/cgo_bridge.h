@@ -16,9 +16,31 @@
 #define PAM_MODULE_NAME "pam_oidc"
 #define PAM_MODULE_VERSION "0.1.0"
 
-// Maximum buffer sizes
-#define MAX_BUFFER_SIZE 8192
-#define MAX_RESPONSE_SIZE 8192
+// Size of the buffer a broker response is read into, NUL included.
+//
+// 16 KiB is the bound the oauth2-pam wire protocol (version 1) sets on a response:
+// that project owns the broker<->module contract and this one consumes it (#179),
+// so the number is taken from there rather than chosen here.
+//
+// This is one half of a contract with the broker: maxResponseSize in
+// internal/ipc/response.go is the other, and TestResponseSizeMatchesTheModulesBuffer
+// reads this file to hold the two equal. The broker never sends more than fits
+// here — it degrades the response, and reports an error rather than a prefix of one
+// — because a response that did not fit used to arrive truncated, fail to parse,
+// and refuse every login on the host with nothing in syslog but "Failed to parse
+// broker response". That was #162, with the buffer at 8 KiB and the QR art
+// serialized into the response twice.
+//
+// There used to be a second, unused MAX_BUFFER_SIZE macro with the same value.
+// Two names for one size is how a size ends up changed in one place only.
+#define MAX_RESPONSE_SIZE 16384
+
+// receive_auth_response results. A response that does not fit MAX_RESPONSE_SIZE is
+// distinguished from a transport failure so the caller can say so: the two mean
+// very different things to whoever is reading the log.
+#define RECV_OK 0
+#define RECV_ERROR (-1)
+#define RECV_RESPONSE_TOO_LARGE (-2)
 // Longest usable Unix socket path, taken from the platform's sockaddr_un
 // (108 bytes on Linux, 104 on Darwin/BSD) so it can never disagree with it.
 #define MAX_SOCKET_PATH (sizeof(((struct sockaddr_un *)0)->sun_path))

@@ -219,7 +219,7 @@ int send_check_session_request(int sock, const char *session_id, const char *use
 // PAM stack.
 int receive_auth_response(int sock, char *response, size_t response_size) {
     if (response_size == 0) {
-        return -1;
+        return RECV_ERROR;
     }
 
     size_t total = 0;
@@ -233,14 +233,14 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
         int pr = poll(&pfd, 1, RESPONSE_READ_TIMEOUT_MS);
         if (pr == 0) {
             log_pam_message(LOG_ERR, "Timed out waiting for broker response");
-            return -1;
+            return RECV_ERROR;
         }
         if (pr < 0) {
             if (errno == EINTR) {
                 continue;
             }
             log_pam_message(LOG_ERR, "poll() failed waiting for response: %s", strerror(errno));
-            return -1;
+            return RECV_ERROR;
         }
 
         ssize_t received = recv(sock, response + total, cap - total, 0);
@@ -249,7 +249,7 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
                 continue;
             }
             log_pam_message(LOG_ERR, "Failed to receive response: %s", strerror(errno));
-            return -1;
+            return RECV_ERROR;
         }
         if (received == 0) {
             // Connection closed by broker. Accept whatever we have if it forms a
@@ -268,13 +268,28 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
 
     if (total == 0) {
         log_pam_message(LOG_ERR, "Connection closed by broker before any response");
-        return -1;
+        return RECV_ERROR;
     }
 
     response[total] = '\0';
+
+    // A full buffer with no end of message in it is the beginning of a response,
+    // not a response. Returning success here is what made #162 silent: the caller
+    // handed the truncated JSON to json_tokener_parse, which failed, and every
+    // login on the host was refused with nothing to go on but "Failed to parse
+    // broker response". The broker is responsible for not sending more than
+    // MAX_RESPONSE_SIZE; this is what happens when it does anyway.
+    if (total >= cap && memchr(response, '\n', total) == NULL) {
+        log_pam_message(LOG_ERR,
+                        "Broker response does not fit this module's %zu-byte buffer "
+                        "(%zu bytes read with no end of message)",
+                        response_size, total);
+        return RECV_RESPONSE_TOO_LARGE;
+    }
+
     log_pam_message(LOG_DEBUG, "Received response: %s", response);
 
-    return 0;
+    return RECV_OK;
 }
 
 // Display message to user
@@ -576,17 +591,33 @@ static int broker_recv_and_close(int sock, char *response, size_t response_size)
     return rc;
 }
 
+// Map a failed read of a broker response onto a PAM result.
+//
+// PAM_AUTHINFO_UNAVAIL means "I could not reach an opinion": no broker, no reply,
+// a reply that is not JSON. A response too large for this module's buffer is a
+// different statement — the broker answered, and what is wrong is the contract
+// between the two halves of this project, not the transport and not the user. It
+// gets PAM_SERVICE_ERR ("error in service module") so that an operator reading
+// auth.log can tell the two apart, and so the fix they look for is the response
+// size rather than the broker's health. Both fail closed (#162).
+static int recv_failure_result(int rc) {
+    if (rc == RECV_RESPONSE_TOO_LARGE) {
+        return PAM_SERVICE_ERR;
+    }
+    return PAM_AUTHINFO_UNAVAIL;
+}
+
 static int broker_authenticate_once(const char *socket_path, const char *username, const char *service,
                                     const char *rhost, const char *tty,
                                     char *response, size_t response_size) {
     int sock = connect_to_broker(socket_path);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to connect to authentication broker");
-        return -1;
+        return RECV_ERROR;
     }
     if (send_auth_request(sock, username, service, rhost, tty) != 0) {
         close(sock);
-        return -1;
+        return RECV_ERROR;
     }
     return broker_recv_and_close(sock, response, response_size);
 }
@@ -596,11 +627,11 @@ static int broker_check_session_once(const char *socket_path, const char *sessio
     int sock = connect_to_broker(socket_path);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to reconnect to authentication broker while polling");
-        return -1;
+        return RECV_ERROR;
     }
     if (send_check_session_request(sock, session_id, username) != 0) {
         close(sock);
-        return -1;
+        return RECV_ERROR;
     }
     return broker_recv_and_close(sock, response, response_size);
 }
@@ -617,21 +648,24 @@ static int broker_check_session_once(const char *socket_path, const char *sessio
 // "poll once, then give up".
 //
 // Only a transport or parse failure returns PAM_AUTHINFO_UNAVAIL ("I could not
-// reach an opinion"). Everything else — a refusal, a vanished session, an
+// reach an opinion"), and only a response too large for this module's buffer
+// returns PAM_SERVICE_ERR. Everything else — a refusal, a vanished session, an
 // exhausted budget — is a denial, so the auth stack fails closed.
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s) {
-    char response[MAX_BUFFER_SIZE];
+    char response[MAX_RESPONSE_SIZE];
     char session_id[MAX_SESSION_ID_SIZE];
     json_object *response_obj;
     const char *session;
     int poll_interval;
     long deadline;
     int result;
+    int rc;
 
-    if (broker_authenticate_once(socket_path, username, service, rhost, tty,
-                                 response, sizeof(response)) != 0) {
-        return PAM_AUTHINFO_UNAVAIL;
+    rc = broker_authenticate_once(socket_path, username, service, rhost, tty,
+                                  response, sizeof(response));
+    if (rc != RECV_OK) {
+        return recv_failure_result(rc);
     }
 
     response_obj = json_tokener_parse(response);
@@ -681,9 +715,10 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
         // code, so an immediate poll can only ever report "pending".
         sleep_seconds(remaining < poll_interval ? remaining : poll_interval);
 
-        if (broker_check_session_once(socket_path, session_id, username,
-                                      response, sizeof(response)) != 0) {
-            return PAM_AUTHINFO_UNAVAIL;
+        rc = broker_check_session_once(socket_path, session_id, username,
+                                       response, sizeof(response));
+        if (rc != RECV_OK) {
+            return recv_failure_result(rc);
         }
 
         response_obj = json_tokener_parse(response);

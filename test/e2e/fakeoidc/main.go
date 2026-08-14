@@ -24,6 +24,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,8 +131,29 @@ func controlHandler(iss *testoidc.Issuer) http.Handler {
 		writeState(w, iss, "identity set")
 	})
 
-	// Reset: default identity, no polls counted. Cases call this first so the
-	// poll count they assert on is their own.
+	// Verification URI: how long a verification_uri the provider hands out.
+	//
+	//   /control/verification-uri?pad=400
+	//   /control/verification-uri?pad=0
+	//
+	// A real provider's URI is short, which is why nothing in this harness caught
+	// #162 — the URI reaches the PAM module three times over (as device_url, as text
+	// in the instructions, and as QR art that grows with it), so a few hundred bytes
+	// of it used to overflow the module's response buffer and refuse every login on
+	// the host. Padding is how a case asks for a URI long enough to prove that the
+	// login still works.
+	mux.HandleFunc("/control/verification-uri", func(w http.ResponseWriter, r *http.Request) {
+		pad, err := strconv.Atoi(r.URL.Query().Get("pad"))
+		if err != nil || pad < 0 {
+			http.Error(w, "pad must be a non-negative number of bytes\n", http.StatusBadRequest)
+			return
+		}
+		iss.SetVerificationURIPadding(pad)
+		writeState(w, iss, "verification uri padded")
+	})
+
+	// Reset: default identity, no polls counted, unpadded verification URI. Cases
+	// call this first so the poll count they assert on is their own.
 	mux.HandleFunc("/control/reset", func(w http.ResponseWriter, r *http.Request) {
 		iss.Reset()
 		iss.Script(testoidc.Pending)
@@ -151,10 +173,11 @@ func controlHandler(iss *testoidc.Issuer) http.Handler {
 func writeState(w http.ResponseWriter, iss *testoidc.Issuer, action string) {
 	claims := iss.Claims()
 	body := map[string]any{
-		"outcome":  string(iss.NextOutcome()),
-		"polls":    iss.Polls(),
-		"username": claims["preferred_username"],
-		"groups":   claims["groups"],
+		"outcome":     string(iss.NextOutcome()),
+		"polls":       iss.Polls(),
+		"username":    claims["preferred_username"],
+		"groups":      claims["groups"],
+		"uri_padding": iss.VerificationURIPadding(),
 	}
 	if action != "" {
 		body["action"] = action

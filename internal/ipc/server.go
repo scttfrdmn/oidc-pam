@@ -50,7 +50,12 @@ type Request struct {
 	Metadata   map[string]interface{} `json:"metadata"`
 }
 
-// Response represents a response to PAM module
+// Response represents a response to PAM module.
+//
+// Every field here costs part of maxResponseSize, so nothing goes in twice. There
+// used to be a qr_code field alongside Instructions, which already embeds the same
+// ASCII art: no client ever read it, and the two copies together put an ordinary
+// device-flow response ~20 bytes under the module's 8 KiB buffer (#162).
 type Response struct {
 	Success          bool                   `json:"success"`
 	UserID           string                 `json:"user_id"`
@@ -59,7 +64,6 @@ type Response struct {
 	SessionID        string                 `json:"session_id"`
 	DeviceCode       string                 `json:"device_code"`
 	DeviceURL        string                 `json:"device_url"`
-	QRCode           string                 `json:"qr_code"`
 	ExpiresAt        time.Time              `json:"expires_at"`
 	SSHPublicKey     string                 `json:"ssh_public_key"`
 	RequiresDevice   bool                   `json:"requires_device"`
@@ -308,13 +312,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	response := s.handleRequest(&request)
 
 	// Send response
-	encoder := json.NewEncoder(conn)
-	if err := encoder.Encode(response); err != nil {
-		log.Error().
-			Err(err).
-			Msg("Failed to encode IPC response")
-		return
-	}
+	s.writeResponse(conn, response)
 
 	log.Debug().
 		Str("request_type", request.Type).
@@ -453,7 +451,6 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 		SessionID:        authResponse.SessionID,
 		DeviceCode:       authResponse.DeviceCode,
 		DeviceURL:        authResponse.DeviceURL,
-		QRCode:           authResponse.QRCode,
 		ExpiresAt:        authResponse.ExpiresAt,
 		SSHPublicKey:     authResponse.SSHPublicKey,
 		RequiresDevice:   authResponse.RequiresDevice,
@@ -466,7 +463,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 
 	// Add formatted instructions based on login type
 	if authResponse.RequiresDevice {
-		response.Instructions = s.formatInstructions(request.LoginType, authResponse.DeviceURL, authResponse.DeviceCode, authResponse.QRCode)
+		s.setDeviceInstructions(response, request.LoginType, authResponse.QRCode)
 	}
 
 	return response
@@ -571,16 +568,9 @@ func (s *Server) formatInstructions(loginType, deviceURL, deviceCode, qrCode str
 
 // sendErrorResponse sends an error response
 func (s *Server) sendErrorResponse(conn net.Conn, errorCode, errorMessage string) {
-	response := &Response{
+	s.writeResponse(conn, &Response{
 		Success:      false,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
-	}
-
-	encoder := json.NewEncoder(conn)
-	if err := encoder.Encode(response); err != nil {
-		log.Error().
-			Err(err).
-			Msg("Failed to send error response")
-	}
+	})
 }

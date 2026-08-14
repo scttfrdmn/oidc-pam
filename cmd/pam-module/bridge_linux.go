@@ -36,6 +36,7 @@ import "github.com/scttfrdmn/oidc-pam/pkg/pam"
 // It lives in a normal .go file because cgo is not permitted in _test.go files.
 var pamCodesFromHeaders = map[string]pam.PAMResultCode{
 	"PAM_SUCCESS":          C.PAM_SUCCESS,
+	"PAM_SERVICE_ERR":      C.PAM_SERVICE_ERR,
 	"PAM_SYSTEM_ERR":       C.PAM_SYSTEM_ERR,
 	"PAM_PERM_DENIED":      C.PAM_PERM_DENIED,
 	"PAM_AUTH_ERR":         C.PAM_AUTH_ERR,
