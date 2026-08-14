@@ -354,6 +354,25 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		}, nil
 	}
 
+	// (#169) A network requirement that was configured and then not applied is an
+	// event in its own right, not a detail of a successful login: the operator
+	// asked for unknown_source_ip: allow, and this is the record of what that
+	// admitted. Without it, "require_private_network is on" and "this login was
+	// never checked against it" are indistinguishable in the audit trail.
+	if waived, ok := policyResult.Metadata[MetadataSourceIPUnknown].(bool); ok && waived {
+		b.auditLogger.LogAuthEvent(security.AuditEvent{
+			EventType:    "network_requirement_waived",
+			UserID:       req.UserID,
+			TargetHost:   req.TargetHost,
+			Success:      true,
+			RiskScore:    policyResult.RiskScore,
+			RiskFactors:  policyResult.RiskFactors,
+			ErrorMessage: "login reported no source_ip; network requirements waived by unknown_source_ip: allow",
+			Metadata:     map[string]interface{}{"login_type": req.LoginType},
+			Timestamp:    time.Now(),
+		})
+	}
+
 	// Select appropriate provider
 	provider := b.selectProvider()
 	if provider == nil {
@@ -1092,6 +1111,10 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			// successful login without the identity it authenticated (#153) — while
 			// the denial paths, which build their events from `userInfo` directly,
 			// carried it correctly.
+			// (#169) source_ip is on the event because it is where the login that was
+			// admitted came from, and until it was populated by the clients this
+			// record could only ever have carried an empty one — so it carried
+			// nothing, while every denial path recorded it.
 			b.auditLogger.LogAuthEvent(security.AuditEvent{
 				EventType: "authentication_successful",
 				UserID:    updated.UserID,
@@ -1099,6 +1122,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				Groups:    updated.Groups,
 				SessionID: updated.ID,
 				Provider:  provider.Name,
+				SourceIP:  updated.SourceIP,
 				Success:   true,
 				Timestamp: time.Now(),
 			})

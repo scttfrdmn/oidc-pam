@@ -58,6 +58,13 @@ func TestValidateSourceIP(t *testing.T) {
 		{"path traversal", "../../etc", true},
 		{"too many octets", "1.2.3.4.5", true},
 		{"out of range", "256.1.1.1", true},
+		// (#169) A resolved hostname, which is what PAM_RHOST holds when sshd runs
+		// with UseDNS on, is not a location the policy engine can evaluate. Clients
+		// send it as metadata.rhost and leave source_ip out.
+		{"hostname", "client.example.com", true},
+		// An IPv6 zone is part of the literal the wire contract's 45 bytes allow for.
+		{"IPv6 with zone", "fe80::1%eth0", false},
+		{"longer than the contract allows", strings.Repeat("1", 46), true},
 	}
 
 	for _, tt := range tests {
@@ -163,6 +170,17 @@ func TestValidateRequest(t *testing.T) {
 				Type:     "authenticate",
 				UserID:   "testuser",
 				SourceIP: "not-an-ip",
+			},
+			wantErr: true,
+		},
+		{
+			// (#169) target_host is a DNS name (this host), so the contract bounds it
+			// at 253 rather than at maxFieldLen.
+			name: "authenticate over-long target_host",
+			req: Request{
+				Type:       "authenticate",
+				UserID:     "testuser",
+				TargetHost: strings.Repeat("h", maxTargetHostLen+1),
 			},
 			wantErr: true,
 		},

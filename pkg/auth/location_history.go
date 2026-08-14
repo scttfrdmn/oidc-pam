@@ -107,9 +107,18 @@ func (lh *LocationHistory) IsUnusual(userID, ip, country string) bool {
 //   - When the per-user cap (MaxLocationsPerUser) is reached, the oldest entry
 //     is evicted to make room.
 //
+// A login with no usable location is not recorded at all. (#169) An entry with an
+// empty Subnet and an empty Country can never match anything IsUnusual is asked
+// about, but it does end the "no history yet" exemption — so recording one made
+// every subsequent login for that user score as an unusual location for as long
+// as the entry lived.
+//
 // If PersistPath is configured the updated history is saved asynchronously.
 func (lh *LocationHistory) RecordLocation(userID, ip, country string) {
 	subnet := subnetKey(ip)
+	if subnet == "" && country == "" {
+		return
+	}
 	now := time.Now()
 	cutoff := now.Add(-lh.historyWindow())
 	maxLocs := lh.cfg.MaxLocationsPerUser

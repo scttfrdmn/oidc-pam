@@ -61,6 +61,7 @@ recorded — not only on what `ssh` did.
 | --- | --- |
 | `waits_while_pending` | **#120.** While nothing is approved, the login is still *waiting*: not granted, no key, no success event. |
 | `approved_login` | The happy path. Approve mid-flow → the login completes, exactly one `@oidc-pam-` key is installed, the event is recorded, and the verification URL reached the client. |
+| `source_ip_is_the_client_address` | **#169.** The request says the login came *from* `127.0.0.1` and is going *to* this host — not the inverse — and the address reaches the audit record. |
 | `never_approved` | A flow nobody approves ends in refusal after the module's whole budget — not a grant, not a hang. |
 | `denied_by_provider` | A provider refusal is terminal (RFC 8628) and the login is refused *because of it* — asserted from the module log and audit trail, not the clock. |
 | `identity_mismatch` | **#90.** An ID token for `carol` cannot log in as `alice`, however valid it is. |

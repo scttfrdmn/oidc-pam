@@ -189,6 +189,14 @@ authentication:
     tailscale_api_key: "tskey-api-your-key-here"
     validate_device_trust: true
     require_private_network: true
+    # What the two requirements above do with a login that reports no source_ip:
+    # one at the physical console, or one whose PAM_RHOST is a hostname rather
+    # than an address. Required whenever either is enabled, and "deny" is the
+    # fail-closed answer — on these hosts a console login is expected to go
+    # through the same network requirements as any other, and there is no address
+    # to check it against. Set it to "allow" only if console logins must work,
+    # and expect a network_requirement_waived audit event for each one.
+    unknown_source_ip: "deny"
 
   # Time-based access controls
   time_based_policies:

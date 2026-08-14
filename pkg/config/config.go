@@ -204,7 +204,28 @@ type NetworkRequirements struct {
 	TailscaleAPIKey       string `mapstructure:"tailscale_api_key"`
 	ValidateDeviceTrust   bool   `mapstructure:"validate_device_trust"`
 	RequirePrivateNetwork bool   `mapstructure:"require_private_network"`
+
+	// UnknownSourceIP decides what the requirements above do with a login the
+	// broker cannot place on any network: one that arrived with no source_ip.
+	// That is neither rare nor an attack — a login at the physical console has no
+	// peer address, and neither does one whose PAM_RHOST is a resolved hostname
+	// rather than an address, since source_ip carries an address or nothing.
+	//
+	// (#169) It is required, and has no default, whenever a requirement above is
+	// enabled: the implicit answer was the defect. An absent source_ip went
+	// through isPrivateIP(""), came back false, and denied every login on the
+	// host. "Unknown" and "on a public network" are different facts, and the
+	// operator is the only one who can say which way an unknown falls.
+	UnknownSourceIP string `mapstructure:"unknown_source_ip"`
 }
+
+// The values UnknownSourceIP takes. Deny is the fail-closed answer and the one
+// to prefer; Allow is for a host whose console logins matter more than the
+// requirement, and every login it lets through is audited as a waiver.
+const (
+	UnknownSourceIPDeny  = "deny"
+	UnknownSourceIPAllow = "allow"
+)
 
 // TimeBasedPolicies defines time-based access controls
 type TimeBasedPolicies struct {
@@ -610,7 +631,41 @@ func (c *Config) Validate() error {
 			c.Authentication.RefreshThreshold, c.Authentication.TokenLifetime)
 	}
 
+	if err := validateNetworkRequirements(c.Authentication.NetworkRequirements); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// validateNetworkRequirements refuses a network requirement whose behaviour on a
+// login with no source_ip has been left implicit.
+//
+// (#169) A requirement is evaluated against source_ip, and some logins have none
+// — the console, and any PAM_RHOST that is a hostname rather than an address.
+// Until the operator says so, the broker cannot tell whether such a login is
+// meant to pass or to be refused, and the answer it used to reach on its own
+// (isPrivateIP("") is false, therefore deny) refused every login on the host.
+// Refused at startup rather than at first login, for the same reason as the
+// email-domain check above: an operator who mis-set this should find out when the
+// broker starts.
+func validateNetworkRequirements(nr NetworkRequirements) error {
+	switch nr.UnknownSourceIP {
+	case UnknownSourceIPDeny, UnknownSourceIPAllow:
+		return nil
+	case "":
+		if !nr.RequirePrivateNetwork && !nr.RequireTailscale {
+			return nil // nothing consults it
+		}
+		return fmt.Errorf("authentication.network_requirements.unknown_source_ip must be %q or %q "+
+			"when require_private_network or require_tailscale is enabled: a login with no source_ip "+
+			"(one at the console, or one whose PAM_RHOST is a hostname rather than an address) cannot "+
+			"satisfy a network requirement, and leaving that implicit denied every login",
+			UnknownSourceIPDeny, UnknownSourceIPAllow)
+	default:
+		return fmt.Errorf("authentication.network_requirements.unknown_source_ip is %q; must be %q or %q",
+			nr.UnknownSourceIP, UnknownSourceIPDeny, UnknownSourceIPAllow)
+	}
 }
 
 // validateHTTPSEndpoint ensures a configured OIDC endpoint URL uses HTTPS.

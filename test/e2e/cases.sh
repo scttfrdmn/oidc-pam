@@ -317,6 +317,35 @@ case_approved_login() {
     fi
 }
 
+# #169: which end of the connection each field describes. The module used to send
+# PAM_RHOST as target_host and no source_ip at all, so the broker saw every login
+# as arriving from nowhere and going to the client — and require_private_network,
+# which is evaluated against source_ip, refused every login on the host.
+#
+# sshd and the broker are in this container, so the login comes from 127.0.0.1 and
+# arrives at this container's hostname. Those are different strings, which is what
+# makes the inversion visible here and not in either half's own tests.
+case_source_ip_is_the_client_address() {
+    reset_state alice || return 1
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+    control approve >/dev/null
+    reap_login
+
+    expect_login_ok || return 1
+
+    # pam-sshd sets debug, so the module logs the request it sent. json-c prints a
+    # space after the colon; the patterns tolerate either.
+    expect_module_log '"source_ip": *"127.0.0.1"'
+    expect_module_log "\"target_host\": *\"$(hostname)\""
+    expect_no_module_log '"target_host": *"127.0.0.1"'
+
+    # And the address survives the trip: an audit record that does not say where a
+    # login came from cannot be used to investigate one.
+    expect_audit 'authentication_successful.*"source_ip":"127.0.0.1"'
+}
+
 # #120's other half: a device flow nobody ever approves must end in a refusal,
 # not in a grant and not in a hang. The module's own timeout= is what bounds it.
 case_never_approved() {
@@ -697,6 +726,7 @@ case_broker_down() {
 CASES=(
     waits_while_pending
     approved_login
+    source_ip_is_the_client_address
     long_verification_uri
     never_approved
     denied_by_provider

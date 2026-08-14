@@ -197,6 +197,9 @@ authentication:
     require_tailscale: true
     tailscale_api_key: "${TAILSCALE_API_KEY}"
     validate_device_trust: true
+    # Required alongside require_tailscale (#169): what happens to a login with
+    # no source_ip, such as one at the physical console.
+    unknown_source_ip: "deny"
     
   policies:
     production:
