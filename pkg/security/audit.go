@@ -33,6 +33,10 @@ type AuditLogger struct {
 	// writeMu serializes all writes to outputs so that synchronous critical-event
 	// writes (from any goroutine) don't race with the async processEvents goroutine.
 	writeMu sync.Mutex
+	// stopOnce makes Stop idempotent: it closes stopChan, and a second close
+	// would panic. Callers that stop the logger on both a shutdown path and a
+	// deferred cleanup are the normal case, not a mistake (#188).
+	stopOnce sync.Once
 }
 
 // DroppedEvents returns the cumulative number of audit events dropped because
@@ -163,20 +167,55 @@ func (al *AuditLogger) Stop() error {
 		return nil
 	}
 
-	log.Info().Msg("Stopping audit logger")
+	al.stopOnce.Do(func() {
+		log.Info().Msg("Stopping audit logger")
 
-	// Stop event processing
-	close(al.stopChan)
-	al.wg.Wait()
+		// Stop event processing
+		close(al.stopChan)
+		al.wg.Wait()
 
-	// Close outputs
-	for _, output := range al.outputs {
-		if err := output.Close(); err != nil {
-			log.Error().Err(err).Msg("Failed to close audit output")
+		// The worker drains on its way out, but it may never have been started
+		// (Stop without Start) or may already have returned on a cancelled
+		// context, in which case what is queued is still unwritten. Draining
+		// here as well makes "Stop returned" mean "every accepted event has
+		// been written", which is what the rest of the code assumes.
+		al.drain()
+
+		// Close outputs
+		for _, output := range al.outputs {
+			if err := output.Close(); err != nil {
+				log.Error().Err(err).Msg("Failed to close audit output")
+			}
 		}
-	}
+	})
 
 	return nil
+}
+
+// drain writes the events already queued when the logger was told to stop.
+//
+// Without this, Stop discarded them: processEvents selected on stopChan and
+// returned, and everything still buffered in eventChan went to the garbage
+// collector unwritten (#188). The events most likely to be sitting in that
+// buffer are the ones logged immediately before shutdown — the tail of the
+// audit trail, and the part an investigation into why a host went down would
+// want. Losing records quietly is the one behaviour an audit trail may not
+// have, which is also why the default overflow strategy is "block".
+//
+// Draining is bounded by what is in the buffer: LogAuthEvent's callers have
+// stopped by the time Stop is called, so no new events arrive, and the default
+// branch ends the loop as soon as the buffer is empty.
+func (al *AuditLogger) drain() {
+	for {
+		select {
+		case event := <-al.eventChan:
+			al.writeMu.Lock()
+			al.writeEvent(event)
+			al.writeMu.Unlock()
+		default:
+			return
+		}
+	}
 }
 
 // LogAuthEvent logs an authentication event
@@ -247,8 +286,10 @@ func (al *AuditLogger) processEvents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			al.drain()
 			return
 		case <-al.stopChan:
+			al.drain()
 			return
 		case event := <-al.eventChan:
 			al.writeMu.Lock()
