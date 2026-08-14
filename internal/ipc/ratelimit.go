@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -145,7 +146,7 @@ func NewRateLimiter(maxRequestsPerMinute, maxConcurrentAuths int) *RateLimiter {
 		malformedMaxTokens:  malformedPerMinute,
 		malformedRefillRate: malformedPerMinute / 60.0,
 		buckets:             make(map[string]*bucket),
-		maxConcurrentAuths:  int32(maxConcurrentAuths),
+		maxConcurrentAuths:  clampToInt32(maxConcurrentAuths),
 		stopChan:            make(chan struct{}),
 	}
 
@@ -239,6 +240,27 @@ func (rl *RateLimiter) makeRoom() {
 			Int("tracked", len(rl.buckets)).
 			Msg("Rate-limit bucket map full; evicted the least recently used bucket")
 	}
+}
+
+// clampToInt32 narrows n to the range concurrentAuths can actually count in,
+// saturating instead of wrapping.
+//
+// The plain conversion this replaces was a fail-open. maxConcurrentAuths comes
+// from `security.rate_limiting.max_concurrent_auths`, which pkg/config reads as an
+// int and does not bound above; on a 64-bit host a configured 2147483648 wrapped
+// to -2147483648, and AcquireAuth reads any value <= 0 as "limit disabled". So a
+// config asking for a very large cap got *no* cap — the one reading of that number
+// nobody writing it intends. Saturated, an absurd value still gets the largest
+// bound an atomic.Int32 can express.
+func clampToInt32(n int) int32 {
+	if n > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if n < math.MinInt32 {
+		return math.MinInt32
+	}
+	// #nosec G115 -- the two guards above are the bounds check; n is in int32 range here.
+	return int32(n)
 }
 
 // AcquireAuth attempts to increment the concurrent auth counter. Returns false
