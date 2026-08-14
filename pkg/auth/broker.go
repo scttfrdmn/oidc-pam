@@ -1495,6 +1495,14 @@ func (b *Broker) verifyLocalAccountIsBindable(requested string) error {
 		return fmt.Errorf("could not determine whether local user %q is privileged: %w", requested, err)
 	}
 	if !exists {
+		// Logged because "no such account here" and "account exists and is
+		// unprivileged" reach the same conclusion by different routes, and the first
+		// one means the guard did not really run. If the broker's passwd view differs
+		// from the authenticating host's — a container, a chroot, an sssd domain the
+		// broker cannot see — every account looks unprivileged.
+		log.Debug().
+			Str("local_user", requested).
+			Msg("Requested account does not exist in the broker's passwd view; privileged-account guard has nothing to check")
 		return nil
 	}
 	if uid < PrivilegedUIDThreshold {
