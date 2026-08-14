@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#160): one unauthenticated remote client could make a host
+  unloginnable.** The IPC rate limit was documented and named as per-UID, but the
+  UID it was keyed on can only ever be 0 — `verifyPeerCredentials` rejects every
+  peer that is not root — so there was a single bucket for the whole machine and
+  `max_requests_per_minute` was a *host-wide* budget. One PAM login spends about
+  19 requests (one `authenticate` plus a `check_session` per poll), so the shipped
+  budgets of 30–60 covered under three concurrent logins. Opening SSH connections
+  to any syntactically valid username at roughly one per second emptied it, after
+  which every login on the host was refused with `RATE_LIMIT_EXCEEDED` →
+  `PAM_MAXTRIES`, and the shipped stack (`auth sufficient pam_oidc.so` followed by
+  `auth requisite pam_deny.so`) has no password fallback. The bucket refilled at
+  30–60 tokens per minute, so a slow trickle sustained it.
+
+  - The limits are now keyed on the **account a request names**, so one account's
+    traffic cannot spend another's budget. `max_requests_per_minute` is therefore
+    now a per-account figure; the shipped values are unchanged and are generous
+    for one account.
+  - `check_session`, `refresh_session` and `revoke_session` are charged against a
+    separate, larger budget (20× the authenticate budget, one per poll of one
+    login). Sharing one budget meant that exhausting it refused the polls of
+    logins already in flight: the broker permitted the login, chose the polling
+    interval itself, and then denied the login for continuing.
+  - The limiter runs after the request is decoded and validated, since that is
+    when the account is known. As the compensating bound, `maxRequestSize` drops
+    from 1 MiB to 64 KiB — the largest request these validation limits permit is
+    about 40 KiB — so what an unlimited peer can make the broker allocate is
+    8 MiB rather than 128 MiB.
+  - The bucket map is bounded (4096 entries, LRU eviction), because its keys now
+    come from requests. Eviction cannot be turned into a lockout: draining a given
+    account's budget requires naming it, which keeps that bucket the most recently
+    used and so the last evicted.
+  - Administrative reads (`status`, `sessions_list`, `keys_list`) are not charged.
+    They name no account, so they would all share one bucket — the shape of this
+    bug — and an `oidc-admin status` refused during an incident is a real cost
+    where an operator looping the command is not a threat.
+
+  This does not stop an attacker from spending the budget of an account they name
+  deliberately; that needs a second key the client does not choose (`source_ip`,
+  #169) and the pending-flow accounting in #163.
+
+  Coverage: `ratelimit_test.go` drove the limiter with synthetic uids 1000/2000/3000
+  — a state unreachable in production, and the reason a host-wide bucket looked
+  per-user in the tests. It is rewritten around account names, with the attack as
+  a test (400 requests naming 100 accounts, then a login for an unnamed account
+  still succeeds) and one asserting an in-flight login's polls survive an
+  exhausted authenticate budget.
+
 - **High (#159): an identity provider could choose which local account a login
   became, including root.** Identity binding accepted the **local part** of an
   email-shaped claim as a match for the requested account, so `root@evil.tld`

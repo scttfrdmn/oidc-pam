@@ -105,6 +105,11 @@ security:
     pin_certificates: false
     skip_tls_verify: false
   
+  # Rate limiting. max_requests_per_minute is the budget for *starting* an
+  # authentication, per requested account — not a host-wide total, so traffic for
+  # one account cannot deny logins to another. check_session polls are charged
+  # against a separate budget 20x this size, so a login that has been allowed to
+  # start can always finish polling.
   rate_limiting:
     max_requests_per_minute: 60
     max_concurrent_auths: 10

@@ -61,7 +61,14 @@ security:
     # broker trusts exactly this one certificate, and nothing else.
     trusted_ca_bundle: "/etc/oidc-auth/fakeoidc.crt"
   rate_limiting:
-    max_requests_per_minute: 600
+    # Low enough that a case can spend one account's budget and show it does not
+    # touch another's (#160): case_rate_limit_is_per_account sends this many
+    # requests plus one, and asserts the last is refused. The broker is restarted
+    # before every case, so each case starts with a full bucket for every account.
+    #
+    # Production ships 30–60. The figure is per account, so it is not comparable
+    # to the 600 that was here when it was a host-wide budget.
+    max_requests_per_minute: 12
     max_concurrent_auths: 20
 
 audit:
