@@ -174,10 +174,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=${GITHUB_REF_NAME}
-          # Extract changelog entry for this version if present
-          NOTES=$(awk "/^## \[?${VERSION#v}/,/^## /" CHANGELOG.md 2>/dev/null | head -n -1 || echo "Release ${VERSION}")
+          # This version's CHANGELOG section, from its header to the next one. An
+          # awk range cannot express that: the version header also matches the end
+          # pattern, so the range closed on the line that opened it, and every
+          # release up to v0.4.2 was published with empty notes.
+          awk -v ver="${VERSION#v}" '
+            index($0, "## [" ver "]") == 1 { inSection = 1; next }
+            inSection && /^## / { exit }
+            inSection { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::no CHANGELOG section for ${VERSION}" >&2
+            echo "Release ${VERSION}" > release-notes.md
+          fi
           gh release create "${VERSION}" \
             --title "oidc-pam ${VERSION}" \
-            --notes "${NOTES}" \
+            --notes-file release-notes.md \
             dist/*.tar.gz \
             dist/*.sha256

@@ -1241,6 +1241,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `security.token_encryption_key`, invalid since the v0.4.0 breaking change; it
   now uses a base64 32-byte test key.
 
+### Fixed
+- Published releases carried **empty release notes**. `release.yml` pulled this
+  version's CHANGELOG section with an awk range whose end pattern (`^## `) also
+  matches the version header that opens the range, so awk closed the range on the
+  line that opened it and `head -n -1` deleted the single line it produced. Every
+  release up to and including v0.4.2 was published with an empty body. The section
+  is now read from its header to the next one and passed as `--notes-file`, and a
+  version with no section logs a warning instead of silently publishing nothing.
+
 ## [0.4.2] - 2026-07-09
 
 ### Security
