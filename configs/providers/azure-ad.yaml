@@ -75,18 +75,23 @@ authentication:
   # naming it at startup. Rename the tier that applies to these hosts to
   # "default", or name your hosts to match. Every matching policy applies:
   # require_groups is the union of all matches and the global setting.
+  #
+  # (#212) require_institutional_affiliation and audit_level were set here and read
+  # by nothing. Setting either is now a startup error rather than a control that
+  # appears to exist. An affiliation requirement is expressible as require_groups
+  # against a group the tenant actually issues, which is enforced.
   policies:
     production:
       require_groups: ["production-access", "azuread-admin"]
+      # Requires a hardware or FIDO authenticator in the identity's amr claim.
+      # Entra ID sends amr when the sign-in used one; against a Conditional Access
+      # policy that permits password-only sign-in, this denies those logins.
       require_device_trust: true
       max_session_duration: "4h"
-      require_institutional_affiliation: true
-      audit_level: "detailed"
-      
+
     development:
       require_groups: ["developers", "azuread-dev"]
       max_session_duration: "8h"
-      audit_level: "basic"
 
 # Security configuration
 security:

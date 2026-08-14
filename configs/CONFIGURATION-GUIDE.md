@@ -583,6 +583,58 @@ Every matching policy applies. `require_groups` is the union of the global
 `max_session_duration` is the smallest — so an additional matching policy can
 only further restrict access.
 
+### What a policy can set
+
+A policy has exactly four settings, and the broker enforces all four:
+
+| Key | What it does |
+|---|---|
+| `require_groups` | Denies any identity that is in none of the named groups. |
+| `max_session_duration` | Hard ceiling on the session's life from the moment it was created. Reached, the session ends and the user re-authenticates — which is when policy is evaluated again from scratch. Refreshing does not extend past it. |
+| `require_device_trust` | Denies any identity whose `amr` claim does not include `hwk` or `fido` (RFC 8176). **Check your provider emits `amr` before enabling this**: against one that does not, it denies every login on the host. |
+| `ip_whitelist` | CIDRs the login's **source** address must fall in. A login reporting no source address is governed by `authentication.network_requirements.unknown_source_ip`. |
+
+Ten other keys used to be accepted here. They parsed, they appeared in the loaded
+configuration, and **nothing read any of them** — so a policy that set
+`require_additional_mfa` or `session_recording` announced a control that did not
+exist and the login proceeded exactly as if it had not. Since v0.5.1 the broker
+**refuses to start** on any of them, naming each one and why (#212):
+
+`require_reauth_for_new_hosts`, `require_institutional_affiliation`,
+`require_allocation_verification`, `require_project_membership`, `audit_level`,
+`allow_untrusted_devices`, `require_additional_mfa`, `no_data_export`,
+`session_recording`, `require_approval_for`.
+
+Refusing to start, rather than warning, is deliberate: a warning in a log nobody
+reads is how these settings survived eleven releases. **Upgrading to v0.5.1 with
+any of them set will stop the broker**, so remove them before you upgrade. Most
+have somewhere real to go — an affiliation or project requirement is a
+`require_groups` against a group the IdP issues; a second factor belongs in the
+IdP's own sign-on policy, where it can be enforced.
+
+### Risk policies
+
+`authentication.risk_policies` matches a condition against the risk score and
+signals the broker computes, and its `action` is `DENY` or `LOG` — those two.
+`REQUIRE_ADDITIONAL_MFA` and `REQUIRE_APPROVAL` were accepted until v0.5.1, set a
+field nothing read, and let the login proceed unchanged; they are now a startup
+error for the same reason as the keys above.
+
+A condition is either a comparison against `risk_score` (`>=`, `>`, `<=`, `<`,
+`==`) or one or more signal names joined by `AND`:
+
+| Signal | True when |
+|---|---|
+| `unusual_location` | The source address is outside the user's recorded location history. |
+| `after_hours` | The login is outside 07:00–19:00 in the broker's local time. |
+| `untrusted_network` | The source address is not private — **including when there is no source address at all**, since an unknown origin is not evidence of a safe one. |
+| `unknown_device` (alias `new_device`) | The request carries no device identifier. |
+| `unknown_network_origin` (alias `unknown_network`) | The request carries no source address. |
+
+Anything else is a startup error. There is deliberately no device-trust signal:
+risk policies are evaluated before the device flow begins, so no `amr` claim
+exists yet — `require_device_trust` covers that, after the identity is known.
+
 ## Environment-Specific Configurations
 
 Deploy one configuration per environment and name its policy `default`, so that
@@ -596,8 +648,6 @@ authentication:
     default:
       require_groups: ["developers"]
       max_session_duration: "8h"
-      allow_untrusted_devices: true
-      audit_level: "basic"
 
 security:
   tls_verification:
@@ -613,7 +663,6 @@ authentication:
       require_groups: ["developers", "qa-team"]
       max_session_duration: "4h"
       require_device_trust: true
-      audit_level: "standard"
 ```
 
 ### Production Environment
@@ -625,9 +674,7 @@ authentication:
       require_groups: ["production-access"]
       max_session_duration: "2h"
       require_device_trust: true
-      require_additional_mfa: true
-      session_recording: true
-      audit_level: "detailed"
+      ip_whitelist: ["10.0.0.0/8"]
 ```
 
 ## Troubleshooting
