@@ -19,12 +19,13 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /out/pam_oidc.so ./cmd/pam-module
-
-# A module can build cleanly and export none of the pam_sm_* entry points (#140),
-# in which case every login in this harness would fail for a reason that has
-# nothing to do with the code under test. Fail the build instead.
-RUN ./scripts/verify-pam-module.sh /out/pam_oidc.so
+# The same script the Makefile and release.yml build with, so the module these
+# logins exercise is the module that ships — same compiler, same hardening flags.
+# It also verifies its own output: a module can build cleanly and export none of
+# the pam_sm_* entry points (#140), in which case every login in this harness
+# would fail for a reason that has nothing to do with the code under test, and
+# read as flakiness (#222). Fail the image build instead.
+RUN ./scripts/build-pam-module.sh /out/pam_oidc.so
 
 FROM debian:bookworm-slim
 

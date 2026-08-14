@@ -403,6 +403,24 @@ Only `sshd` is exercised end-to-end by CI (`test/e2e`). The `login`, `su` and
 `sudo` files in `configs/pam/` are examples: deploy them one at a time, from a
 host you can still get back into.
 
+#### What loading the module does to the process
+
+`pam_oidc.so` is about 70 KB of C linked against `libpam` and `libjson-c`. It
+starts no threads, installs no signal handlers, and can be unloaded — so what it
+adds to an `sshd` pre-auth child is the memory it occupies and the time its `auth`
+phase blocks for, and nothing else.
+
+That is worth stating because it was not always true, and because it constrains
+what the module may become. Releases through v0.5.0 built the module as a Go
+`c-shared` library: a 2.4 MB object which starts the Go runtime in every process
+that `dlopen`s it, and the runtime replaces the process's handlers for `SIGSEGV`,
+`SIGBUS`, `SIGFPE`, `SIGPIPE` and `SIGURG` with its own, adds `SA_ONSTACK` to the
+handlers it leaves in place, runs its own threads, and sets `DF_1_NODELETE` so
+`dlclose` cannot unload it. It did all of that in `sshd`, as root, before
+authentication, in service of no Go code — none ran in the module (#198). The
+entry points were always C, so the fix was to build the module with the C
+compiler. Keeping it that way means keeping Go out of the module's call path.
+
 #### SSH Configuration (`/etc/pam.d/ssh`)
 ```bash
 # Production SSH PAM configuration.

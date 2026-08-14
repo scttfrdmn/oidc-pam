@@ -1,3 +1,13 @@
+// _FORTIFY_SOURCE has to be defined before the first system header is included,
+// which is why it is here and not a -D in the build. It is a floor, not an
+// assignment: a distribution whose compiler already asks for a higher level (3,
+// on current Ubuntu) keeps it, and stating it on the command line instead would
+// quietly downgrade that and warn about the redefinition. It needs -O to do
+// anything, which scripts/build-pam-module.sh and cgo both supply.
+#ifndef _FORTIFY_SOURCE
+#define _FORTIFY_SOURCE 2
+#endif
+
 #include "cgo_bridge.h"
 #include <stdarg.h>
 #include <stdio.h>

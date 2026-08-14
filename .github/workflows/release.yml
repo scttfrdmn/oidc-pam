@@ -163,22 +163,15 @@ jobs:
             -o bin/oidc-admin-linux-${{ matrix.arch }} \
             ./cmd/oidc-admin
 
-      - name: Build PAM module (CGO)
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 1
-        run: |
-          go build -buildmode=c-shared -trimpath -ldflags="${{ steps.vars.outputs.ldflags }}" \
-            -o bin/pam_oidc.so-linux-${{ matrix.arch }} \
-            ./cmd/pam-module
-          rm -f bin/pam_oidc.so-linux-${{ matrix.arch }}.h
-
-      # A c-shared build with no PAM entry points in it exits 0 (#140), so the
-      # artifact has to be inspected before it can be released. This step is what
-      # stops another release shipping a module PAM cannot use.
-      - name: Verify the PAM module is loadable
-        run: ./scripts/verify-pam-module.sh bin/pam_oidc.so-linux-${{ matrix.arch }}
+      # The module is C, built by the one script every producer uses, which
+      # applies the hardening flags and then inspects what it produced: a build
+      # with no PAM entry points in it exits 0 (#140), so nothing but reading the
+      # artifact can tell a release from a module PAM cannot use. The architecture
+      # argument makes the file name a claim the script checks — this job runs on a
+      # runner of the matrix architecture, and a change that made it cross-build
+      # would otherwise publish a module that fails at dlopen (#222).
+      - name: Build and verify the PAM module
+        run: ./scripts/build-pam-module.sh bin/pam_oidc.so-linux-${{ matrix.arch }} ${{ matrix.arch }}
 
       - name: Build PAM helper (CGO)
         env:
