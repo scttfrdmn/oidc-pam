@@ -8,6 +8,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#171): the SSH key a successful login was granted was written to a
+  directory guessed from the login name, was never removed when the session ended,
+  and accumulated one working credential per login.** The provisioning path was
+  wrong at both ends: the key often did not arrive where sshd reads it, and when it
+  did arrive nothing took it away again.
+
+  The broker joined `/home` with the login name and wrote `<that>/.ssh/authorized_keys`.
+  On any site whose homes are not literally `/home/<user>` — SSSD or LDAP with
+  `/home/<domain>/<user>`, autofs, NFS, a home moved by hand — it created that
+  directory itself, as root and mode 0700, wrote a key list sshd would never read,
+  and reported the login as successful. The user was told they were authenticated
+  and then could not log in, and on the next real login their own home was shadowed
+  by a root-owned directory they could not write. The uid from the passwd database
+  was never consulted, so nothing distinguished "this is the account's home" from
+  "this is a directory belonging to someone else". Where the key *did* land, it was
+  appended on every login and deduplicated only against byte-identical lines, so an
+  account that logged in daily accumulated a live credential per login; each one
+  carried no expiry sshd could see, so it stopped being limited at all the moment
+  the broker forgot the session that owned it — which happens on every restart,
+  since sessions are held only in memory. The shipped systemd unit set
+  `ProtectHome=true`, which makes `/home` an empty tmpfs to the service, so on a
+  host installed from it no key could be written at all.
+
+  - Home directories now come from the account database, through
+    `pkg/ssh.LookupAccount`: `os/user` first, then `getent passwd`. The fallback is
+    not redundancy — the released broker is built `CGO_ENABLED=0`, and without cgo
+    `os/user` parses `/etc/passwd` and never asks NSS, so every SSSD or LDAP account
+    is invisible to it. `getent` asks NSS the way sshd and `login` do, bounded by a
+    timeout and a `WaitDelay` so a wedged directory server cannot hold a login open.
+    Nothing derives a home path any more, and a home that does not exist is refused
+    rather than created.
+  - The owning uid is checked, on the home directory, on `.ssh` and on
+    `authorized_keys` through the open file descriptor. The account or root is
+    accepted, which is what sshd's own `StrictModes` accepts; anything else is
+    refused rather than written through. Files the root broker creates in a home are
+    handed to the account.
+  - A login installs exactly one broker key: every previous `@oidc-pam-` entry is
+    dropped as it is written, and the account's own keys are left alone. The entry
+    carries `expiry-time="…Z"`, so **sshd** enforces the key's lifetime whether or
+    not the broker is running or remembers the session. Both the key store and the
+    `authorized_keys` sweep now use the configured `token_lifetime`; both used to be
+    hardcoded to 24 hours, so a site that had deliberately set `token_lifetime: 1h`
+    still handed out keys good for a day.
+  - Startup revokes what the previous run left behind. The key store survives a
+    restart even though sessions do not, so anything in it at startup belongs to no
+    live session and its `authorized_keys` entry is removed.
+  - A login whose key could not be provisioned is now denied instead of completed.
+    It used to be activated and audited as `authentication_successful` with no usable
+    key anywhere; the failure is recorded as `ssh_key_provisioning_failed` and the
+    session is dropped, which the module already reports through
+    `SESSION_NOT_FOUND` — no change to the broker↔module wire contract.
+  - Revoking a key a later login had already superseded is no longer reported as
+    `ssh_key_revocation_incomplete`. That event means a credential is still live
+    (#165), and firing it for the ordinary two-logins case would have trained
+    operators to ignore it.
+  - `configs/systemd/oidc-auth-broker.service` sets `ProtectHome=false`, lists
+    `/home` in `ReadWritePaths` (`ProtectSystem=strict` otherwise makes it
+    read-only) and declares `StateDirectory=oidc-pam`; `scripts/install-release.sh`
+    creates `/var/lib/oidc-pam/{ssh-keys,locks}` at 0700, and DEPLOYMENT.md's unit
+    matches the shipped one.
+
+  Coverage: `pkg/ssh` tests that a key is written to the home the account database
+  gives and that nothing is created at `/home/<user>`, that a missing home is
+  refused rather than created, that a foreign-owned path is refused, that a second
+  login supersedes the first key while leaving the user's own, that the installed
+  entry carries the `expiry-time` option, and that the sweep measures against the
+  configured lifetime; `pkg/ssh/accounts_test.go` covers the NSS fallback, an
+  unknown account, a wedged account database and the passwd fields that are refused;
+  `pkg/auth` tests that a login whose key cannot be installed is denied and audited,
+  that startup revokes a previous run's keys through `Start` itself, that
+  `token_lifetime` reaches the key manager, and that a superseded revocation is not
+  reported as incomplete; `cmd/broker` pins the unit's `ProtectHome`,
+  `ReadWritePaths` and `StateDirectory`; and two e2e cases cover a second login
+  replacing the first key and a broker restart sweeping the keys it had issued.
 - **Medium (#188): stopping the audit logger discarded every record still
   queued, and a second `Stop` panicked.** `processEvents` selected on its stop
   channel and returned without looking at the buffer, so the events sitting in

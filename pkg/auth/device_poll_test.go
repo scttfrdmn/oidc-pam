@@ -119,7 +119,7 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 		auditLogger:           auditLogger,
 		sessions:              make(map[string]*Session),
 		keyManager:            keyManager,
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir, t.TempDir()),
+		authorizedKeysManager: testAuthorizedKeysManager(t, homeDir, "testuser", "deploy"),
 		stopChan:              make(chan struct{}),
 		pollIntervalUnit:      testPollUnit,
 		// A fixed passwd table, so the privileged-account guard (#159) behaves the

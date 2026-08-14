@@ -79,7 +79,7 @@ func runWithin(t *testing.T, limit time.Duration, fn func() error) error {
 // wait forever on a lock someone else holds.
 func TestRemoveExpiredKeysGivesUpWhenTheLockIsHeld(t *testing.T) {
 	base := t.TempDir()
-	akm := NewAuthorizedKeysManager(base, t.TempDir())
+	akm := newTestManager(t, base, "alice")
 	akm.SetLockTimeout(150 * time.Millisecond)
 
 	path := seedStaleKey(t, base, "alice")
@@ -106,13 +106,13 @@ func TestRemoveExpiredKeysGivesUpWhenTheLockIsHeld(t *testing.T) {
 // LoginGraceTime would kill the connection with no explanation logged.
 func TestAddPublicKeyGivesUpWhenTheLockIsHeld(t *testing.T) {
 	base := t.TempDir()
-	akm := NewAuthorizedKeysManager(base, t.TempDir())
+	akm := newTestManager(t, base, "alice")
 	akm.SetLockTimeout(150 * time.Millisecond)
 
 	holdLock(t, akm, "alice")
 
 	key := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINrqnRJYKhFTuTjCGAZ alice@oidc-pam")
-	err := runWithin(t, 5*time.Second, func() error { return akm.AddPublicKey("alice", key) })
+	err := runWithin(t, 5*time.Second, func() error { return akm.AddPublicKey("alice", key, testExpiry()) })
 	if !errors.Is(err, ErrLockUnavailable) {
 		t.Fatalf("expected ErrLockUnavailable, got %v", err)
 	}
@@ -123,7 +123,7 @@ func TestAddPublicKeyGivesUpWhenTheLockIsHeld(t *testing.T) {
 // for the whole host.
 func TestOneUsersLockDoesNotBlockAnother(t *testing.T) {
 	base := t.TempDir()
-	akm := NewAuthorizedKeysManager(base, t.TempDir())
+	akm := newTestManager(t, base, "alice", "bob")
 	akm.SetLockTimeout(150 * time.Millisecond)
 
 	bobPath := seedStaleKey(t, base, "bob")
@@ -148,10 +148,14 @@ func TestOneUsersLockDoesNotBlockAnother(t *testing.T) {
 func TestTheLockIsNotInTheUsersHome(t *testing.T) {
 	base := t.TempDir()
 	lockDir := t.TempDir()
-	akm := NewAuthorizedKeysManager(base, lockDir)
+	if err := os.MkdirAll(filepath.Join(base, "alice"), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	akm := NewAuthorizedKeysManager(lockDir)
+	akm.SetAccountLookup(HomeRootLookup(base))
 
 	key := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINrqnRJYKhFTuTjCGAZ alice@oidc-pam")
-	if err := akm.AddPublicKey("alice", key); err != nil {
+	if err := akm.AddPublicKey("alice", key, testExpiry()); err != nil {
 		t.Fatalf("AddPublicKey: %v", err)
 	}
 

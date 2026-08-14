@@ -22,6 +22,10 @@ PAM_DIR="/lib/security"
 CONFIG_DIR="/etc/oidc-auth"
 RUN_DIR="/var/run/oidc-auth"
 LOG_DIR="/var/log/oidc-auth"
+# The broker's own state: the SSH keys it issues (ssh-keys/) and the per-user locks
+# that serialize its authorized_keys writes (locks/). Root-only, and deliberately
+# not in any user's home (#161, #171).
+STATE_DIR="/var/lib/oidc-pam"
 SYSTEMD_DIR="/etc/systemd/system"
 
 CONFIGURE_PAM=0
@@ -60,6 +64,8 @@ check_root() {
 create_directories() {
     print_info "Creating required directories..."
     install -d -m 0755 "$CONFIG_DIR" "$RUN_DIR" "$LOG_DIR"
+    # 0700: these are private keys and lock files belonging to the root broker.
+    install -d -m 0700 "$STATE_DIR" "$STATE_DIR/ssh-keys" "$STATE_DIR/locks"
 }
 
 create_user() {

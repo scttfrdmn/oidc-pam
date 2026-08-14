@@ -244,6 +244,37 @@ expect_no_oidc_key_for() {
     fi
 }
 
+# oidc_key_blob prints the base64 blob of the account's broker-issued key, which
+# is what identifies one issued key against another across logins.
+oidc_key_blob() {
+    awk '/@oidc-pam-/ { for (i = 1; i <= NF; i++) if ($i ~ /^AAAA/) { print $i; exit } }' \
+        "/home/$1/.ssh/authorized_keys" 2>/dev/null
+}
+
+# PERSONAL_KEY stands in for a key the user put in their own authorized_keys. The
+# broker manages its own entries and must leave this one alone, whether it is
+# installing, superseding or sweeping (#171). It is syntactically valid but
+# authorizes nothing, since nobody holds the private half.
+PERSONAL_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPL personal-laptop'
+
+plant_personal_key() {
+    local user="$1" dir="/home/$1/.ssh"
+    install -d -m 0700 -o "${user}" -g "${user}" "${dir}"
+    printf '%s\n' "${PERSONAL_KEY}" >>"${dir}/authorized_keys"
+    chown "${user}:${user}" "${dir}/authorized_keys"
+    chmod 0600 "${dir}/authorized_keys"
+    log "planted a user-owned key in ${dir}/authorized_keys"
+}
+
+expect_personal_key_for() {
+    if grep -qF "${PERSONAL_KEY}" "/home/$1/.ssh/authorized_keys" 2>/dev/null; then
+        log "$1's own key is still there, as required"
+    else
+        fail "the broker removed $1's own key from authorized_keys; it manages only its own entries"
+        sed 's/^/      authorized_keys: /' "/home/$1/.ssh/authorized_keys" 2>/dev/null
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Cases
 # ---------------------------------------------------------------------------
@@ -297,6 +328,10 @@ case_waits_while_pending() {
 case_approved_login() {
     reset_state alice || return 1
 
+    # The account's own key is in place before the broker ever touches the file, so
+    # this case also shows that installing a login key preserves it (#171).
+    plant_personal_key alice
+
     start_login alice
     wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
 
@@ -305,7 +340,18 @@ case_approved_login() {
 
     expect_login_ok || return 1
     expect_oidc_key_for alice
+    expect_personal_key_for alice
     expect_audit authentication_successful
+
+    # sshd is what enforces the expiry, so the option it reads has to be on the
+    # entry. Without it the key stops being revoked the moment the broker forgets
+    # the session, which is what #171 is about.
+    if grep '@oidc-pam-' "/home/alice/.ssh/authorized_keys" | grep -q 'expiry-time="'; then
+        log "the installed entry carries the expiry-time option sshd enforces"
+    else
+        fail "the installed entry has no expiry-time option, so only the broker limits the key"
+        sed 's/^/      authorized_keys: /' "/home/alice/.ssh/authorized_keys"
+    fi
 
     # The user has to be told where to go, or the device flow is unusable by a
     # human even when it works.
@@ -700,6 +746,98 @@ case_long_verification_uri() {
     expect_no_module_log 'does not fit this module'
 }
 
+# One live broker-issued key per account, however many times the user logs in
+# (#171). The old code appended one on every login and only ever deduplicated
+# byte-identical lines, so an account that logged in daily accumulated a working
+# credential per login, each outliving the session it was issued for.
+case_second_login_supersedes_key() {
+    reset_state alice || return 1
+    plant_personal_key alice
+
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+    control approve >/dev/null
+    reap_login
+    expect_login_ok || return 1
+    expect_oidc_key_for alice || return 1
+
+    local first
+    first="$(oidc_key_blob alice)"
+
+    # A second login, from scratch: a new device flow, a new approval, a new key.
+    reset_state alice || return 1
+    start_login alice
+    wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+    control approve >/dev/null
+    reap_login
+    expect_login_ok || return 1
+
+    # Exactly one, still.
+    expect_oidc_key_for alice
+    expect_personal_key_for alice
+
+    local second
+    second="$(oidc_key_blob alice)"
+    if [[ -z "${second}" ]]; then
+        fail "the second login installed no key"
+    elif [[ "${second}" == "${first}" ]]; then
+        fail "the second login reused the first login's key; each session must get its own"
+    else
+        log "the second login replaced the first login's key rather than adding to it"
+    fi
+    if grep -qF "${first}" "/home/alice/.ssh/authorized_keys"; then
+        fail "the first login's key is still authorized after a second login (#171)"
+        sed 's/^/      authorized_keys: /' "/home/alice/.ssh/authorized_keys"
+    fi
+}
+
+# A key outlives the broker that issued it, and nothing used to remove it:
+# sessions live in memory, so a restart forgot every key it had installed while
+# the authorized_keys entries kept authenticating for as long as the account
+# existed (#171). Startup must revoke them.
+#
+# run-tests.sh drives this in two phases with a broker restart in between, and
+# sets PHASE — there is no way for a case running inside the client container to
+# restart a service in another container.
+case_orphan_keys_swept() {
+    case "${PHASE:-}" in
+        setup)
+            reset_state alice || return 1
+            plant_personal_key alice
+
+            start_login alice
+            wait_for_polls 1 30 || { kill "${LOGIN_PID}" 2>/dev/null; return 1; }
+            control approve >/dev/null
+            reap_login
+
+            expect_login_ok || return 1
+            expect_oidc_key_for alice
+            ;;
+        check)
+            # No login here, and deliberately no reset of alice's home: what is on
+            # disk is what the previous phase left, minus whatever the restarted
+            # broker removed.
+            if [[ ! -f /home/alice/.ssh/authorized_keys ]]; then
+                fail "alice's authorized_keys is gone entirely; the sweep must remove entries, not files"
+                return 1
+            fi
+            local count
+            count="$(grep -c '@oidc-pam-' /home/alice/.ssh/authorized_keys)"
+            if [[ "${count}" -ne 0 ]]; then
+                fail "${count} key(s) issued before the restart are still authorized, and no session remains that would ever revoke them (#171)"
+                sed 's/^/      authorized_keys: /' /home/alice/.ssh/authorized_keys
+            else
+                log "the keys the previous broker issued are no longer authorized"
+            fi
+            expect_personal_key_for alice
+            ;;
+        *)
+            fail "orphan_keys_swept must be driven by run-tests.sh, which restarts the broker between its two phases (PHASE=setup then PHASE=check)"
+            return 1
+            ;;
+    esac
+}
+
 # With no broker there is no opinion to be had: the module must report that it
 # could not reach one (PAM_AUTHINFO_UNAVAIL) and the login must be refused, at
 # once rather than after the device-flow budget.
@@ -738,6 +876,8 @@ CASES=(
     nonroot_ipc_rejected
     rate_limit_is_per_account
     home_lock_does_not_block_login
+    second_login_supersedes_key
+    orphan_keys_swept
     broker_down
 )
 

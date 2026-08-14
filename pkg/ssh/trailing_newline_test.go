@@ -17,6 +17,25 @@ func brokerKeyLine(issuedAt time.Time, distinguisher string) []byte {
 		distinguisher, issuedAt.Unix()))
 }
 
+// plantLines writes authorized_keys directly, so a test can set up a state a
+// previous broker left behind.
+//
+// AddPublicKey cannot be used for this any more: it installs one live
+// broker-issued key per user and drops the rest (#171), which is the point of that
+// change and makes it useless for building a file that holds several at once.
+func plantLines(t *testing.T, baseDir, username string, lines ...string) {
+	t.Helper()
+
+	sshDir := filepath.Join(baseDir, username, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatalf("MkdirAll %s: %v", sshDir, err)
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "authorized_keys"), []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
 // readKeys returns a user's authorized_keys contents verbatim — trailing newline
 // included, which is the whole subject of these tests.
 func readKeys(t *testing.T, baseDir, username string) string {
@@ -50,14 +69,9 @@ func TestExpirySweepLeavesATrailingNewline(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
-	for _, key := range [][]byte{
-		brokerKeyLine(time.Now().Add(-48*time.Hour), "STALE"),
-		brokerKeyLine(time.Now().Add(-time.Hour), "FRESH"),
-	} {
-		if err := akm.AddPublicKey("testuser", key); err != nil {
-			t.Fatalf("AddPublicKey: %v", err)
-		}
-	}
+	plantLines(t, baseDir, "testuser",
+		string(brokerKeyLine(time.Now().Add(-48*time.Hour), "STALE")),
+		string(brokerKeyLine(time.Now().Add(-time.Hour), "FRESH")))
 
 	if err := akm.RemoveExpiredKeys("testuser"); err != nil {
 		t.Fatalf("RemoveExpiredKeys: %v", err)
@@ -83,13 +97,12 @@ func TestTargetedRemovalLeavesATrailingNewline(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
+	// The survivor is the user's own key: since #171 a user has at most one
+	// broker-issued key, so what must be preserved around a targeted removal is the
+	// key the broker did not install.
 	doomed := brokerKeyLine(time.Now(), "DOOMED")
-	keeper := brokerKeyLine(time.Now(), "KEEPER")
-	for _, key := range [][]byte{doomed, keeper} {
-		if err := akm.AddPublicKey("testuser", key); err != nil {
-			t.Fatalf("AddPublicKey: %v", err)
-		}
-	}
+	keeper := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5KEEPER personal-laptop"
+	plantLines(t, baseDir, "testuser", string(doomed), keeper)
 
 	removed, err := akm.RemovePublicKey("testuser", doomed)
 	if err != nil {
@@ -114,21 +127,20 @@ func TestAddSweepAddRevokeRoundTrip(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
+	// The survivor is the user's own key. Since #171 the broker keeps at most one of
+	// its own per user, so the file the sweep leaves behind for the next login to
+	// write into is one holding a key that is not the broker's.
 	stale := brokerKeyLine(time.Now().Add(-48*time.Hour), "STALE")
-	surviving := brokerKeyLine(time.Now().Add(-time.Hour), "SURVIVING")
-	for _, key := range [][]byte{stale, surviving} {
-		if err := akm.AddPublicKey("testuser", key); err != nil {
-			t.Fatalf("AddPublicKey: %v", err)
-		}
-	}
+	surviving := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5SURVIVING personal-laptop"
+	plantLines(t, baseDir, "testuser", string(stale), surviving)
 
 	if err := akm.RemoveExpiredKeys("testuser"); err != nil {
 		t.Fatalf("RemoveExpiredKeys: %v", err)
 	}
 
-	// The next login, appending to whatever the sweep left behind.
+	// The next login, writing over whatever the sweep left behind.
 	nextLogin := brokerKeyLine(time.Now(), "NEXTLOGIN")
-	if err := akm.AddPublicKey("testuser", nextLogin); err != nil {
+	if err := akm.AddPublicKey("testuser", nextLogin, testExpiry()); err != nil {
 		t.Fatalf("AddPublicKey after the sweep: %v", err)
 	}
 
@@ -146,18 +158,262 @@ func TestAddSweepAddRevokeRoundTrip(t *testing.T) {
 		t.Error("the expired key survived the sweep")
 	}
 
-	// Both keys must still be revocable — the point of the whole exercise.
-	for _, key := range [][]byte{surviving, nextLogin} {
-		removed, err := akm.RemovePublicKey("testuser", key)
-		if err != nil {
-			t.Fatalf("RemovePublicKey: %v", err)
+	// The broker's key must still be revocable — the point of the whole exercise.
+	removed, err := akm.RemovePublicKey("testuser", nextLogin)
+	if err != nil {
+		t.Fatalf("RemovePublicKey: %v", err)
+	}
+	if !removed {
+		t.Errorf("no authorized_keys line matched %q, so revoking it is a no-op", nextLogin)
+	}
+	after := readKeys(t, baseDir, "testuser")
+	if strings.Contains(after, "NEXTLOGIN") {
+		t.Errorf("key %q still authorizes access after revocation", nextLogin)
+	}
+	if !strings.Contains(after, surviving) {
+		t.Errorf("revocation removed the user's own key; file is %q", after)
+	}
+}
+
+// Every login used to leave another `@oidc-pam-` entry behind, deduplicated only
+// against a byte-identical line — which the issue timestamp in the comment made
+// impossible. A user who logged in daily therefore accumulated one permanently
+// valid key per login, each on its own sufficient to authenticate, so revoking the
+// current session's key left all the earlier ones working (#171).
+func TestASecondLoginSupersedesTheFirstKey(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+
+	own := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5MINE personal-laptop"
+	plantLines(t, baseDir, "testuser", own)
+
+	first := brokerKeyLine(time.Now().Add(-time.Minute), "FIRSTLOGIN")
+	second := brokerKeyLine(time.Now(), "SECONDLOGIN")
+	for _, key := range [][]byte{first, second} {
+		if err := akm.AddPublicKey("testuser", key, testExpiry()); err != nil {
+			t.Fatalf("AddPublicKey: %v", err)
 		}
-		if !removed {
-			t.Errorf("no authorized_keys line matched %q, so revoking it is a no-op", key)
+	}
+
+	oidcKeys, err := akm.ListOIDCKeys("testuser")
+	if err != nil {
+		t.Fatalf("ListOIDCKeys: %v", err)
+	}
+	if len(oidcKeys) != 1 {
+		t.Errorf("after two logins the user has %d broker-issued keys, not 1: %q", len(oidcKeys), oidcKeys)
+	}
+
+	content := readKeys(t, baseDir, "testuser")
+	if strings.Contains(content, "FIRSTLOGIN") {
+		t.Error("the first login's key is still in authorized_keys, so it still authenticates " +
+			"after the session that owned it ended")
+	}
+	if !strings.Contains(content, "SECONDLOGIN") {
+		t.Error("the second login's key is missing, so the login cannot be used")
+	}
+	if !strings.Contains(content, own) {
+		t.Errorf("the user's own key was removed; the broker only owns its own entries. file is %q", content)
+	}
+	// The superseded key must no longer authorize anything: that is what makes
+	// revoking the live one a revocation of access.
+	authorized, err := akm.KeyIsAuthorized("testuser", first)
+	if err != nil {
+		t.Fatalf("KeyIsAuthorized: %v", err)
+	}
+	if authorized {
+		t.Error("the first login's key still authorizes access")
+	}
+	// Exactly one provenance comment, not one per login.
+	if got := strings.Count(content, "# Added by OIDC PAM on"); got != 1 {
+		t.Errorf("authorized_keys carries %d broker comments, not 1; file is %q", got, content)
+	}
+}
+
+// sshd must be able to expire the key without the broker's help. Everything that
+// was supposed to remove a stale entry ran inside the broker — sessions in memory,
+// a sweep on a timer — so a restart, or simply a broker that never got round to it,
+// left a working credential (#171).
+func TestInstalledEntryCarriesTheExpirySSHDEnforces(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+
+	expiresAt := time.Date(2031, 3, 4, 5, 6, 7, 0, time.UTC)
+	key := brokerKeyLine(time.Now(), "EXPIRY")
+	if err := akm.AddPublicKey("testuser", key, expiresAt); err != nil {
+		t.Fatalf("AddPublicKey: %v", err)
+	}
+
+	content := readKeys(t, baseDir, "testuser")
+	if !strings.Contains(content, `expiry-time="20310304050607Z"`) {
+		t.Errorf(`authorized_keys does not carry expiry-time="20310304050607Z"; file is %q`, content)
+	}
+
+	// And the option must be read back as the expiry it states, or the sweep cannot
+	// act on it.
+	oidcKeys, err := akm.ListOIDCKeys("testuser")
+	if err != nil {
+		t.Fatalf("ListOIDCKeys: %v", err)
+	}
+	if len(oidcKeys) != 1 {
+		t.Fatalf("expected 1 broker key, got %d: %q", len(oidcKeys), oidcKeys)
+	}
+	entry, ok := parseKeyEntry(oidcKeys[0])
+	if !ok {
+		t.Fatalf("the installed entry does not parse: %q", oidcKeys[0])
+	}
+	parsed, ok := entry.expiryTime()
+	if !ok {
+		t.Fatalf("the installed entry's expiry-time cannot be read back: %q", oidcKeys[0])
+	}
+	if !parsed.Equal(expiresAt) {
+		t.Errorf("expiry read back as %s, want %s", parsed, expiresAt)
+	}
+}
+
+// An expiry that has already passed, or none at all, is not something to write into
+// a key list in the hope that something removes it later.
+func TestAddPublicKeyRefusesAnExpiryThatIsNotInTheFuture(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+	key := brokerKeyLine(time.Now(), "BADEXPIRY")
+
+	for name, expiry := range map[string]time.Time{
+		"zero": {},
+		"past": time.Now().Add(-time.Minute),
+	} {
+		if err := akm.AddPublicKey("testuser", key, expiry); err == nil {
+			t.Errorf("AddPublicKey accepted a %s expiry", name)
 		}
-		if got := readKeys(t, baseDir, "testuser"); strings.Contains(got, string(key)) {
-			t.Errorf("key %q still authorizes access after revocation", key)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, "testuser", ".ssh", "authorized_keys")); err == nil {
+		t.Error("a key was installed despite the expiry being refused")
+	}
+}
+
+// The sweep must honour the configured lifetime. It used to compare against a
+// hardcoded 24 hours whatever the site had configured, so a deployment that had
+// deliberately set token_lifetime: 1h still left every key it issued usable for a
+// day (#171).
+func TestSweepUsesTheConfiguredLifetimeForOlderEntries(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+	akm.SetKeyLifetime(time.Hour)
+
+	// Entries as an older broker wrote them: no expiry-time= option, only the issue
+	// time in the comment.
+	pastLifetime := brokerKeyLine(time.Now().Add(-2*time.Hour), "PASTLIFETIME")
+	withinLifetime := brokerKeyLine(time.Now().Add(-10*time.Minute), "WITHINLIFETIME")
+	plantLines(t, baseDir, "testuser", string(pastLifetime), string(withinLifetime))
+
+	if err := akm.RemoveExpiredKeys("testuser"); err != nil {
+		t.Fatalf("RemoveExpiredKeys: %v", err)
+	}
+
+	content := readKeys(t, baseDir, "testuser")
+	if strings.Contains(content, "PASTLIFETIME") {
+		t.Error("a key issued two hours ago survived a sweep with a one-hour configured lifetime, " +
+			"so the configured lifetime is not what the sweep measures against")
+	}
+	if !strings.Contains(content, "WITHINLIFETIME") {
+		t.Error("a key issued ten minutes ago was swept under a one-hour lifetime")
+	}
+}
+
+// An entry carrying options must still be recognised by the sweep. The timestamp
+// used to be read out of strings.Fields(line)[2], which is the key data rather than
+// the comment once anything precedes the key type — so the sweep would silently
+// have stopped recognising the broker's own entries (#171).
+func TestSweepReadsEntriesThatCarryOptions(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+
+	expired := fmt.Sprintf(`expiry-time="%s" %s`,
+		time.Now().Add(-time.Minute).UTC().Format("20060102150405Z"),
+		brokerKeyLine(time.Now(), "OPTIONEXPIRED"))
+	live := fmt.Sprintf(`expiry-time="%s" %s`,
+		time.Now().Add(time.Hour).UTC().Format("20060102150405Z"),
+		brokerKeyLine(time.Now(), "OPTIONLIVE"))
+	plantLines(t, baseDir, "testuser", expired, live)
+
+	if err := akm.RemoveExpiredKeys("testuser"); err != nil {
+		t.Fatalf("RemoveExpiredKeys: %v", err)
+	}
+
+	content := readKeys(t, baseDir, "testuser")
+	if strings.Contains(content, "OPTIONEXPIRED") {
+		t.Error("an entry whose expiry-time= has passed survived the sweep")
+	}
+	if !strings.Contains(content, "OPTIONLIVE") {
+		t.Error("an entry whose expiry-time= is in the future was swept")
+	}
+}
+
+// Removal has to match the entry the broker itself wrote, which now carries an
+// expiry-time= option in front of the key while the broker holds only the bare key
+// in its store. Comparing whole lines would never match again (#171).
+func TestRemovalMatchesAnEntryThatCarriesOptions(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+
+	key := brokerKeyLine(time.Now(), "OPTIONREMOVE")
+	if err := akm.AddPublicKey("testuser", key, testExpiry()); err != nil {
+		t.Fatalf("AddPublicKey: %v", err)
+	}
+
+	removed, err := akm.RemovePublicKey("testuser", key)
+	if err != nil {
+		t.Fatalf("RemovePublicKey: %v", err)
+	}
+	if !removed {
+		t.Fatal("RemovePublicKey found no match for the entry it had just installed, " +
+			"so revoking a key is a no-op the broker reports as a success")
+	}
+	authorized, err := akm.KeyIsAuthorized("testuser", key)
+	if err != nil {
+		t.Fatalf("KeyIsAuthorized: %v", err)
+	}
+	if authorized {
+		t.Error("the key still authorizes access after removal")
+	}
+}
+
+// RemoveOIDCKeys is what makes a broker restart safe: the broker has no session for
+// the keys it issued before it stopped, so the only way to revoke them is to remove
+// every entry bearing its marker.
+func TestRemoveOIDCKeysClearsOrphansAndKeepsTheUsersOwn(t *testing.T) {
+	baseDir := t.TempDir()
+	akm := newTestManager(t, baseDir)
+
+	own := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5OWN personal-laptop"
+	plantLines(t, baseDir, "testuser",
+		"# Added by OIDC PAM on 2025-01-01 00:00:00",
+		string(brokerKeyLine(time.Now().Add(-time.Hour), "ORPHANA")),
+		fmt.Sprintf(`expiry-time="%s" %s`,
+			time.Now().Add(time.Hour).UTC().Format("20060102150405Z"),
+			brokerKeyLine(time.Now(), "ORPHANB")),
+		own)
+
+	removed, err := akm.RemoveOIDCKeys("testuser")
+	if err != nil {
+		t.Fatalf("RemoveOIDCKeys: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("RemoveOIDCKeys removed %d entries, want 2", removed)
+	}
+
+	content := readKeys(t, baseDir, "testuser")
+	for _, gone := range []string{"ORPHANA", "ORPHANB"} {
+		if strings.Contains(content, gone) {
+			t.Errorf("orphaned key %s still authorizes access; file is %q", gone, content)
 		}
+	}
+	if !strings.Contains(content, own) {
+		t.Errorf("the user's own key was removed; file is %q", content)
+	}
+	// A comment claiming the broker added a key it has just revoked misleads the next
+	// reader of the file.
+	if strings.Contains(content, "# Added by OIDC PAM on") {
+		t.Errorf("a stranded broker comment was left behind; file is %q", content)
 	}
 }
 
@@ -177,7 +433,7 @@ func TestAddPublicKeyTerminatesAnUnterminatedFile(t *testing.T) {
 	}
 
 	newKey := brokerKeyLine(time.Now(), "NEWKEY")
-	if err := akm.AddPublicKey("testuser", newKey); err != nil {
+	if err := akm.AddPublicKey("testuser", newKey, testExpiry()); err != nil {
 		t.Fatalf("AddPublicKey: %v", err)
 	}
 

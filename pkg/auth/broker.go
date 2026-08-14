@@ -214,6 +214,19 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		providers[providerConfig.Name] = provider
 	}
 
+	keyManager := sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys")
+	authorizedKeysManager := sshpkg.NewAuthorizedKeysManager(sshpkg.DefaultLockDir)
+
+	// (#171) An SSH key must not outlive the session it was issued for. Both
+	// managers defaulted to 24 hours and neither was ever told otherwise, so a site
+	// that had deliberately configured token_lifetime: 1h still handed out keys good
+	// for a day — and the sweep meant to remove them measured against the same
+	// hardcoded 24 hours.
+	if lifetime := cfg.Authentication.TokenLifetime; lifetime > 0 {
+		keyManager.SetExpiration(lifetime)
+		authorizedKeysManager.SetKeyLifetime(lifetime)
+	}
+
 	broker := &Broker{
 		config:                cfg,
 		providers:             providers,
@@ -221,8 +234,8 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		policyEngine:          policyEngine,
 		auditLogger:           auditLogger,
 		sessions:              make(map[string]*Session),
-		keyManager:            sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys"),
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager("/home", sshpkg.DefaultLockDir),
+		keyManager:            keyManager,
+		authorizedKeysManager: authorizedKeysManager,
 		stopChan:              make(chan struct{}),
 	}
 
@@ -245,12 +258,93 @@ func (b *Broker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start audit logger: %w", err)
 	}
 
+	// Revoke the keys of the sessions this broker lost when it last stopped (#171).
+	b.reconcileIssuedKeys()
+
 	// Start session cleanup goroutine
 	b.wg.Add(1)
 	go b.sessionCleanup(ctx)
 
 	log.Info().Msg("Authentication broker services started successfully")
 	return nil
+}
+
+// reconcileIssuedKeys revokes every key left over from a previous run of the
+// broker.
+//
+// Sessions live only in memory. A broker that stops — a restart, a crash, a
+// package upgrade — therefore forgets every key it issued, while the
+// authorized_keys entries stay exactly where they are and keep authenticating.
+// Nothing removed them: revocation is driven from the session that no longer
+// exists, and the expiry sweep only ran for users who happened to have another
+// session expire afterwards, so a user who never logged in again kept a working
+// credential indefinitely (#171).
+//
+// The broker's own key store is the record of what it issued, and it does survive
+// a restart, so it is the list to work from. Anything in it at startup belongs to
+// no live session by definition.
+func (b *Broker) reconcileIssuedKeys() {
+	if b.keyManager == nil || b.authorizedKeysManager == nil {
+		return
+	}
+
+	infos, unreadable, err := b.keyManager.ListKeyInfo()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list stored SSH keys at startup; orphaned keys may remain authorized")
+		return
+	}
+	if len(infos) == 0 && unreadable == 0 {
+		return
+	}
+
+	// One pass per account, not per key: RemoveOIDCKeys clears every broker-issued
+	// entry the account has, so a user with several orphans is handled once.
+	usernames := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		if info.Username != "" {
+			usernames[info.Username] = struct{}{}
+		}
+		if delErr := b.keyManager.DeleteKey(info.KeyID); delErr != nil {
+			log.Warn().Err(delErr).Str("key_id", info.KeyID).
+				Msg("Failed to delete an orphaned stored SSH key at startup")
+		}
+	}
+
+	removedTotal := 0
+	for username := range usernames {
+		removed, remErr := b.authorizedKeysManager.RemoveOIDCKeys(username)
+		if remErr != nil {
+			// Audited, not just logged: an entry that could not be removed is a
+			// credential still granting access to a session nobody is tracking.
+			log.Error().Err(remErr).Str("user_id", username).
+				Msg("Failed to remove orphaned authorized_keys entries at startup")
+			if b.auditLogger != nil {
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType:    "ssh_key_revocation_incomplete",
+					UserID:       username,
+					Success:      false,
+					ErrorCode:    "ORPHANED_KEYS_NOT_REMOVED",
+					ErrorMessage: remErr.Error(),
+					Timestamp:    time.Now(),
+				})
+			}
+			if b.metrics != nil {
+				b.metrics.RecordSSHKeyOp("revoke", "failure")
+			}
+			continue
+		}
+		removedTotal += removed
+		if removed > 0 && b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("revoke", "success")
+		}
+	}
+
+	log.Info().
+		Int("stored_keys", len(infos)).
+		Int("unreadable_stored_keys", unreadable).
+		Int("accounts", len(usernames)).
+		Int("authorized_keys_entries_removed", removedTotal).
+		Msg("Reconciled SSH keys left over from a previous broker run")
 }
 
 // DroppedAuditEvents returns the cumulative count of audit events dropped by
@@ -1086,10 +1180,24 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 						ErrorMessage: err.Error(),
 						Timestamp:    time.Now(),
 					})
-				} else {
-					updated.SSHKeyID = sshKey.ID
-					updated.SSHPublicKey = sshKey.PublicKey
+					if b.metrics != nil {
+						b.metrics.RecordAuth(provider.Name, "failure", "SSH_KEY_PROVISIONING_FAILED")
+					}
+					// (#171) The login is denied, not completed. It used to be
+					// completed: the session was activated and reported as a
+					// successful authentication with no key installed anywhere, so
+					// the user was told they were authenticated and then could not
+					// log in — and, worse, the *reason* they could not was that the
+					// broker had written the key to a directory that was not their
+					// home, or had failed to at all. Dropping the session makes the
+					// module report the denial it already has a code for
+					// (SESSION_NOT_FOUND on the next poll), so no wire change is
+					// needed to carry this.
+					b.removeSession(updated.ID)
+					return
 				}
+				updated.SSHKeyID = sshKey.ID
+				updated.SSHPublicKey = sshKey.PublicKey
 			}
 
 			b.setSession(&updated)
@@ -1287,8 +1395,9 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 		return nil, fmt.Errorf("failed to save SSH key: %w", err)
 	}
 
-	// Append the public key to the user's authorized_keys file
-	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey); err != nil {
+	// Install the public key in the user's authorized_keys, as their only
+	// broker-issued key, carrying the expiry sshd will enforce on it (#171).
+	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey, sshKey.ExpiresAt); err != nil {
 		// Best-effort cleanup: remove the stored key if we couldn't authorize it
 		_ = b.keyManager.DeleteKey(session.ID)
 		if b.metrics != nil {
@@ -1356,7 +1465,36 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 	// (having been fused with a comment) could no longer be removed by anything.
 	// Still best effort — the session is gone either way — but audited as the failure
 	// it is, so an operator can find the host and the file.
+	//
+	// (#171) "Nothing matched" now has a second, innocent cause: a later login for
+	// the same user supersedes the earlier entry, because there is one live
+	// broker-issued key per user. Ask whether the key material still authorizes
+	// anything before raising the alarm, so that the alarm keeps meaning what it says
+	// — the key was already gone, which is the outcome revocation wanted.
 	if !removed {
+		if authorized, checkErr := b.authorizedKeysManager.KeyIsAuthorized(session.UserID, sshKey.PublicKey); checkErr == nil && !authorized {
+			log.Info().
+				Str("session_id", session.ID).
+				Str("user_id", session.UserID).
+				Str("ssh_key_id", session.SSHKeyID).
+				Msg("SSH key was already absent from authorized_keys at revocation (superseded by a later login)")
+
+			if b.auditLogger != nil {
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType: "ssh_key_revoked",
+					UserID:    session.UserID,
+					Email:     session.Email,
+					SessionID: session.ID,
+					Success:   true,
+					Timestamp: time.Now(),
+				})
+			}
+			if b.metrics != nil {
+				b.metrics.RecordSSHKeyOp("revoke", "success")
+			}
+			return nil
+		}
+
 		log.Warn().
 			Str("session_id", session.ID).
 			Str("user_id", session.UserID).

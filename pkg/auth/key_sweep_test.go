@@ -15,6 +15,26 @@ import (
 	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
 
+// testAuthorizedKeysManager returns an AuthorizedKeysManager that resolves homes
+// under homeDir, and creates the home directories of the named accounts.
+//
+// (#171) The manager no longer takes a base directory: it resolves each account's
+// home through the account database, and refuses a home that does not exist rather
+// than creating one as root. Tests substitute the lookup instead of creating real
+// accounts on the machine running the suite.
+func testAuthorizedKeysManager(t *testing.T, homeDir string, usernames ...string) *sshpkg.AuthorizedKeysManager {
+	t.Helper()
+
+	for _, username := range usernames {
+		if err := os.MkdirAll(filepath.Join(homeDir, username), 0700); err != nil {
+			t.Fatalf("MkdirAll home for %s: %v", username, err)
+		}
+	}
+	akm := sshpkg.NewAuthorizedKeysManager(t.TempDir())
+	akm.SetAccountLookup(sshpkg.HomeRootLookup(homeDir))
+	return akm
+}
+
 // newSweepTestBroker returns a broker whose AuthorizedKeysManager is rooted at a
 // temporary directory standing in for /home.
 func newSweepTestBroker(t *testing.T) (*Broker, string) {
@@ -35,7 +55,7 @@ func newSweepTestBroker(t *testing.T) (*Broker, string) {
 		sessionMutex:          sync.RWMutex{},
 		providers:             map[string]*OIDCProvider{},
 		auditLogger:           auditLogger,
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir, t.TempDir()),
+		authorizedKeysManager: testAuthorizedKeysManager(t, homeDir),
 	}
 
 	return broker, homeDir

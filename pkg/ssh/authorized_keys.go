@@ -1,12 +1,11 @@
 package ssh
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -139,17 +138,22 @@ func ensureLockDir(lockDir string) error {
 // or authorized_keys within it, at an arbitrary file (e.g. /etc/passwd) so that
 // the root process follows the link and writes/truncates the target.
 //
-// It rejects the operation if .ssh exists but is a symlink or not a directory.
-// Callers must additionally open files within it using O_NOFOLLOW (see
-// openAuthorizedKeysForAppend / writeAuthorizedKeysAtomic).
-func ensureSecureSSHDir(sshDir string) error {
+// It rejects the operation if .ssh exists but is a symlink, is not a directory,
+// or belongs to some third account. Callers must additionally open files within it
+// using O_NOFOLLOW (see writeAuthorizedKeysAtomic).
+//
+// (#171) A .ssh directory the broker creates is handed to the account rather than
+// kept by root. It sits in the user's home and the user has to be able to manage
+// their own keys in it; a root-owned 0700 .ssh takes that away with no way for
+// them to get it back.
+func ensureSecureSSHDir(sshDir string, account Account) error {
 	info, err := os.Lstat(sshDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if mkErr := os.MkdirAll(sshDir, 0700); mkErr != nil {
 				return fmt.Errorf("failed to create .ssh directory: %w", mkErr)
 			}
-			return nil
+			return chownToAccount(sshDir, account)
 		}
 		return fmt.Errorf("failed to stat .ssh directory: %w", err)
 	}
@@ -159,7 +163,7 @@ func ensureSecureSSHDir(sshDir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("refusing to use .ssh: %q is not a directory", sshDir)
 	}
-	return nil
+	return checkOwner(".ssh directory", sshDir, info, account)
 }
 
 // rejectIfSymlink returns an error if path exists and is a symbolic link. Used
@@ -179,16 +183,47 @@ func rejectIfSymlink(path string) error {
 	return nil
 }
 
-// openAuthorizedKeysForAppend opens the authorized_keys file for appending with
-// O_NOFOLLOW, refusing to follow a symlink at the final path component.
-func openAuthorizedKeysForAppend(path string) (*os.File, error) {
+// readAuthorizedKeysLines reads a user's authorized_keys and returns its lines.
+// A missing file yields no lines and no error: a user who has never had a key is
+// the normal case, not a failure.
+//
+// (#171) The file is opened O_NOFOLLOW and then *fstat'ed through the open
+// descriptor*, and the descriptor is refused unless it belongs to the account or
+// to root. Checking the path instead of the descriptor is a TOCTOU: the directory
+// is writable by the user, so between a stat and an open the name can be made to
+// point somewhere else. What is verified has to be the thing that was opened.
+func readAuthorizedKeysLines(path string, account Account) ([]string, error) {
 	if err := rejectIfSymlink(path); err != nil {
 		return nil, err
 	}
-	// #nosec G304 -- path is built from an allowlisted username (validateUsername)
-	// under the broker's base dir; the final component is symlink-checked above
-	// and opened with O_NOFOLLOW so a planted symlink cannot redirect the write.
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	// #nosec G304 -- path is <resolved home>/.ssh/authorized_keys for a validated
+	// login name; symlink-checked above, opened O_NOFOLLOW, and the descriptor's
+	// ownership is verified below.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to open authorized_keys file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat the open authorized_keys file: %w", err)
+	}
+	if err := checkOwner("authorized_keys", path, info, account); err != nil {
+		return nil, err
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read authorized_keys file: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n"), nil
 }
 
 // writeAuthorizedKeysAtomic writes content to the authorized_keys file safely:
@@ -196,7 +231,10 @@ func openAuthorizedKeysForAppend(path string) (*os.File, error) {
 // directory (created with O_NOFOLLOW|O_EXCL), then atomically renames over the
 // target. Rename replaces the directory entry rather than following/truncating
 // a link, so a planted symlink cannot redirect the write.
-func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
+// The replacement is given to the account before the rename (#171): the broker
+// runs as root, and a file it created would otherwise leave the user unable to
+// edit their own authorized_keys.
+func writeAuthorizedKeysAtomic(sshDir, path string, content []byte, account Account) error {
 	if err := rejectIfSymlink(path); err != nil {
 		return err
 	}
@@ -217,6 +255,10 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
 	if err := tmp.Close(); err != nil {
 		cleanup()
 		return fmt.Errorf("failed to close temp authorized_keys: %w", err)
+	}
+	if err := chownToAccount(tmpPath, account); err != nil {
+		cleanup()
+		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		cleanup()
@@ -240,7 +282,7 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
 //
 // Sharing one write path is the point: two callers deriving the file's tail
 // independently is what allowed them to differ in the first place.
-func writeAuthorizedKeysLines(sshDir, path string, lines []string) error {
+func writeAuthorizedKeysLines(sshDir, path string, lines []string, account Account) error {
 	// Trailing blanks are dropped so that a caller's choice of line splitting
 	// cannot change the file's tail, then the last real line is terminated.
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
@@ -250,30 +292,109 @@ func writeAuthorizedKeysLines(sshDir, path string, lines []string) error {
 	if len(lines) > 0 {
 		content = []byte(strings.Join(lines, "\n") + "\n")
 	}
-	return writeAuthorizedKeysAtomic(sshDir, path, content)
+	return writeAuthorizedKeysAtomic(sshDir, path, content, account)
 }
+
+// DefaultKeyLifetime is the age at which a broker-issued authorized_keys entry is
+// treated as stale when nothing better is known about it. It is only a fallback:
+// the broker sets the configured token_lifetime with SetKeyLifetime, and entries
+// written by this version carry their own expiry-time= option.
+const DefaultKeyLifetime = 24 * time.Hour
 
 // AuthorizedKeysManager manages authorized_keys files for users
 type AuthorizedKeysManager struct {
-	baseDir     string
-	lockDir     string
-	lockTimeout time.Duration
+	lookupAccount AccountLookup
+	lockDir       string
+	lockTimeout   time.Duration
+	keyLifetime   time.Duration
 }
 
 // NewAuthorizedKeysManager creates a new authorized keys manager.
 //
-// baseDir is the parent of the users' home directories (production: /home).
 // lockDir is where the per-user write locks live and must be a directory only the
 // broker can write to — production passes DefaultLockDir. It is a required
 // argument rather than a default with an override because a lock directory the
 // protected user can reach is the whole of #161, and that is not something to
 // arrive at by forgetting to pass an option.
-func NewAuthorizedKeysManager(baseDir, lockDir string) *AuthorizedKeysManager {
+//
+// (#171) There is no base-directory argument any more. This used to be
+// constructed with "/home" and every path was <baseDir>/<username>/.ssh, which is
+// a guess: it is wrong on every site whose homes come from LDAP/SSSD, autofs or
+// NFS, and being wrong meant writing a key list sshd never reads while reporting
+// success. Homes now come from the account database (LookupAccount).
+func NewAuthorizedKeysManager(lockDir string) *AuthorizedKeysManager {
 	return &AuthorizedKeysManager{
-		baseDir:     baseDir,
-		lockDir:     lockDir,
-		lockTimeout: lockAcquireTimeout,
+		lookupAccount: LookupAccount,
+		lockDir:       lockDir,
+		lockTimeout:   lockAcquireTimeout,
+		keyLifetime:   DefaultKeyLifetime,
 	}
+}
+
+// SetAccountLookup replaces the account database this manager resolves homes and
+// owners through.
+//
+// It exists for tests, which cannot create real accounts on the machine running
+// the suite; see HomeRootLookup. Call it before the manager is used.
+func (akm *AuthorizedKeysManager) SetAccountLookup(lookup AccountLookup) {
+	if lookup != nil {
+		akm.lookupAccount = lookup
+	}
+}
+
+// SetKeyLifetime sets how long a broker-issued entry is honoured when the entry
+// itself does not say — that is, an entry written by an older broker, which
+// carries only the issue time in its comment.
+//
+// The broker passes the configured authentication.token_lifetime. Before #171 the
+// sweep used a hardcoded 24 hours regardless of configuration, so a site that had
+// deliberately configured a one-hour lifetime still left every key it issued
+// usable for a day.
+func (akm *AuthorizedKeysManager) SetKeyLifetime(d time.Duration) {
+	if d > 0 {
+		akm.keyLifetime = d
+	}
+}
+
+// userPaths resolves an account and returns it with the paths of its .ssh
+// directory and authorized_keys file.
+//
+// It refuses to proceed unless the home directory the account database names
+// already exists and belongs to that account or to root. In particular it will
+// not create a home: MkdirAll on <home>/.ssh used to create the home itself, as
+// root and mode 0700, which locks the user out of their own home directory for a
+// login that then cannot work anyway. A missing home means the account is not
+// provisioned on this host, and that is a fact to report, not to paper over.
+func (akm *AuthorizedKeysManager) userPaths(username string) (Account, string, string, error) {
+	if err := validateUsername(username); err != nil {
+		return Account{}, "", "", fmt.Errorf("invalid username: %w", err)
+	}
+	account, err := akm.lookupAccount(username)
+	if err != nil {
+		return Account{}, "", "", err
+	}
+
+	info, err := os.Lstat(account.Home)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Account{}, "", "", fmt.Errorf(
+				"home directory %q for %s does not exist; refusing to create it",
+				account.Home, username)
+		}
+		return Account{}, "", "", fmt.Errorf("failed to stat home directory %q: %w", account.Home, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return Account{}, "", "", fmt.Errorf("refusing to use home directory %q: it is a symlink", account.Home)
+	}
+	if !info.IsDir() {
+		return Account{}, "", "", fmt.Errorf("refusing to use home directory %q: it is not a directory", account.Home)
+	}
+	if err := checkOwner("home directory", account.Home, info, account); err != nil {
+		return Account{}, "", "", err
+	}
+
+	sshDir := filepath.Join(account.Home, ".ssh")
+	return account, sshDir, filepath.Join(sshDir, "authorized_keys"), nil
 }
 
 // LockPath returns the lock file serializing writes to one user's
@@ -293,79 +414,88 @@ func (akm *AuthorizedKeysManager) SetLockTimeout(d time.Duration) {
 	akm.lockTimeout = d
 }
 
-// AddPublicKey adds a public key to a user's authorized_keys file
-func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
-	}
+// AddPublicKey installs the broker's key in a user's authorized_keys, as the
+// user's only broker-issued key, carrying the expiry sshd will enforce on it.
+//
+// expiresAt must be in the future: an entry with no expiry, or one already expired,
+// is not something to write into a key list and hope something removes later.
+//
+// (#171) Two things changed here, and both were ways a stale key stayed usable:
+//
+//   - It appended. Every login left another `@oidc-pam-` entry behind, deduplicated
+//     only against a byte-identical line — and the comment carries the issue
+//     timestamp, so no two logins ever produced one. A user who logged in daily
+//     accumulated one permanently valid key per login, each independently
+//     sufficient to authenticate, and revoking the current session's key left all
+//     the others in place. Now every broker-issued entry for that user is dropped
+//     before the new one is written: one live key, so revoking it revokes access.
+//   - The expiry existed only in the broker's memory and in a comment nothing but
+//     this broker reads. sshd now enforces it itself, which is what makes a key
+//     survive neither a broker restart nor a broker that never gets around to
+//     sweeping.
+func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte, expiresAt time.Time) error {
 	// Reject embedded newlines/CR: a multi-line value would inject additional
 	// authorized_keys entries or options (e.g. command=) (M-8).
 	if err := validatePublicKeyLine(publicKey); err != nil {
 		return err
 	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := akm.LockPath(username)
+	if expiresAt.IsZero() {
+		return fmt.Errorf("refusing to install an SSH key with no expiry time")
+	}
+	if !expiresAt.After(time.Now()) {
+		return fmt.Errorf("refusing to install an SSH key that expired at %s", expiresAt.UTC().Format(time.RFC3339))
+	}
 
-	// Create/verify .ssh directory, rejecting a symlinked .ssh (C-2).
-	if err := ensureSecureSSHDir(sshDir); err != nil {
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
 		return err
 	}
 
-	return withFileLock(lockPath, akm.lockTimeout, func() error {
-		// Read existing authorized_keys file
-		var existingKeys []string
-		// (#165) Whether the file needs a newline before this append. The rewrite
-		// paths now always leave one, but the file belongs to the user and can be
-		// edited by anything: appending to a file whose last line is unterminated
-		// fuses the comment below onto that line, producing an entry no remover can
-		// ever match again. Cheap to check here, and it is the last chance to.
-		needsSeparator := false
-		if data, err := os.ReadFile(authorizedKeysPath); err == nil {
-			existingKeys = strings.Split(string(data), "\n")
-			needsSeparator = len(data) > 0 && data[len(data)-1] != '\n'
-		}
+	// Create/verify .ssh directory, rejecting a symlinked .ssh (C-2).
+	if err := ensureSecureSSHDir(sshDir, account); err != nil {
+		return err
+	}
 
-		// Check if key already exists
-		newKeyLine := strings.TrimSpace(string(publicKey))
-		for _, existingKey := range existingKeys {
-			if strings.TrimSpace(existingKey) == newKeyLine {
-				log.Debug().
-					Str("username", username).
-					Msg("Public key already exists in authorized_keys")
-				return nil
-			}
-		}
+	newEntry, ok := parseKeyEntry(string(publicKey))
+	if !ok {
+		return fmt.Errorf("public key is not a valid authorized_keys entry")
+	}
 
-		// Add the new key (O_NOFOLLOW: never follow a planted symlink — C-2).
-		file, err := openAuthorizedKeysForAppend(authorizedKeysPath)
+	return withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+		existing, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
-			return fmt.Errorf("failed to open authorized_keys file: %w", err)
+			return err
 		}
-		defer func() { _ = file.Close() }()
 
-		if needsSeparator {
-			if _, err := file.WriteString("\n"); err != nil {
-				return fmt.Errorf("failed to terminate the last authorized_keys line: %w", err)
+		// Keep everything that is not the broker's. A key the user put there
+		// themselves is none of the broker's business, whatever it authorizes; only
+		// entries carrying the broker's own marker, or a re-add of this very entry,
+		// are dropped.
+		kept := make([]string, 0, len(existing)+2)
+		superseded := 0
+		for _, line := range existing {
+			entry, isEntry := parseKeyEntry(line)
+			if isEntry && (entry.brokerIssued() || entry.isSameEntryAs(newEntry)) {
+				superseded++
+				continue
 			}
+			kept = append(kept, line)
 		}
+		kept = dropStrandedBrokerComments(kept)
 
-		// Add timestamp comment
-		timestamp := time.Now().Format("2006-01-02 15:04:05")
-		comment := fmt.Sprintf("# Added by OIDC PAM on %s\n", timestamp)
+		kept = append(kept,
+			fmt.Sprintf("%s %s", brokerCommentPrefix, time.Now().Format("2006-01-02 15:04:05")),
+			brokerEntryLine(publicKey, expiresAt))
 
-		if _, err := file.WriteString(comment); err != nil {
-			return fmt.Errorf("failed to write comment to authorized_keys: %w", err)
-		}
-
-		if _, err := file.WriteString(newKeyLine + "\n"); err != nil {
-			return fmt.Errorf("failed to write key to authorized_keys: %w", err)
+		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath, kept, account); err != nil {
+			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
 		log.Info().
 			Str("username", username).
 			Str("authorized_keys_path", authorizedKeysPath).
+			Int("superseded_keys", superseded).
+			Time("expires_at", expiresAt).
 			Msg("Public key added to authorized_keys")
 
 		return nil
@@ -381,40 +511,36 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 // nothing — the audit trail asserted a revocation that had not happened while the
 // credential stayed usable. Callers must distinguish the two: removed=false, err=nil
 // means the entry is still there, if it was ever there at all.
+// (#171) Matching is on the entry, not on the whole line: the installed line
+// carries an `expiry-time=` option in front of the key, so a broker holding the
+// bare key in its store would never again find the line it had itself written.
+// parseKeyEntry/isSameEntryAs compare the key and its comment and ignore options.
 func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []byte) (bool, error) {
-	if err := validateUsername(username); err != nil {
-		return false, fmt.Errorf("invalid username: %w", err)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return false, err
 	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := akm.LockPath(username)
 
 	// Check if .ssh directory exists; if not, nothing to remove
-	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
+	if _, statErr := os.Stat(sshDir); os.IsNotExist(statErr) {
 		return false, nil
 	}
 
+	target, ok := parseKeyEntry(string(publicKey))
+	if !ok {
+		return false, fmt.Errorf("public key is not a valid authorized_keys entry")
+	}
+
 	removed := false
-	err := withFileLock(lockPath, akm.lockTimeout, func() error {
-		// Read existing authorized_keys file
-		data, err := os.ReadFile(authorizedKeysPath)
+	err = withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // File doesn't exist, nothing to remove
-			}
-			return fmt.Errorf("failed to read authorized_keys file: %w", err)
+			return err
 		}
 
-		// Parse existing keys
-		lines := strings.Split(string(data), "\n")
-		keyToRemove := strings.TrimSpace(string(publicKey))
-
-		var filteredLines []string
-
+		filteredLines := make([]string, 0, len(lines))
 		for _, line := range lines {
-			trimmedLine := strings.TrimSpace(line)
-			if trimmedLine == keyToRemove {
+			if entry, isEntry := parseKeyEntry(line); isEntry && entry.isSameEntryAs(target) {
 				removed = true
 				continue
 			}
@@ -429,7 +555,8 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 		}
 
 		// Write filtered content back atomically, refusing to follow symlinks (C-2).
-		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath, filteredLines); err != nil {
+		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath,
+			dropStrandedBrokerComments(filteredLines), account); err != nil {
 			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
@@ -446,105 +573,163 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	return removed, nil
 }
 
-// RemoveExpiredKeys removes broker-issued keys older than 24 hours from a user's
-// authorized_keys.
+// KeyIsAuthorized reports whether this key material still authorizes access to the
+// account, whatever entry or options carry it.
+//
+// (#171) The broker needs this to tell the two reasons a removal matched nothing
+// apart. "The entry is gone because a later login superseded it" is the system
+// working; "the entry is still there under some line this code could not match" is
+// a credential that outlived its session, and only the second is worth an alarm.
+// Without the distinction, one-live-key-per-user would make every revocation of a
+// superseded key look like a failed revocation.
+func (akm *AuthorizedKeysManager) KeyIsAuthorized(username string, publicKey []byte) (bool, error) {
+	account, _, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return false, err
+	}
+	target, ok := parseKeyEntry(string(publicKey))
+	if !ok {
+		return false, fmt.Errorf("public key is not a valid authorized_keys entry")
+	}
+
+	lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range lines {
+		if entry, isEntry := parseKeyEntry(line); isEntry && entry.authorizesSameKeyAs(target) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// RemoveOIDCKeys removes every broker-issued entry from a user's authorized_keys
+// and reports how many it removed.
+//
+// This is what makes a broker restart safe. Sessions live in memory, so a broker
+// that restarts has no record of the keys it issued and nothing left that would
+// ever revoke them; the sweep only helped users who happened to have another
+// session expire afterwards. The broker now calls this at startup for every key it
+// finds in its own store (#171).
+func (akm *AuthorizedKeysManager) RemoveOIDCKeys(username string) (int, error) {
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return 0, err
+	}
+
+	removed := 0
+	err = withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
+		if err != nil {
+			return err
+		}
+		kept := make([]string, 0, len(lines))
+		for _, line := range lines {
+			if entry, isEntry := parseKeyEntry(line); isEntry && entry.brokerIssued() {
+				removed++
+				continue
+			}
+			kept = append(kept, line)
+		}
+		if removed == 0 {
+			return nil
+		}
+		return writeAuthorizedKeysLines(sshDir, authorizedKeysPath, dropStrandedBrokerComments(kept), account)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+// RemoveExpiredKeys removes broker-issued keys whose expiry has passed from a
+// user's authorized_keys.
 //
 // Called from the broker's session-expiry pass. Its job is the keys no session
 // accounts for: sessions live only in the broker's memory, so a restart orphans
-// every key issued before it, leaving a working credential with nothing left to
-// revoke it.
+// every key issued before it. (Since #171 the broker also reconciles its key store
+// at startup, and every entry it writes carries an expiry sshd enforces by itself,
+// so this is no longer the only thing standing between a restart and a permanent
+// credential.)
 //
-// The 24-hour cutoff is fixed and is not the configured session lifetime. It is
-// read from the `@oidc-pam-<timestamp>` comment the broker writes, so a key whose
-// comment is missing or malformed is retained rather than removed — cleanup fails
-// safe, never early. Authoritative expiry is the broker session; this is
-// best-effort maintenance.
+// The expiry is taken from the entry's own `expiry-time=` option, and for entries
+// written by an older broker from the `@oidc-pam-<timestamp>` comment plus the
+// configured key lifetime (SetKeyLifetime). A key whose expiry cannot be
+// determined either way is retained rather than removed — cleanup fails safe,
+// never early.
+//
+// (#171) The cutoff used to be a hardcoded 24 hours whatever the site had
+// configured, and the timestamp was read out of `strings.Fields(line)[2]`, which is
+// the key data rather than the comment for any entry that carries options — so the
+// sweep would have silently stopped recognising the broker's own keys.
 func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return err
 	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := akm.LockPath(username)
 
 	// Check if .ssh directory exists; if not, nothing to clean
-	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
+	if _, statErr := os.Stat(sshDir); os.IsNotExist(statErr) {
 		return nil
 	}
 
-	return withFileLock(lockPath, akm.lockTimeout, func() error {
-		// Read existing authorized_keys file (O_NOFOLLOW: never follow a symlink — C-2).
-		if err := rejectIfSymlink(authorizedKeysPath); err != nil {
+	return withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
+		if err != nil {
 			return err
 		}
-		// #nosec G304 -- validated username path; symlink-checked above and opened O_NOFOLLOW.
-		file, err := os.OpenFile(authorizedKeysPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // File doesn't exist, nothing to clean
+
+		now := time.Now()
+		filteredLines := make([]string, 0, len(lines))
+		removedCount := 0
+		for _, line := range lines {
+			if akm.entryHasExpired(line, now) {
+				removedCount++
+				continue
 			}
-			return fmt.Errorf("failed to open authorized_keys file: %w", err)
-		}
-		defer func() { _ = file.Close() }()
-
-		var filteredLines []string
-		var removedCount int
-		scanner := bufio.NewScanner(file)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			// L-14: expiry is read from the (broker-written) key comment. A
-			// malformed/forged comment simply causes the key to be retained
-			// (fail-safe for cleanup: it is never removed early), and the keys are
-			// broker-generated so the comment is not attacker-controlled in the
-			// supported flow. Authoritative expiry lives in the broker session;
-			// this cleanup is best-effort. See TODO(L-3) in keys.go for moving
-			// expiry to a separate metadata file.
-			if strings.Contains(line, "@oidc-pam-") {
-				// Extract timestamp from comment
-				parts := strings.Fields(line)
-				if len(parts) >= 3 {
-					comment := parts[2]
-					if strings.Contains(comment, "@oidc-pam-") {
-						// Extract timestamp
-						timestampStr := strings.Split(comment, "@oidc-pam-")[1]
-						if timestamp, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
-							keyTime := time.Unix(timestamp, 0)
-							// Check if key is older than 24 hours (default expiration)
-							if time.Since(keyTime) > 24*time.Hour {
-								removedCount++
-								continue // Skip this line (remove the key)
-							}
-						}
-					}
-				}
-			}
-
 			filteredLines = append(filteredLines, line)
 		}
 
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("failed to scan authorized_keys file: %w", err)
+		if removedCount == 0 {
+			return nil
 		}
 
-		if removedCount > 0 {
-			// Write filtered content back atomically, refusing to follow symlinks (C-2).
-			// The scanner has stripped every line's newline, so the shared writer is
-			// what puts the file's final one back (#165).
-			if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath, filteredLines); err != nil {
-				return fmt.Errorf("failed to write authorized_keys file: %w", err)
-			}
-
-			log.Info().
-				Str("username", username).
-				Int("removed_count", removedCount).
-				Msg("Removed expired OIDC PAM keys from authorized_keys")
+		// Write filtered content back atomically, refusing to follow symlinks (C-2).
+		// Line splitting has stripped every line's newline, so the shared writer is
+		// what puts the file's final one back (#165).
+		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath,
+			dropStrandedBrokerComments(filteredLines), account); err != nil {
+			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
+
+		log.Info().
+			Str("username", username).
+			Int("removed_count", removedCount).
+			Msg("Removed expired OIDC PAM keys from authorized_keys")
 
 		return nil
 	})
+}
+
+// entryHasExpired reports whether a line is a broker-issued entry that is past its
+// expiry. Anything else — a blank line, a comment, a key the user owns, or a broker
+// entry whose expiry cannot be read — is not expired as far as this is concerned.
+func (akm *AuthorizedKeysManager) entryHasExpired(line string, now time.Time) bool {
+	entry, ok := parseKeyEntry(line)
+	if !ok || !entry.brokerIssued() {
+		return false
+	}
+	// The option is what sshd itself honours, so it wins where both are present.
+	if expiry, ok := entry.expiryTime(); ok {
+		return now.After(expiry)
+	}
+	// An entry from a broker that predates expiry-time=: the comment records when it
+	// was issued, and the configured lifetime says how long that was good for.
+	if issued, ok := entry.issuedAt(); ok {
+		return now.After(issued.Add(akm.keyLifetime))
+	}
+	return false
 }
 
 // ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file.
@@ -554,31 +739,23 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 // authorized_keys entries this broker is responsible for, distinguished from the
 // user's own keys by the `@oidc-pam-<timestamp>` comment.
 func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error) {
-	if err := validateUsername(username); err != nil {
-		return nil, fmt.Errorf("invalid username: %w", err)
-	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-
-	// Read existing authorized_keys file
-	data, err := os.ReadFile(authorizedKeysPath)
+	account, _, authorizedKeysPath, err := akm.userPaths(username)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, fmt.Errorf("failed to read authorized_keys file: %w", err)
+		return nil, err
 	}
 
-	var oidcKeys []string
-	lines := strings.Split(string(data), "\n")
+	lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
+	if err != nil {
+		return nil, err
+	}
 
+	oidcKeys := []string{}
 	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
-			if strings.Contains(trimmedLine, "@oidc-pam-") {
-				oidcKeys = append(oidcKeys, trimmedLine)
-			}
+		// Parsed rather than substring-matched so that an entry carrying options is
+		// still recognised, and so that "@oidc-pam-" appearing anywhere other than
+		// the comment does not make a line the broker's (#171).
+		if entry, ok := parseKeyEntry(line); ok && entry.brokerIssued() {
+			oidcKeys = append(oidcKeys, strings.TrimSpace(line))
 		}
 	}
 
@@ -592,26 +769,24 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 // file the user also owns, so a copy taken before a manual intervention is worth
 // having.
 func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return err
 	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
 	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
 
 	// Check if original file exists
-	if _, err := os.Stat(authorizedKeysPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(authorizedKeysPath); os.IsNotExist(statErr) {
 		return nil // No file to backup
 	}
 
-	// Copy the file (refuse to read through a symlinked authorized_keys — C-2).
-	if err := rejectIfSymlink(authorizedKeysPath); err != nil {
+	lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
+	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(authorizedKeysPath)
-	if err != nil {
-		return fmt.Errorf("failed to read authorized_keys file: %w", err)
+	var data []byte
+	if len(lines) > 0 {
+		data = []byte(strings.Join(lines, "\n") + "\n")
 	}
 
 	// Write the backup without following a planted symlink at the backup path.
@@ -630,6 +805,10 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	if err := bf.Close(); err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
 	}
+	// The backup sits in the user's own .ssh, so it is theirs, not root's (#171).
+	if err := chownToAccount(backupPath, account); err != nil {
+		return err
+	}
 
 	log.Info().
 		Str("username", username).
@@ -647,16 +826,14 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 // broker-issued keys that were present then — run the expiry sweep afterwards if
 // that matters.
 func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
+	if err != nil {
+		return err
 	}
-	userHomeDir := filepath.Join(akm.baseDir, username)
-	sshDir := filepath.Join(userHomeDir, ".ssh")
-	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
 	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
 
 	// Check if backup exists
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
 		return fmt.Errorf("no backup file found")
 	}
 
@@ -664,15 +841,15 @@ func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
 	if err := rejectIfSymlink(backupPath); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(backupPath)
+	data, err := os.ReadFile(backupPath) // #nosec G304 -- resolved home, symlink-checked above
 	if err != nil {
 		return fmt.Errorf("failed to read backup file: %w", err)
 	}
 
-	if err := ensureSecureSSHDir(sshDir); err != nil {
+	if err := ensureSecureSSHDir(sshDir, account); err != nil {
 		return err
 	}
-	if err := writeAuthorizedKeysAtomic(sshDir, authorizedKeysPath, data); err != nil {
+	if err := writeAuthorizedKeysAtomic(sshDir, authorizedKeysPath, data, account); err != nil {
 		return fmt.Errorf("failed to restore authorized_keys: %w", err)
 	}
 

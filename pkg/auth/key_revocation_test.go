@@ -56,7 +56,7 @@ func newRevokeTestEnv(t *testing.T) *revokeTestEnv {
 		providers:             map[string]*OIDCProvider{},
 		auditLogger:           auditLogger,
 		keyManager:            keyManager,
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir, t.TempDir()),
+		authorizedKeysManager: testAuthorizedKeysManager(t, homeDir, "alice", "bob", "carol"),
 		metrics:               oidcmetrics.New(registry, nil),
 	}
 
@@ -68,8 +68,16 @@ func newRevokeTestEnv(t *testing.T) *revokeTestEnv {
 func (e *revokeTestEnv) provision(t *testing.T, username string) *Session {
 	t.Helper()
 
+	return e.provisionSession(t, username, "a3f1c9d2e5b48706"+username)
+}
+
+// provisionSession is provision with the session ID chosen by the caller, for the
+// case where one account has two sessions at once.
+func (e *revokeTestEnv) provisionSession(t *testing.T, username, sessionID string) *Session {
+	t.Helper()
+
 	session := &Session{
-		ID:           "a3f1c9d2e5b48706" + username,
+		ID:           sessionID,
 		UserID:       username,
 		Email:        username + "@example.com",
 		CreatedAt:    time.Now(),
@@ -244,6 +252,55 @@ func TestRevocationThatMatchesNothingIsNotAuditedAsSuccess(t *testing.T) {
 	// The line that could not be revoked is still there; the audit trail now says so.
 	if remaining := env.authorizedKeys(t, "bob"); !strings.Contains(remaining, "# Added by OIDC PAM") {
 		t.Errorf("the unmatched line was removed after all; file is %q", remaining)
+	}
+}
+
+// A second login supersedes the first: one live broker-issued key per account is
+// the invariant, so the earlier entry is gone by the time the earlier session
+// expires. That removal must not then be reported as a failure — it is the
+// intended state, and calling it ssh_key_revocation_incomplete would train
+// operators to ignore the one event that means a credential is still live (#165,
+// #171).
+func TestRevokingASupersededKeyIsNotReportedAsIncomplete(t *testing.T) {
+	env := newRevokeTestEnv(t)
+
+	first := env.provision(t, "carol")
+	// A second login for the same account, with its own session ID, as the broker
+	// mints them.
+	second := env.provisionSession(t, "carol", "b7e4d5c6a1f09283b7e4d5c6a1f09283b7e4d5c6a1f09283b7e4d5c6a1f09283")
+
+	remaining := env.authorizedKeys(t, "carol")
+	if strings.Contains(remaining, strings.TrimSpace(first.SSHPublicKey)) {
+		t.Fatalf("the first login's key is still authorized after a second login; the account "+
+			"has two live broker keys (#171). File is %q", remaining)
+	}
+	if !strings.Contains(remaining, strings.TrimSpace(second.SSHPublicKey)) {
+		t.Fatalf("the second login's key was not authorized; file is %q", remaining)
+	}
+
+	// Now the first session expires and its key is revoked. There is nothing left to
+	// remove, but nothing is wrong either.
+	if err := env.broker.revokeSSHKey(first); err != nil {
+		t.Fatalf("revokeSSHKey: %v", err)
+	}
+
+	types := env.auditEventTypes(t)
+	if recorded(types, "ssh_key_revocation_incomplete") {
+		t.Errorf("revoking a key that a later login had already superseded was reported as an "+
+			"incomplete revocation; events: %v", types)
+	}
+	if !recorded(types, "ssh_key_revoked") {
+		t.Errorf("revoking a superseded key recorded %v, want ssh_key_revoked", types)
+	}
+	if got := env.revokeMetric(t, "failure"); got != 0 {
+		t.Errorf("revoke failure metric = %v for a superseded key, want 0", got)
+	}
+	if got := env.revokeMetric(t, "success"); got != 1 {
+		t.Errorf("revoke success metric = %v, want 1", got)
+	}
+	// The live login keeps working: revoking the older session must not disturb it.
+	if after := env.authorizedKeys(t, "carol"); !strings.Contains(after, strings.TrimSpace(second.SSHPublicKey)) {
+		t.Errorf("revoking the superseded key removed the live one; file is %q", after)
 	}
 }
 
