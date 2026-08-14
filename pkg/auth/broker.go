@@ -671,12 +671,17 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		// max_session_duration across every matching policy. It was computed on
 		// every login and then discarded, so `max_session_duration: 30m` on a sudo
 		// policy produced a session that lived for the full token_lifetime.
-		ExpiresAt:          b.sessionExpiry(createdAt, createdAt, policyResult.MaxDuration),
-		MaxDuration:        policyResult.MaxDuration,
-		LastAccessed:       createdAt,
-		SourceIP:           req.SourceIP,
-		UserAgent:          req.UserAgent,
-		TokenFingerprint:   deviceFlow.DeviceCode,
+		ExpiresAt:    b.sessionExpiry(createdAt, createdAt, policyResult.MaxDuration),
+		MaxDuration:  policyResult.MaxDuration,
+		LastAccessed: createdAt,
+		SourceIP:     req.SourceIP,
+		UserAgent:    req.UserAgent,
+		// TokenFingerprint is deliberately unset here (#219). A pending session has
+		// no token to fingerprint yet — pollDeviceAuthorization fills it in from the
+		// granted token — and what it held instead was the raw device code, the live
+		// credential for the flow this session is waiting on. The field is documented
+		// and treated everywhere else as a hash that is safe to carry and copy, which
+		// is exactly why putting a credential in it is worse than it looks.
 		IsActive:           false,
 		RequireDeviceTrust: policyResult.Metadata[MetadataRequireDeviceTrust] == true,
 		RiskScore:          policyResult.RiskScore,

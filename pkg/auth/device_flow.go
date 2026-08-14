@@ -67,6 +67,20 @@ const (
 	maxUserCodeLen        = 64
 )
 
+// maxProviderResponseBytes bounds every JSON body the broker reads from a
+// provider: discovery, device authorization, token, refresh and userinfo (#223).
+// The decoders used to be pointed straight at resp.Body, so whatever answered as
+// the provider — after a DNS or TLS trust compromise, or simply an `issuer` typo
+// pointing at a host someone else runs — decided how much the broker allocated.
+// The broker is a long-lived root process that every login on the host depends
+// on, so an allocation it cannot refuse is the whole host's problem.
+//
+// 64 KiB is far above anything real: the largest discovery documents in the wild
+// are a few kilobytes, and a token response is bounded by the size of the JWTs in
+// it. A provider that needs more than this is not one the PAM module can carry a
+// response for anyway (MAX_RESPONSE_SIZE is 16 KiB).
+const maxProviderResponseBytes = 64 << 10
+
 // DeviceFlow represents an OAuth2 device authorization flow
 type DeviceFlow struct {
 	DeviceCode      string
@@ -419,8 +433,8 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 
 	// Parse response
 	var deviceResp DeviceAuthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&deviceResp); err != nil {
-		return nil, fmt.Errorf("failed to decode device authorization response: %w", err)
+	if err := decodeProviderJSON(resp.Body, "device authorization response", &deviceResp); err != nil {
+		return nil, err
 	}
 
 	// Reject implausible ExpiresIn values to prevent integer overflow in duration arithmetic.
@@ -458,11 +472,22 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		deviceFlow.DeviceURL = deviceResp.VerificationURIComplete
 	}
 
+	// Nothing here may carry the codes (#219). The device code is the credential
+	// that finishes this login: whoever holds it can redeem the token the user is
+	// about to approve, from anywhere, for as long as the flow is open. The user
+	// code is what approves the flow, and it is also what verification_uri_complete
+	// embeds, so logging either the code or the complete URI hands the flow to any
+	// reader of the journal — which under the shipped unit is every account in
+	// systemd-journal, plus wherever the journal is shipped. Debug is exactly the
+	// level DEPLOYMENT.md tells an operator to turn on while a login is failing,
+	// i.e. while a code is live. What is left is what someone debugging a device
+	// flow can actually act on. The correlation key everywhere else is the session
+	// ID, which does not exist yet: the broker mints it once this returns.
 	log.Debug().
 		Str("provider", p.Name).
-		Str("device_code", deviceFlow.DeviceCode).
-		Str("user_code", deviceFlow.UserCode).
-		Str("device_url", deviceFlow.DeviceURL).
+		Int("device_url_len", len(deviceFlow.DeviceURL)).
+		Int("expires_in", deviceResp.ExpiresIn).
+		Int("polling_interval", deviceFlow.PollingInterval).
 		Msg("Device flow initiated")
 
 	return deviceFlow, nil
@@ -494,6 +519,28 @@ func validateDeviceAuthLengths(resp *DeviceAuthResponse) error {
 	return nil
 }
 
+// decodeProviderJSON decodes a provider's JSON response body into v, reading no
+// more than maxProviderResponseBytes of it. The read is capped at one byte past
+// the limit, which is the least that distinguishes a body over it from one landing
+// exactly on it. what names the response in the error, e.g. "token response".
+//
+// The over-limit message says "decode" deliberately: classifyPollError buckets
+// poll failures by substring, and this is a decode failure in every way that
+// matters to the operator reading the metric.
+func decodeProviderJSON(body io.Reader, what string, v interface{}) error {
+	data, err := io.ReadAll(io.LimitReader(body, maxProviderResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", what, err)
+	}
+	if len(data) > maxProviderResponseBytes {
+		return fmt.Errorf("refused to decode a %s over the %d-byte limit", what, maxProviderResponseBytes)
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("failed to decode %s: %w", what, err)
+	}
+	return nil
+}
+
 // PollDeviceAuthorization polls for device authorization completion.
 // ctx is used for ID token verification so callers can apply deadlines.
 func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, expectedNonce string) (*Token, error) {
@@ -515,8 +562,8 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 
 	// Parse response
 	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	if err := decodeProviderJSON(resp.Body, "token response", &tokenResp); err != nil {
+		return nil, err
 	}
 
 	// Handle error responses
@@ -639,10 +686,12 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 		return nil, fmt.Errorf("userinfo request failed with status %d", resp.StatusCode)
 	}
 
-	// Parse user info — limit body to 1 MB to prevent OOM from a malicious provider.
+	// Parse user info. This body was already bounded, at 1 MB; it shares the
+	// provider-wide limit now so that one number governs every provider response
+	// and an over-limit body is reported the same way wherever it arrives.
 	var userInfoClaims map[string]interface{}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&userInfoClaims); err != nil {
-		return nil, fmt.Errorf("failed to decode userinfo response: %w", err)
+	if err := decodeProviderJSON(resp.Body, "userinfo response", &userInfoClaims); err != nil {
+		return nil, err
 	}
 
 	// Merge the two claim sets, with the ID token winning wherever they disagree
@@ -694,8 +743,8 @@ func (p *OIDCProvider) RefreshToken(ctx context.Context, refreshTokenStr string)
 	defer func() { _ = resp.Body.Close() }()
 
 	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to decode token refresh response: %w", err)
+	if err := decodeProviderJSON(resp.Body, "token refresh response", &tokenResp); err != nil {
+		return nil, err
 	}
 
 	if tokenResp.Error != "" {
@@ -868,7 +917,7 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&discoveryResp); err != nil {
+	if err := decodeProviderJSON(resp.Body, "discovery document", &discoveryResp); err != nil {
 		return fallback()
 	}
 
