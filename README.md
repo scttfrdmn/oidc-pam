@@ -4,12 +4,12 @@
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
 [![Version](https://img.shields.io/badge/Version-0.4.2-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
-A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH, console, and GUI logins with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
+A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH login — and any other interactive PAM service you wire it into — with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
 ## 🚀 Features
 
 - **Modern Authentication**: Replace SSH keys with OIDC + Passkeys
-- **Universal PAM Integration**: Works with SSH, console, and GUI logins
+- **PAM Integration**: SSH is tested end-to-end; `configs/pam/` also carries example stacks for console `login`, `su` and `sudo`. Not for display managers, and never for the host-wide `common-auth`/`system-auth` stack — a device flow needs a terminal and a user in front of it
 - **Automatic SSH Key Management**: Generate, rotate, and revoke SSH keys automatically
 - **Enterprise Identity Integration**: Support for Okta, Azure AD, Auth0, Google Workspace, AWS IAM Identity Center, and any OIDC provider
 - **Mobile-First UX**: Authenticate via QR codes and mobile passkeys
@@ -48,7 +48,7 @@ OIDC PAM provides a modern, secure, and user-friendly alternative.
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     PAM Integration Layer                   │
-│    SSH • Console • GUI • Automatic Key Provisioning       │
+│    SSH • Console • su/sudo • Automatic Key Provisioning   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -169,9 +169,12 @@ ssh user@server.company.com
 # 3. Authenticates with passkey (Face ID/Touch ID)
 # 4. SSH key automatically provisioned
 # 5. SSH session established
-
-# Subsequent access uses cached SSH key
 ```
+
+Every login runs the device flow. `pam_oidc.so` sends no session ID with its
+authentication request, so the broker has nothing to match a login against and
+starts a new flow each time; the SSH key it provisions belongs to that session.
+There is no cached credential that lets the next `ssh` skip the prompt.
 
 ## 📚 Documentation
 
@@ -238,14 +241,29 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📊 Supported Platforms
 
-| Platform | SSH | Console | GUI | Status |
-|----------|-----|---------|-----|--------|
-| Ubuntu 22.04+ | ✅ | ✅ | ✅ | Stable |
-| Ubuntu 20.04+ | ✅ | ✅ | ✅ | Stable |
-| RHEL 8+ | ✅ | ✅ | ✅ | Stable |
-| CentOS 8+ | ✅ | ✅ | ✅ | Stable |
-| Fedora 35+ | ✅ | ✅ | ✅ | Stable |
-| Debian 11+ | ✅ | ✅ | ✅ | Beta |
+| Platform | SSH (`sshd`) | Console (`login`), `su`, `sudo` | Display manager |
+|----------|--------------|---------------------------------|-----------------|
+| Debian 12 (bookworm) | ✅ Tested in CI | Example config, untested | Not supported |
+| Debian 11, Ubuntu 20.04+, Ubuntu 22.04+ | Expected to work | Example config, untested | Not supported |
+| RHEL 8+, CentOS Stream 8+, Fedora 35+ | Expected to work | Example config, untested | Not supported |
+
+**Tested in CI** means `test/e2e` performs real SSH logins against the built
+`pam_oidc.so` on that image, with the stack `configs/pam/ssh` ships. That harness
+runs on Debian 12 and covers `sshd` and nothing else.
+
+**Expected to work** means the module builds against that distribution's libpam
+and json-c and nothing about it is known to differ — not that a login has been
+run on it.
+
+**Example config, untested** means `configs/pam/` carries a stack for the service
+but nobody has verified that its PAM conversation displays the verification URL.
+Deploy those one service at a time, from a host you can still get back into, and
+never by way of `common-auth`/`system-auth` — see
+[configs/pam/README.md](configs/pam/README.md).
+
+**Not supported**: no `gdm`/`sddm`/`lightdm` stack is shipped. The module shows
+the device-flow instructions with `PAM_TEXT_INFO`, which a graphical greeter would
+render as a block of ASCII art if it shows it at all.
 
 ## 🛡️ Security
 

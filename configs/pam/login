@@ -1,11 +1,18 @@
 # PAM Configuration for Console Login with OIDC Authentication
-# This file should be placed at /etc/pam.d/login
-# 
+# This file should be placed at /etc/pam.d/login -- that one service's file, and
+# never the host-wide common-auth or system-auth stack, which every PAM service
+# on the machine includes.
+#
 # This configuration enables OIDC authentication for console login (tty) while
 # maintaining fallback authentication for emergency access.
 #
 # IMPORTANT: Test this configuration thoroughly on a non-production system first!
 # Always maintain console or SSH access for emergency recovery.
+#
+# CI does not exercise this stack -- only configs/pam/ssh, via test/e2e. Whether
+# agetty's PAM conversation actually displays the PAM_TEXT_INFO the module uses
+# for the verification URL is a property of the service, so verify it from a host
+# you can still reach another way before relying on it.
 
 # Authentication stack
 auth    sufficient  pam_oidc.so
