@@ -377,6 +377,119 @@ func TestPerformAuthenticationRejectsOverlongSessionID(t *testing.T) {
 	}
 }
 
+// The module used to read the success field with json_object_get_boolean, which
+// answers true for any non-empty JSON *string*: `"success":"false"` was a grant, and
+// with `auth sufficient pam_oidc.so` a grant is a login (#168). The real broker
+// emits a JSON bool, so nothing is given up by insisting on one.
+func TestPerformAuthenticationRequiresABooleanSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Written verbatim by the fake broker: the point is the JSON type of the field,
+	// which a Go map could not express.
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"the string false", `{"success":"false","error_code":"AUTHENTICATION_FAILED"}` + "\n"},
+		{"the string true", `{"success":"true","user_id":"testuser","session_id":"sess-str"}` + "\n"},
+		{"the number 1", `{"success":1,"user_id":"testuser","session_id":"sess-int"}` + "\n"},
+		{"null", `{"success":null,"session_id":"sess-null"}` + "\n"},
+	}
+
+	for _, tt := range replies {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+				return tt.reply
+			})
+
+			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+			if got == pam.PAMSuccess {
+				t.Fatalf("success=%s was classified as a grant: PAM_SUCCESS from `auth sufficient "+
+					"pam_oidc.so` is a login", tt.name)
+			}
+			if got != pam.PAMAuthInfoUnavail {
+				t.Fatalf("success=%s: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)",
+					tt.name, got, pam.PAMAuthInfoUnavail)
+			}
+		})
+	}
+}
+
+// A service can hand the module a PAM_CONV item with no conversation function in
+// it. display_message called through it without looking, so showing the device-flow
+// instructions dereferenced NULL and killed the process — and under sshd that
+// process is the login's auth child (#168).
+//
+// This drives pam_sm_authenticate rather than perform_authentication so the handle
+// and the module arguments both travel the path PAM uses.
+func TestAuthenticateSurvivesAMissingConversationFunction(t *testing.T) {
+	// Not parallel: pam_sm_authenticate parses module arguments, which sets the
+	// module's process-wide debug flag.
+	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+		if n == 1 {
+			// Carries instructions, so the module tries to show them.
+			return deviceStarted("sess-noconv")
+		}
+		return denied("SESSION_NOT_FOUND")
+	})
+
+	handle, rc := startPAMHandleWithoutConversation("other", "testuser")
+	if rc != pam.PAMSuccess {
+		t.Fatalf("pam_start: PAM result %d", rc)
+	}
+	defer handle.close()
+
+	got := smAuthenticate(handle, []string{"socket=" + broker.socketPath, "timeout=10"})
+	if got != pam.PAMAuthError {
+		t.Fatalf("authentication with no conversation function: got PAM result %d, want "+
+			"pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	}
+	if n := len(broker.received()); n < 2 {
+		t.Fatalf("expected the module to carry on past the undisplayable message and poll, "+
+			"got %d request(s)", n)
+	}
+}
+
+// `debug` is a per-invocation module argument, but the flag it set was a process
+// global that was never cleared. pam_sm_authenticate runs inside sshd, which serves
+// many logins from one process and may run more than one service's stack there, so a
+// single `debug` anywhere — and the shipped ssh and login stacks used to pass it —
+// left every later authentication in that process logging at LOG_DEBUG whatever its
+// own arguments said (#168). What that logged included the whole broker response.
+func TestDebugFlagDoesNotOutliveItsInvocation(t *testing.T) {
+	// Not parallel: debug_enabled is process-wide, which is the subject here.
+	broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+		// Refused up front: no device step, so neither authentication sleeps.
+		return denied("AUTHENTICATION_FAILED")
+	})
+
+	handle, rc := startPAMHandleWithoutConversation("other", "testuser")
+	if rc != pam.PAMSuccess {
+		t.Fatalf("pam_start: PAM result %d", rc)
+	}
+	defer handle.close()
+
+	socketArg := "socket=" + broker.socketPath
+
+	if got := smAuthenticate(handle, []string{"debug", socketArg}); got != pam.PAMAuthError {
+		t.Fatalf("first authentication: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	}
+	if !debugLoggingEnabled() {
+		t.Fatal("the `debug` argument did not enable debug logging, so the rest of this test proves nothing")
+	}
+
+	if got := smAuthenticate(handle, []string{socketArg}); got != pam.PAMAuthError {
+		t.Fatalf("second authentication: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	}
+	if debugLoggingEnabled() {
+		t.Fatal("an authentication that did not ask for `debug` is still logging at LOG_DEBUG: " +
+			"the flag outlived the invocation that set it, so one service's debug setting " +
+			"applies to every later login in the same sshd process")
+	}
+}
+
 // TestLoginTypeClassificationMatchesGo pins the C module's login-type
 // classification to pam.GetLoginType's. The broker applies per-login-type policy, so
 // if pam_oidc.so and the Go client disagreed, the same login would be evaluated

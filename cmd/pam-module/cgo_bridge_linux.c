@@ -8,7 +8,17 @@
 // Total time budget for reading a complete broker response, in milliseconds.
 #define RESPONSE_READ_TIMEOUT_MS 30000
 
-// Global variables
+// Whether this invocation logs at LOG_DEBUG, taken from the module arguments by
+// parse_arguments.
+//
+// It has to be a global because log_pam_message is one, but it must not carry
+// state from one invocation to the next: pam_sm_authenticate runs inside sshd,
+// which serves many logins from one process and may run more than one service's
+// stack there. Setting the flag and never clearing it meant a single `debug` on
+// any stack turned on debug logging for every later authentication in that
+// process, including those of services that did not ask for it (#168).
+// parse_arguments now assigns this on every entry into the module, so an
+// invocation gets exactly what its own arguments asked for.
 static int debug_enabled = 0;
 
 // The compiled-in default must fit in pam_oidc_options.socket_path, which is
@@ -30,6 +40,13 @@ void log_pam_message(int priority, const char *format, ...) {
     closelog();
     
     va_end(args);
+}
+
+// Whether debug logging is in force right now. This is a separate function so a
+// Go test can watch the flag across two invocations — the module writes to syslog,
+// which a test cannot read. See TestDebugFlagDoesNotOutliveItsInvocation.
+int debug_logging_enabled(void) {
+    return debug_enabled;
 }
 
 // Connect to the OIDC authentication broker
@@ -68,36 +85,50 @@ int connect_to_broker(const char *socket_path) {
     return sock;
 }
 
-// Get user information from PAM handle
+// Get user information from PAM handle.
+//
+// An item the service never set comes back as PAM_SUCCESS with a NULL pointer, so
+// every one of these needs the substitute applied on NULL as well as on failure.
+// Testing only the return value left *rhost or *tty NULL, and the next thing that
+// happens to them is json_object_new_string(), i.e. strlen(NULL) — a crash of the
+// auth child, which under sshd is the login. PAM_RHOST is unset for every local
+// service (su, sudo, login, cron), and PAM_TTY for anything that is not on a
+// terminal (#168).
 int get_user_info(pam_handle_t *pamh, const char **username, const char **service, const char **rhost, const char **tty) {
     int retval;
-    
+
     // Get username
     retval = pam_get_user(pamh, username, NULL);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_ERR, "Failed to get username: %s", pam_strerror(pamh, retval));
         return retval;
     }
-    
+    if (*username == NULL) {
+        log_pam_message(LOG_ERR, "PAM returned no username");
+        return PAM_USER_UNKNOWN;
+    }
+
     // Get service name
     retval = pam_get_item(pamh, PAM_SERVICE, (const void**)service);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_WARNING, "Failed to get service name: %s", pam_strerror(pamh, retval));
+    }
+    if (retval != PAM_SUCCESS || *service == NULL) {
         *service = "unknown";
     }
-    
+
     // Get remote host
     retval = pam_get_item(pamh, PAM_RHOST, (const void**)rhost);
-    if (retval != PAM_SUCCESS) {
+    if (retval != PAM_SUCCESS || *rhost == NULL) {
         *rhost = "localhost";
     }
-    
+
     // Get TTY
     retval = pam_get_item(pamh, PAM_TTY, (const void**)tty);
-    if (retval != PAM_SUCCESS) {
+    if (retval != PAM_SUCCESS || *tty == NULL) {
         *tty = "unknown";
     }
-    
+
     log_pam_message(LOG_DEBUG, "User info - username: %s, service: %s, rhost: %s, tty: %s",
                     *username, *service, *rhost, *tty);
     
@@ -287,7 +318,13 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
         return RECV_RESPONSE_TOO_LARGE;
     }
 
-    log_pam_message(LOG_DEBUG, "Received response: %s", response);
+    // The size, never the body. A response carries the live device code, the
+    // user's email and groups, and whatever else the broker<->module contract
+    // grows next; this module cannot know what is in one. syslog is not the place
+    // for it — LOG_AUTHPRIV is retained, shipped off the host and readable by
+    // everyone who can read auth.log, and `debug` is turned on by an operator
+    // debugging a login, not by the user whose response it is (#168).
+    log_pam_message(LOG_DEBUG, "Received %zu-byte broker response", total);
 
     return RECV_OK;
 }
@@ -305,10 +342,21 @@ int display_message(pam_handle_t *pamh, const char *message) {
         log_pam_message(LOG_ERR, "Failed to get conversation function: %s", pam_strerror(pamh, retval));
         return retval;
     }
-    
+
+    // PAM_SUCCESS does not promise a usable conversation. A service that set none,
+    // or set one with a NULL function, hands back exactly this — and calling
+    // through it killed the auth child mid-login, which under sshd is the login
+    // itself (#168). Nothing can be shown to this user, which is not a reason to
+    // crash: the caller carries on and the login can still be completed from the
+    // device code the user already has, or it times out and is refused.
+    if (conv == NULL || conv->conv == NULL) {
+        log_pam_message(LOG_WARNING, "No PAM conversation function available; not showing message to user");
+        return PAM_CONV_ERR;
+    }
+
     msg.msg_style = PAM_TEXT_INFO;
     msg.msg = message;
-    
+
     retval = conv->conv(1, &msgp, &resp, conv->appdata_ptr);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_ERR, "Failed to display message: %s", pam_strerror(pamh, retval));
@@ -325,42 +373,11 @@ int display_message(pam_handle_t *pamh, const char *message) {
     return PAM_SUCCESS;
 }
 
-// Prompt user for input
-int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t response_size) {
-    struct pam_message msg;
-    const struct pam_message *msgp = &msg;
-    struct pam_response *resp = NULL;
-    struct pam_conv *conv;
-    int retval;
-    
-    retval = pam_get_item(pamh, PAM_CONV, (const void**)&conv);
-    if (retval != PAM_SUCCESS) {
-        log_pam_message(LOG_ERR, "Failed to get conversation function: %s", pam_strerror(pamh, retval));
-        return retval;
-    }
-    
-    msg.msg_style = PAM_PROMPT_ECHO_ON;
-    msg.msg = prompt;
-    
-    retval = conv->conv(1, &msgp, &resp, conv->appdata_ptr);
-    if (retval != PAM_SUCCESS) {
-        log_pam_message(LOG_ERR, "Failed to prompt user: %s", pam_strerror(pamh, retval));
-        return retval;
-    }
-    
-    if (resp && resp->resp) {
-        strncpy(response, resp->resp, response_size - 1);
-        response[response_size - 1] = '\0';
-        
-        // Clean up
-        free(resp->resp);
-        free(resp);
-    } else {
-        response[0] = '\0';
-    }
-    
-    return PAM_SUCCESS;
-}
+// There was a prompt_user() here. It had no caller — this module never asks the
+// user for input, since the device flow happens in the user's browser — and it
+// copied a conversation reply into a buffer whose size only its caller knew
+// (#168). Deleted rather than left for someone to wire up. The device flow needs
+// display_message and nothing else.
 
 // Parse module arguments
 // Parse the module arguments from /etc/pam.d/<service> into opts, which is
@@ -370,7 +387,7 @@ int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t r
 // therefore trusted, unlike oidc-pam-helper's argv, which may come from an
 // unprivileged caller (see L-6). Recognized arguments:
 //
-//   debug             Log at LOG_DEBUG to syslog.
+//   debug             Log at LOG_DEBUG to syslog, for this invocation only.
 //   socket=<path>     Absolute path to the broker's Unix socket. Defaults to
 //                     SOCKET_PATH, which matches the broker's own default for
 //                     server.socket_path.
@@ -391,10 +408,23 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     memcpy(opts->socket_path, SOCKET_PATH, sizeof(SOCKET_PATH));
     opts->timeout_s = DEFAULT_AUTH_TIMEOUT;
 
+    // Debug is settled before anything else is parsed: this assignment is what
+    // stops a previous invocation's `debug` from still being in force (#168), and
+    // doing it in its own pass means the messages logged below obey this
+    // invocation's arguments whatever order they arrive in.
     for (i = 0; i < argc; i++) {
         if (strcmp(argv[i], "debug") == 0) {
-            debug_enabled = 1;
-            log_pam_message(LOG_DEBUG, "Debug mode enabled");
+            opts->debug = 1;
+        }
+    }
+    debug_enabled = opts->debug;
+    if (opts->debug) {
+        log_pam_message(LOG_DEBUG, "Debug mode enabled");
+    }
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "debug") == 0) {
+            continue; // handled above
         } else if (strncmp(argv[i], "socket=", 7) == 0) {
             const char *path = argv[i] + 7;
             size_t len = strlen(path);
@@ -518,8 +548,14 @@ static int classify_response(json_object *obj) {
     json_object *success_obj = NULL;
 
     // A response we cannot interpret is not a grant.
-    if (!json_object_object_get_ex(obj, "success", &success_obj)) {
-        log_pam_message(LOG_ERR, "Broker response has no success field");
+    //
+    // The type is checked, not just the presence: json_object_get_boolean answers
+    // true for any non-empty JSON *string*, so `"success":"false"` used to be read
+    // as a success (#168). The real broker emits a JSON bool, which is exactly why
+    // nothing is given up by insisting on one here.
+    if (!json_object_object_get_ex(obj, "success", &success_obj) ||
+        !json_object_is_type(success_obj, json_type_boolean)) {
+        log_pam_message(LOG_ERR, "Broker response has no boolean success field");
         return PAM_AUTHINFO_UNAVAIL;
     }
 

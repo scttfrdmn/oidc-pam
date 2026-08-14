@@ -90,6 +90,11 @@ auth    required    pam_oidc.so
 auth    sufficient  pam_oidc.so debug
 ```
 
+`debug` is for diagnosing a login you are watching, and belongs in the stack only
+while you are watching it. It makes the module log the details of every
+authentication that service handles to `LOG_AUTHPRIV`. It applies to the stack that
+carries it and to nothing else — the shipped stacks do not carry it.
+
 ## Which PAM phases the module participates in
 
 `pam_oidc.so` implements one decision, in the `auth` phase. Everything the
@@ -158,7 +163,7 @@ not consult the PAM auth stack at all.
 
 | Argument | Meaning |
 |---|---|
-| `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`). Remove in production. |
+| `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`), for the stack that carries it only. Remove in production. |
 | `socket=<path>` | Absolute path to the broker's Unix socket. Defaults to `/var/run/oidc-auth/broker.sock`, matching the broker's own default for `server.socket_path`. Only needed if you changed that. |
 | `timeout=<seconds>` | How long to wait for the user to finish the device flow before refusing the login. Default `90`, accepted range `10`–`900`. |
 

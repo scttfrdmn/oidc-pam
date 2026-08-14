@@ -43,6 +43,73 @@ func performAuthentication(socketPath, username, service, rhost, tty string, tim
 		C.int(timeoutSeconds)))
 }
 
+// pamHandle is a real pam_handle_t from pam_start. perform_authentication
+// tolerates a NULL handle and then shows the user nothing, so a NULL one cannot
+// exercise anything the PAM conversation touches; these tests need a handle whose
+// items the module actually reads.
+type pamHandle struct {
+	h *C.pam_handle_t
+}
+
+// startPAMHandleWithoutConversation returns a handle whose PAM_CONV item holds no
+// conversation function — what a service that never set one presents to the module
+// (#168).
+//
+// libpam will not store a NULL conv *pointer* (pam_set_item refuses it), so a conv
+// struct with a NULL function is the reachable shape of "no conversation", and it
+// is the one that used to be called through. display_message guards both.
+func startPAMHandleWithoutConversation(service, user string) (*pamHandle, pam.PAMResultCode) {
+	cService := C.CString(service)
+	cUser := C.CString(user)
+	defer func() {
+		C.free(unsafe.Pointer(cService))
+		C.free(unsafe.Pointer(cUser))
+	}()
+
+	var conv C.struct_pam_conv // zero value: no conversation function, no appdata
+	var handle *C.pam_handle_t
+
+	rc := pam.PAMResultCode(C.pam_start(cService, cUser, &conv, &handle))
+	if rc != pam.PAMSuccess {
+		return nil, rc
+	}
+	return &pamHandle{h: handle}, rc
+}
+
+func (p *pamHandle) close() {
+	C.pam_end(p.h, C.PAM_SUCCESS)
+}
+
+// smAuthenticate drives pam_sm_authenticate itself, so the module's argument
+// parsing is part of what is exercised rather than being bypassed the way
+// performAuthentication bypasses it.
+func smAuthenticate(p *pamHandle, args []string) pam.PAMResultCode {
+	argv := make([]*C.char, len(args))
+	for i, a := range args {
+		argv[i] = C.CString(a)
+	}
+	defer func() {
+		for _, arg := range argv {
+			C.free(unsafe.Pointer(arg))
+		}
+	}()
+
+	var argvPtr **C.char
+	if len(argv) > 0 {
+		argvPtr = (**C.char)(unsafe.Pointer(&argv[0]))
+	}
+
+	return pam.PAMResultCode(C.pam_sm_authenticate(p.h, 0, C.int(len(args)), argvPtr))
+}
+
+// debugLoggingEnabled reports whether the module is currently logging at
+// LOG_DEBUG. The module writes to syslog, which a test cannot read, so this is how
+// a test observes that the `debug` argument of one invocation does not carry into
+// the next (#168).
+func debugLoggingEnabled() bool {
+	return C.debug_logging_enabled() != 0
+}
+
 // classifyLoginTypeC exposes the C module's login-type classification so a Go
 // test can assert it agrees with GetLoginType. The two must match: the broker
 // applies per-login-type policy, and the C module and the Go client would
