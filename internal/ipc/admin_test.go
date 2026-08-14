@@ -16,9 +16,7 @@ import (
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 )
 
-// newAdminTestServer builds a server over a real broker. The provider uses
-// skip_discovery with explicit endpoints so that constructing it makes no
-// network calls.
+// newAdminTestServer builds a server over a real broker.
 func newAdminTestServer(t *testing.T) (*Server, *auth.Broker) {
 	t.Helper()
 
@@ -28,8 +26,31 @@ func newAdminTestServer(t *testing.T) (*Server, *auth.Broker) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
 
+	broker := newTestBroker(t)
+
+	server, err := NewServer(filepath.Join(tempDir, "ipc.sock"), broker, 0660, "", false, 0, 0)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop() })
+
+	return server, broker
+}
+
+// newTestBroker builds a real broker whose provider uses skip_discovery with
+// explicit endpoints, so that constructing it — and every request the tests send
+// through it that does not talk to the provider — makes no network calls.
+//
+// It exists because a nil broker is not good enough for the socket-level tests: a
+// request that survives validation reaches a handler, and a handler dereferences the
+// broker. The one test that was meant to prove the socket rate-limits a flood sent a
+// request that could not survive validation, which is how it came to assert the
+// validator's behaviour while its name claimed the limiter's (#189).
+func newTestBroker(t *testing.T) *auth.Broker {
+	t.Helper()
+
 	cfg := &config.Config{
-		Server: config.ServerConfig{SocketPath: filepath.Join(tempDir, "broker.sock")},
+		Server: config.ServerConfig{SocketPath: filepath.Join(t.TempDir(), "broker.sock")},
 		OIDC: config.OIDCConfig{
 			Providers: []config.OIDCProvider{
 				{
@@ -60,13 +81,7 @@ func newAdminTestServer(t *testing.T) (*Server, *auth.Broker) {
 		t.Fatalf("NewBroker: %v", err)
 	}
 
-	server, err := NewServer(filepath.Join(tempDir, "ipc.sock"), broker, 0660, "", false, 0, 0)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Stop() })
-
-	return server, broker
+	return broker
 }
 
 // The three admin request types must be routed, not rejected. Before this they

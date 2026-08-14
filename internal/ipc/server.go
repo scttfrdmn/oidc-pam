@@ -32,6 +32,11 @@ type Server struct {
 	wg              sync.WaitGroup
 	stopOnce        sync.Once
 	connSem         chan struct{} // bounds concurrent in-flight connections (L-4)
+
+	// peerVerifier, when non-nil, replaces the platform peer-credential check. See
+	// verifyPeer: it exists so this package's socket-level tests can run as an
+	// ordinary user, and is nil in every Server the constructor builds (#189).
+	peerVerifier func(conn net.Conn) (uid uint32, err error)
 }
 
 // maxConcurrentConnections caps the number of simultaneously handled IPC
@@ -321,6 +326,53 @@ func isTransientAcceptError(err error) bool {
 		errors.Is(err, syscall.EAGAIN)
 }
 
+// verifyPeer identifies the process on the other end of conn and rejects any peer
+// the broker must not serve. It returns the peer's uid, which is what malformed
+// requests are charged against.
+//
+// The indirection through s.peerVerifier is a test seam, and it is here because of
+// what its absence cost. verifyPeerCredentials is a Linux-only kernel lookup that
+// requires the peer to be uid 0, so every test that speaks to the socket had to skip
+// unless the suite was running as root on Linux — which CI is not. The one test that
+// asserted the socket rate-limits a flood therefore skipped on every run the project
+// has ever made, was green because it was absent, and hid an ordering that meant no
+// malformed request was ever counted (#189).
+//
+// The field is unexported and left nil by NewServer, so no production path can
+// substitute the check: a Server that was never told otherwise fails closed through
+// verifyPeerCredentials, which on a non-Linux host refuses every connection.
+func (s *Server) verifyPeer(conn net.Conn) (uint32, error) {
+	if s.peerVerifier != nil {
+		return s.peerVerifier(conn)
+	}
+	return verifyPeerCredentials(conn)
+}
+
+// rejectMalformed answers a request that no handler will ever see — one that would
+// not decode, or that validateRequest refused — and charges it against the sending
+// peer's malformed-request budget. Once that budget is spent the peer is told
+// RATE_LIMIT_EXCEEDED instead, and its next well-formed request is unaffected.
+//
+// The budget is consulted after the request has been recognised as malformed rather
+// than before it is read, and that ordering is deliberate: at the earlier point a
+// valid request is indistinguishable from a malformed one, and every peer shares
+// this bucket (every peer's uid is 0), so gating the read on it would let a flood of
+// garbage refuse real logins — the failure #160 removed, reintroduced from the other
+// side. What it does bound is how long a peer can keep being answered, and it puts a
+// flood in the journal where an operator can see it, instead of leaving malformed
+// requests uncounted forever (#189).
+func (s *Server) rejectMalformed(conn net.Conn, peerUID uint32, errorCode, errorMessage string) {
+	if s.rateLimiter.Allow(ClassMalformed, strconv.FormatUint(uint64(peerUID), 10)) {
+		s.sendErrorResponse(conn, errorCode, errorMessage)
+		return
+	}
+
+	log.Warn().
+		Uint32("peer_uid", peerUID).
+		Msg("Malformed-request budget exhausted for peer; refusing further malformed requests")
+	s.sendErrorResponse(conn, "RATE_LIMIT_EXCEEDED", clientErrorMessage("RATE_LIMIT_EXCEEDED"))
+}
+
 // handleConnection handles a single IPC connection
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
@@ -336,7 +388,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Verify peer is root — PAM modules always run as root
-	if err := verifyPeerCredentials(conn); err != nil {
+	peerUID, err := s.verifyPeer(conn)
+	if err != nil {
 		log.Warn().Err(err).Msg("Rejected IPC connection from non-root peer")
 		s.sendErrorResponse(conn, "PERMISSION_DENIED", "Connection rejected")
 		return
@@ -366,10 +419,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 			Msg("Peer credentials verified")
 	}
 
-	// Rate limiting happens in handleRequest, once the request has been decoded and
-	// validated: the limits are keyed on the account a request names, which is not
-	// known before then. It used to happen here, keyed on the peer uid — a value
-	// that can only ever be 0, so the whole host shared one bucket (#160).
+	// Rate limiting for requests that reach a handler happens in handleRequest, once
+	// the request has been decoded and validated: those limits are keyed on the
+	// account a request names, which is not known before then. It used to happen
+	// here, keyed on the peer uid — a value that can only ever be 0, so the whole
+	// host shared one bucket (#160).
+	//
+	// Requests that reach no handler are charged here instead, to the peer that sent
+	// them: see rejectMalformed. They used to be charged to nothing at all, so a
+	// local peer could hold the broker in accept, read, decode and validate as fast
+	// as it could write, and the only limit that exists to bound that work never saw
+	// one of them (#189).
 
 	log.Debug().
 		Str("remote_addr", conn.RemoteAddr().String()).
@@ -383,7 +443,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		log.Error().
 			Err(err).
 			Msg("Failed to decode IPC request")
-		s.sendErrorResponse(conn, "INVALID_REQUEST", "Failed to decode request")
+		s.rejectMalformed(conn, peerUID, "INVALID_REQUEST", "Failed to decode request")
 		return
 	}
 
@@ -393,7 +453,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			Err(err).
 			Str("request_type", request.Type).
 			Msg("Invalid IPC request")
-		s.sendErrorResponse(conn, "INVALID_REQUEST", clientErrorMessage("INVALID_REQUEST"))
+		s.rejectMalformed(conn, peerUID, "INVALID_REQUEST", clientErrorMessage("INVALID_REQUEST"))
 		return
 	}
 

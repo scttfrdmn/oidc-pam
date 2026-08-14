@@ -516,33 +516,14 @@ func TestServerHandleRevokeSession(t *testing.T) {
 	_ = server.handleRevokeSession(revokeRequest)
 }
 
+// A user_id that is a path rather than a username is refused, with a message that
+// does not repeat the validator's reasoning back to the client.
+//
+// This carried the same root-on-Linux skip as the rate-limit test and so had never
+// run either; it exercises exactly the rejection path this change moved a limiter
+// into, so it runs unprivileged now (#189).
 func TestServerRejectsPathTraversal(t *testing.T) {
-	if runtime.GOOS != "linux" || os.Getuid() != 0 {
-		t.Skip("verifyPeerCredentials requires Linux + root; skipping path traversal test")
-	}
-	tempDir, err := os.MkdirTemp("", "ipc-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
-
-	socketPath := filepath.Join(tempDir, "test.sock")
-	broker := createTestBroker(t)
-	server, err := NewServer(socketPath, broker, 0660, "", false, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
-	}
-
-	// Start server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	go func() {
-		_ = server.Start(ctx)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	defer func() { _ = server.Stop() }()
+	_, socketPath := startSocketTestServer(t, createTestBroker(t), 0, 0)
 
 	// Connect and send a request with path traversal in UserID
 	conn, err := net.Dial("unix", socketPath)
@@ -658,56 +639,143 @@ func sendRequestOverSocket(t *testing.T, socketPath string, req *Request) *Respo
 	return &resp
 }
 
-func TestServerRateLimitOverSocket(t *testing.T) {
-	if runtime.GOOS != "linux" || os.Getuid() != 0 {
-		t.Skip("verifyPeerCredentials requires Linux + root; skipping rate limit socket test")
-	}
-	tempDir, err := os.MkdirTemp("", "ipc-ratelimit-*")
+// startSocketTestServer starts a Server listening on a socket in a temporary
+// directory, with the peer-credential check replaced, and returns it with its socket
+// path.
+//
+// The substitution is what lets these tests run at all. verifyPeerCredentials asks
+// the kernel for the peer's uid and requires 0, so every test here that speaks to the
+// socket used to skip unless the suite was running as root on Linux. CI runs as an
+// unprivileged user, so they skipped on every run this project has ever made — green
+// because absent — and the socket, which is the whole trust boundary, was in practice
+// untested (#189).
+func startSocketTestServer(t *testing.T, broker *auth.Broker, maxRequestsPerMinute, maxConcurrentAuths int) (*Server, string) {
+	t.Helper()
+
+	// os.MkdirTemp rather than t.TempDir: the latter builds the directory name out of
+	// the test's name, and a socket path over sun_path's 104 bytes fails to bind on
+	// macOS, so a long test name would take the socket away again.
+	tempDir, err := os.MkdirTemp("", "ipc-socket")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("MkdirTemp: %v", err)
 	}
-	defer func() { _ = os.RemoveAll(tempDir) }()
+	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
 
 	socketPath := filepath.Join(tempDir, "test.sock")
-
-	// maxRequestsPerMinute=2, maxConcurrentAuths=0 (disabled), requirePeerAuth=false
-	server, err := NewServer(socketPath, nil, 0660, "", false, 2, 0)
+	server, err := NewServer(socketPath, broker, 0660, "", false, maxRequestsPerMinute, maxConcurrentAuths)
 	if err != nil {
-		t.Fatalf("Failed to create server: %v", err)
+		t.Fatalf("NewServer: %v", err)
 	}
+	// Stand in for the SO_PEERCRED lookup, reporting the uid every real peer has.
+	server.peerVerifier = func(net.Conn) (uint32, error) { return 0, nil }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	go func() { _ = server.Start(ctx) }()
-	time.Sleep(100 * time.Millisecond)
-	defer func() { _ = server.Stop() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop() })
+
+	return server, socketPath
+}
+
+// A peer that sends well-formed requests faster than its account's budget allows is
+// refused over the socket, not just in a direct call to handleRequest.
+//
+// The requests have to be ones that pass validation, which is the whole point: this
+// test used to send a check_session with no session_id, so every one of them was
+// answered INVALID_REQUEST by the validator and the limiter was never reached. Two
+// assertions passed for the wrong reason and the third could not pass at all — and
+// because the test also skipped unless run as root on Linux, nothing ever noticed
+// (#189).
+func TestServerRateLimitOverSocket(t *testing.T) {
+	// The session budget is pollsPerAuthentication times the authenticate budget, so
+	// one request per minute buys exactly that many check_session calls.
+	_, socketPath := startSocketTestServer(t, newTestBroker(t), 1, 0)
+	budget := pollsPerAuthentication
 
 	req := &Request{
-		Type:   "check_session",
-		UserID: "test-user",
+		Type:      "check_session",
+		UserID:    "test-user",
+		SessionID: "no-such-session",
 	}
 
-	// First 2 requests should succeed (not be rate-limited — they'll fail for
-	// other reasons since broker is nil, but they should NOT get RATE_LIMIT_EXCEEDED).
-	for i := 0; i < 2; i++ {
+	for i := 0; i < budget; i++ {
 		resp := sendRequestOverSocket(t, socketPath, req)
 		if resp.ErrorCode == "RATE_LIMIT_EXCEEDED" {
-			t.Fatalf("request %d should not have been rate-limited", i+1)
+			t.Fatalf("request %d of a budget of %d was rate-limited", i+1, budget)
+		}
+		// The request reached the broker, which is what proves the limiter is being
+		// exercised rather than the validator: an unknown session is the answer a
+		// well-formed request gets here.
+		if resp.ErrorCode != "SESSION_NOT_FOUND" {
+			t.Fatalf("request %d got error_code=%q, want SESSION_NOT_FOUND: it never reached "+
+				"a handler, so this test is asserting validation and not rate limiting", i+1, resp.ErrorCode)
 		}
 	}
 
-	// 3rd request should be rate-limited
 	resp := sendRequestOverSocket(t, socketPath, req)
 	if resp.ErrorCode != "RATE_LIMIT_EXCEEDED" {
-		t.Fatalf("expected RATE_LIMIT_EXCEEDED on 3rd request, got error_code=%q", resp.ErrorCode)
+		t.Fatalf("expected RATE_LIMIT_EXCEEDED on request %d, got error_code=%q", budget+1, resp.ErrorCode)
 	}
 	if resp.Success {
 		t.Fatal("rate-limited response should not be successful")
 	}
 }
 
+// Requests that no handler ever sees are counted too.
+//
+// Before this they were free: validateRequest ran before any limiter, so a local peer
+// could send garbage as fast as it could write and the per-peer limit that exists to
+// bound accept, read, decode and validate never saw a single request. Every malformed
+// request was answered INVALID_REQUEST, forever, at no charge (#189).
+func TestMalformedRequestsAreChargedToThePeer(t *testing.T) {
+	// malformedPerAuthentication times the authenticate budget of 2.
+	_, socketPath := startSocketTestServer(t, newTestBroker(t), 2, 0)
+	budget := 2 * malformedPerAuthentication
+
+	// The request from the issue: check_session names no session, so it cannot pass
+	// validation and reaches no handler.
+	malformed := &Request{
+		Type:   "check_session",
+		UserID: "test-user",
+	}
+
+	for i := 0; i < budget; i++ {
+		resp := sendRequestOverSocket(t, socketPath, malformed)
+		if resp.ErrorCode != "INVALID_REQUEST" {
+			t.Fatalf("malformed request %d got error_code=%q, want INVALID_REQUEST", i+1, resp.ErrorCode)
+		}
+	}
+
+	resp := sendRequestOverSocket(t, socketPath, malformed)
+	if resp.ErrorCode != "RATE_LIMIT_EXCEEDED" {
+		t.Fatalf("malformed request %d got error_code=%q, want RATE_LIMIT_EXCEEDED: malformed "+
+			"requests are rejected before any limiter counts them, so a local peer can spin the "+
+			"accept loop, the decode and the validator for free (#189)", budget+1, resp.ErrorCode)
+	}
+
+	// And the peer's well-formed traffic is untouched by the flood it just sent. Every
+	// peer shares the malformed bucket, because every peer's uid is 0; if a spent
+	// malformed budget could refuse a valid request, this would be the host-wide
+	// bucket of #160 in a new place, and any local account could deny every login.
+	valid := &Request{
+		Type:      "check_session",
+		UserID:    "test-user",
+		SessionID: "no-such-session",
+	}
+	if resp := sendRequestOverSocket(t, socketPath, valid); resp.ErrorCode != "SESSION_NOT_FOUND" {
+		t.Fatalf("a well-formed request after an exhausted malformed budget got error_code=%q, "+
+			"want SESSION_NOT_FOUND: malformed traffic from one peer is denying real logins", resp.ErrorCode)
+	}
+}
+
+// The concurrent-auth cap refuses a second authentication while one is in flight.
+//
+// This asserted it through handleRequest and never touched the socket, so the
+// root-on-Linux skip it carried bought nothing and cost the assertion: CI runs
+// unprivileged on Linux, which is precisely where the guard fired (#189).
 func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
-	skipIfNotRootOnLinux(t)
 	tempDir, err := os.MkdirTemp("", "ipc-authlimit-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
