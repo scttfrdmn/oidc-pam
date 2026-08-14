@@ -25,6 +25,18 @@ const (
 	// ClassSession is the budget for check_session, refresh_session and
 	// revoke_session: requests about a session that already exists.
 	ClassSession RateClass = "session"
+
+	// ClassMalformed is the budget for requests no handler ever sees: a body that
+	// would not decode, or one validateRequest refused.
+	//
+	// (#189) It is keyed on the peer's uid, not on an account, because a request
+	// that failed validation has no account to key on — its user_id may be absent,
+	// or 64 KiB of anything the sender likes, which is also why the account budgets
+	// cannot simply be charged first: maxTrackedAccounts below relies on
+	// validateRequest having already bounded every key to 32 characters of
+	// [a-z0-9_-], and keying the map on an unvalidated field would let one peer fill
+	// it with keys of its own choosing and length.
+	ClassMalformed RateClass = "malformed"
 )
 
 const (
@@ -38,6 +50,18 @@ const (
 	// property whose absence is the bug: the budget let a login start and then
 	// refused it partway through.
 	pollsPerAuthentication = 20
+
+	// malformedPerAuthentication is the malformed-request budget as a multiple of the
+	// authenticate budget: the same size, deliberately.
+	//
+	// A correct client sends no malformed requests at all — pam_oidc builds its JSON
+	// from fixed fields — so any budget above zero is generous, and every peer shares
+	// this one bucket because every peer's uid is 0 (verifyPeerCredentials rejects
+	// anything else). Sharing is what made the host-wide bucket in #160 a bug, and it
+	// is safe here only because of what is charged to it: a request that decodes and
+	// validates is charged to its own per-account bucket instead, so exhausting this
+	// one cannot refuse a login (#189).
+	malformedPerAuthentication = 1
 
 	// maxTrackedAccounts bounds the bucket map. The keys are attacker-influenced
 	// (a request names the account it wants to log in as), so the map needs a
@@ -76,12 +100,18 @@ type bucket struct {
 // spending the budget of an account they name deliberately; closing that needs a
 // second key the client does not choose (source_ip, #169) and the pending-flow
 // accounting in #163.
+//
+// ClassMalformed is the one exception, and is keyed on the peer's uid: a request
+// that never decoded or never validated names no account that could be used as a
+// key. Before it existed, malformed requests were charged to nothing at all (#189).
 type RateLimiter struct {
 	// Token bucket parameters, per class.
-	maxTokens         float64 // burst size (== MaxRequestsPerMinute)
-	refillRate        float64 // tokens per second
-	sessionMaxTokens  float64
-	sessionRefillRate float64
+	maxTokens           float64 // burst size (== MaxRequestsPerMinute)
+	refillRate          float64 // tokens per second
+	sessionMaxTokens    float64
+	sessionRefillRate   float64
+	malformedMaxTokens  float64
+	malformedRefillRate float64
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -101,18 +131,22 @@ type RateLimiter struct {
 //
 // maxRequestsPerMinute is the budget for new authentications, per account.
 // Session requests get pollsPerAuthentication times as many, since one
-// authentication is followed by many of them.
+// authentication is followed by many of them. Malformed requests get
+// malformedPerAuthentication times as many, per peer uid.
 func NewRateLimiter(maxRequestsPerMinute, maxConcurrentAuths int) *RateLimiter {
 	sessionPerMinute := float64(maxRequestsPerMinute) * pollsPerAuthentication
+	malformedPerMinute := float64(maxRequestsPerMinute) * malformedPerAuthentication
 
 	rl := &RateLimiter{
-		maxTokens:          float64(maxRequestsPerMinute),
-		refillRate:         float64(maxRequestsPerMinute) / 60.0,
-		sessionMaxTokens:   sessionPerMinute,
-		sessionRefillRate:  sessionPerMinute / 60.0,
-		buckets:            make(map[string]*bucket),
-		maxConcurrentAuths: int32(maxConcurrentAuths),
-		stopChan:           make(chan struct{}),
+		maxTokens:           float64(maxRequestsPerMinute),
+		refillRate:          float64(maxRequestsPerMinute) / 60.0,
+		sessionMaxTokens:    sessionPerMinute,
+		sessionRefillRate:   sessionPerMinute / 60.0,
+		malformedMaxTokens:  malformedPerMinute,
+		malformedRefillRate: malformedPerMinute / 60.0,
+		buckets:             make(map[string]*bucket),
+		maxConcurrentAuths:  int32(maxConcurrentAuths),
+		stopChan:            make(chan struct{}),
 	}
 
 	rl.wg.Add(1)
@@ -126,12 +160,10 @@ func NewRateLimiter(maxRequestsPerMinute, maxConcurrentAuths int) *RateLimiter {
 // (maxTokens <= 0), it always returns true.
 //
 // An empty account is a valid key: it is the one every request that names no
-// account shares, and there is no reason to exempt it.
+// account shares, and there is no reason to exempt it. For ClassMalformed the
+// second argument is the peer's uid rather than an account (#189).
 func (rl *RateLimiter) Allow(class RateClass, account string) bool {
-	maxTokens, refillRate := rl.maxTokens, rl.refillRate
-	if class == ClassSession {
-		maxTokens, refillRate = rl.sessionMaxTokens, rl.sessionRefillRate
-	}
+	maxTokens, refillRate := rl.limitsFor(class)
 	if maxTokens <= 0 {
 		return true
 	}
@@ -171,6 +203,20 @@ func (rl *RateLimiter) Allow(class RateClass, account string) bool {
 
 	b.tokens--
 	return true
+}
+
+// limitsFor returns the burst size and refill rate of a class's buckets. A class
+// with no configured budget returns the authenticate budget, so a class added
+// without its own parameters is bounded rather than unlimited.
+func (rl *RateLimiter) limitsFor(class RateClass) (maxTokens, refillRate float64) {
+	switch class {
+	case ClassSession:
+		return rl.sessionMaxTokens, rl.sessionRefillRate
+	case ClassMalformed:
+		return rl.malformedMaxTokens, rl.malformedRefillRate
+	default:
+		return rl.maxTokens, rl.refillRate
+	}
 }
 
 // makeRoom frees a slot in a full bucket map: idle buckets first, and failing
