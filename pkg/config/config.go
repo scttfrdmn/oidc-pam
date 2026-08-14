@@ -171,6 +171,31 @@ type AuthenticationConfig struct {
 	GeoIPDatabasePath     string                          `mapstructure:"geoip_database_path"`
 	LocationHistory       LocationHistoryConfig           `mapstructure:"location_history"`
 
+	// MaxPendingAuthsPerSource caps the authentications one account may have in
+	// progress from one source address at the same time — logins that have started a
+	// device flow and have not been approved yet.
+	//
+	// (#163) Pending logins used to be counted against MaxConcurrentSessions, which
+	// is keyed on the account alone. The account is the one field of an authenticate
+	// request that an unauthenticated remote client chooses, so that cap could be
+	// filled on somebody else's behalf and their next login refused. This one is
+	// keyed on the account *and* the address the login came from, which the client
+	// does not choose. Zero means the broker's default; see
+	// Broker.maxPendingAuthsPerSource for the bounds applied to it.
+	MaxPendingAuthsPerSource int `mapstructure:"max_pending_auths_per_source"`
+
+	// PendingAuthLifetime is how long an authentication that is never completed may
+	// hold one of those slots, measured on the broker's clock rather than on the
+	// device code's. Zero means the default. A provider may issue a device code good
+	// for 24 hours, and an abandoned login held its slot — and until #163 a slice of
+	// its account's session cap — for that entire time.
+	PendingAuthLifetime time.Duration `mapstructure:"pending_auth_lifetime"`
+
+	// RequireLocalAccount refuses a login for an account the broker cannot resolve
+	// locally, before the request reaches the identity provider at all. Defaults to
+	// true (set in setDefaults). See Broker.denyIfNoLocalAccount.
+	RequireLocalAccount bool `mapstructure:"require_local_account"`
+
 	// AllowPrivilegedAccounts names the privileged local accounts an OIDC identity
 	// may log in as. By default no identity may bind to uid 0 or to any account with
 	// uid < PrivilegedUIDThreshold, whatever the token says, because that binding is
@@ -548,6 +573,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("authentication.token_lifetime", "8h")
 	v.SetDefault("authentication.refresh_threshold", "1h")
 	v.SetDefault("authentication.max_concurrent_sessions", 10)
+	// (#163) An unfinished login is bounded per (account, source address) and by its
+	// own clock, and a login for an account this host does not have is refused before
+	// it reaches the provider.
+	v.SetDefault("authentication.max_pending_auths_per_source", 5)
+	v.SetDefault("authentication.pending_auth_lifetime", "15m")
+	v.SetDefault("authentication.require_local_account", true)
 
 	// Security defaults
 	v.SetDefault("security.audit_enabled", true)

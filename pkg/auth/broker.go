@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -37,7 +36,6 @@ type Broker struct {
 	stopChan              chan struct{}
 	wg                    sync.WaitGroup
 	metrics               *oidcmetrics.Metrics // nil when metrics are disabled
-	pendingFlows          int64                // atomic counter of in-progress device authorization goroutines
 	version               string               // build version, set via SetVersion; reported by Status
 	startedAt             time.Time            // when Start ran; zero until then. Reported by Status
 
@@ -118,6 +116,19 @@ type Session struct {
 	RequireDeviceTrust bool
 
 	Metadata map[string]interface{}
+
+	// cancel is closed when a session that has not completed its device flow is
+	// removed from the store, which is how the goroutine polling for that
+	// authorization learns to stop. It is nil once the flow has completed, and nil on
+	// a session built by anything other than Authenticate — a nil channel simply
+	// never fires in the poll loop's select.
+	//
+	// (#163) Without it, a pending session and its polling goroutine had independent
+	// lifetimes: revoking, sweeping or displacing the session left the goroutine
+	// holding a live device code and polling the provider for it until the code's own
+	// expiry, up to 24 hours later. A cap on how many pending logins the host holds
+	// means nothing if the work each one costs outlives the accounting.
+	cancel chan struct{}
 }
 
 // AuthRequest represents an authentication request
@@ -530,9 +541,18 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		return b.createSuccessResponse(session), nil
 	}
 
-	// Check per-user session limit
+	// (#163) A login for an account this host does not have is refused here, before
+	// policy, before the provider is contacted and before it can take a slot in the
+	// pending-flow pool.
+	if response := b.denyIfNoLocalAccount(req); response != nil {
+		return response, nil
+	}
+
+	// Check per-user session limit. Only established sessions count towards it: see
+	// countActiveUserSessions, and admitPendingSession for the cap that bounds the
+	// logins still waiting to become sessions (#163).
 	maxSessions := b.config.Authentication.MaxConcurrentSessions
-	if maxSessions > 0 && b.countUserSessions(req.UserID) >= maxSessions {
+	if maxSessions > 0 && b.countActiveUserSessions(req.UserID) >= maxSessions {
 		log.Warn().
 			Str("user_id", req.UserID).
 			Int("max_sessions", maxSessions).
@@ -626,9 +646,85 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		})
 	}
 
+	// Create the pending session — always generate the session ID server-side; never
+	// trust the client-supplied value to prevent session fixation/hijacking.
+	//
+	// (#163) The session is built and admitted *before* the provider is called, which
+	// is the other half of the accounting fix. It used to be inserted after the device
+	// authorization round trip and the host-wide cap checked after that, so a request
+	// that was about to be refused had already cost an authenticated POST to the
+	// provider's device endpoint with the broker's own client credentials, and had
+	// briefly occupied a session slot on the way out. Admission now decides first and
+	// the provider is only asked on behalf of a login that has somewhere to live.
+	sessionID, err := generateSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate session ID: %w", err)
+	}
+	createdAt := time.Now()
+	session := &Session{
+		ID:        sessionID,
+		UserID:    req.UserID,
+		Provider:  provider.Name,
+		LoginType: req.LoginType,
+		DeviceID:  req.DeviceID,
+		CreatedAt: createdAt,
+		// A pending session's expiry is the deadline on the *unfinished* login, not the
+		// session lifetime it will get if it completes: pendingAuthLifetime is minutes,
+		// and the real expiry — token_lifetime bounded by the policy's
+		// max_session_duration (#212) — is computed by sessionExpiry when the flow
+		// completes and the session becomes one.
+		ExpiresAt:    createdAt.Add(b.pendingAuthLifetime()),
+		MaxDuration:  policyResult.MaxDuration,
+		LastAccessed: createdAt,
+		SourceIP:     req.SourceIP,
+		UserAgent:    req.UserAgent,
+		// TokenFingerprint stays unset until there is a token to fingerprint (#219):
+		// pollDeviceAuthorization fills it in from the granted token. What it briefly
+		// held instead was the device code — the live credential for this very flow —
+		// in a field documented and copied everywhere else as a safe hash.
+		IsActive:           false,
+		RequireDeviceTrust: policyResult.Metadata[MetadataRequireDeviceTrust] == true,
+		RiskScore:          policyResult.RiskScore,
+		Metadata:           req.Metadata,
+		cancel:             make(chan struct{}),
+	}
+
+	if admission := b.admitPendingSession(session, createdAt); !admission.admitted {
+		log.Warn().
+			Str("user_id", req.UserID).
+			Str("source_ip", req.SourceIP).
+			Str("error_code", admission.errorCode).
+			Int("pending_for_source", admission.perSource).
+			Int("pending_on_host", admission.hostTotal).
+			Msg("Refusing a login: too many authentications are already awaiting device approval")
+		// The record names both counts, because they are two different incidents: one
+		// account and address holding its whole budget of unfinished logins, against a
+		// host whose pending-flow pool is full. Without it there is nothing to alert on
+		// when a flood of logins nobody is completing starts refusing real ones, which
+		// is the condition these caps exist to survive (#163).
+		event := b.denialEvent(req, admission.errorCode, admission.reason)
+		event.SessionID = session.ID
+		event.Provider = provider.Name
+		event.Metadata["pending_for_source"] = admission.perSource
+		event.Metadata["pending_on_host"] = admission.hostTotal
+		event.Metadata["max_pending_auths_per_source"] = b.maxPendingAuthsPerSource()
+		event.Metadata["max_pending_auths_on_host"] = maxPendingAuthsOnHost
+		b.auditLogger.LogAuthEvent(event)
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    admission.errorCode,
+			ErrorMessage: admission.reason,
+		}, nil
+	}
+
 	// Initiate device flow
 	deviceFlow, err := provider.StartDeviceFlow(req)
 	if err != nil {
+		// The slot goes back immediately. A provider that is down or rate-limiting the
+		// broker answers every login this way, and a pool full of flows that never
+		// started would refuse the logins that come after it recovers.
+		b.removeSession(session.ID)
+
 		b.auditLogger.LogAuthEvent(security.AuditEvent{
 			EventType:    "device_flow_failed",
 			UserID:       req.UserID,
@@ -653,63 +749,6 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		qrCode = "" // Continue without QR code
 	}
 
-	// Create pending session — always generate the session ID server-side;
-	// never trust the client-supplied value to prevent session fixation/hijacking.
-	sessionID, err := generateSessionID()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate session ID: %w", err)
-	}
-	createdAt := time.Now()
-	session := &Session{
-		ID:        sessionID,
-		UserID:    req.UserID,
-		Provider:  provider.Name,
-		LoginType: req.LoginType,
-		DeviceID:  req.DeviceID,
-		CreatedAt: createdAt,
-		// (#212) sessionExpiry applies policyResult.MaxDuration — the minimum
-		// max_session_duration across every matching policy. It was computed on
-		// every login and then discarded, so `max_session_duration: 30m` on a sudo
-		// policy produced a session that lived for the full token_lifetime.
-		ExpiresAt:    b.sessionExpiry(createdAt, createdAt, policyResult.MaxDuration),
-		MaxDuration:  policyResult.MaxDuration,
-		LastAccessed: createdAt,
-		SourceIP:     req.SourceIP,
-		UserAgent:    req.UserAgent,
-		// TokenFingerprint is deliberately unset here (#219). A pending session has
-		// no token to fingerprint yet — pollDeviceAuthorization fills it in from the
-		// granted token — and what it held instead was the raw device code, the live
-		// credential for the flow this session is waiting on. The field is documented
-		// and treated everywhere else as a hash that is safe to carry and copy, which
-		// is exactly why putting a credential in it is worse than it looks.
-		IsActive:           false,
-		RequireDeviceTrust: policyResult.Metadata[MetadataRequireDeviceTrust] == true,
-		RiskScore:          policyResult.RiskScore,
-		Metadata:           req.Metadata,
-	}
-
-	b.setSession(session)
-
-	// Enforce a cap on concurrent device-flow goroutines to prevent goroutine exhaustion DoS.
-	const maxPendingFlows = 100
-	if atomic.AddInt64(&b.pendingFlows, 1) > maxPendingFlows {
-		atomic.AddInt64(&b.pendingFlows, -1)
-		b.removeSession(session.ID)
-		// The host, not this user: without the record there is nothing to alert on
-		// when a flood of unfinished flows starts refusing everyone's logins, which
-		// is the condition this cap exists to survive (#163).
-		event := b.denialEvent(req, "RATE_LIMITED", "too many pending device authorization flows on this host")
-		event.SessionID = session.ID
-		event.Provider = provider.Name
-		event.Metadata["max_pending_flows"] = maxPendingFlows
-		b.auditLogger.LogAuthEvent(event)
-		return &AuthResponse{
-			Success:      false,
-			ErrorCode:    "RATE_LIMITED",
-			ErrorMessage: "too many pending device authorization flows; try again later",
-		}, nil
-	}
-
 	// Start polling for device authorization in background
 	b.wg.Add(1)
 	// policyResult.RequiredGroups is the union of the global
@@ -719,13 +758,21 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	// re-evaluating policy there would evaluate it against a different clock.
 	go b.pollDeviceAuthorization(session, provider, deviceFlow, policyResult.RequiredGroups)
 
+	// The user is told when the code stops working, which is the earlier of the two
+	// deadlines — the provider's expires_in and this broker's own pending-flow window.
+	// Reporting the provider's alone promised a window the broker would not honour.
+	expiresAt := deviceFlow.ExpiresAt
+	if session.ExpiresAt.Before(expiresAt) {
+		expiresAt = session.ExpiresAt
+	}
+
 	return &AuthResponse{
 		Success:        true,
 		SessionID:      session.ID,
 		DeviceCode:     deviceFlow.UserCode,
 		DeviceURL:      deviceFlow.DeviceURL,
 		QRCode:         qrCode,
-		ExpiresAt:      deviceFlow.ExpiresAt,
+		ExpiresAt:      expiresAt,
 		RequiresDevice: true,
 		RiskScore:      policyResult.RiskScore,
 		Metadata: map[string]interface{}{
@@ -1191,6 +1238,7 @@ func (b *Broker) getAndRemoveIfExpiredSession(sessionID, userID string) (*Sessio
 		return session, true // valid — do not remove
 	}
 	delete(b.sessions, sessionID) // expired/inactive — remove atomically
+	stopPendingFlow(session)      // an unfinished flow's goroutine goes with it (#163)
 	return nil, false
 }
 
@@ -1252,26 +1300,351 @@ func (b *Broker) sessionExpiry(createdAt, now time.Time, maxDuration time.Durati
 func (b *Broker) removeSession(sessionID string) {
 	b.sessionMutex.Lock()
 	defer b.sessionMutex.Unlock()
-	if s, ok := b.sessions[sessionID]; ok && s.IsActive {
-		if b.metrics != nil {
-			b.metrics.ActiveSessions.Dec()
-		}
+	session, ok := b.sessions[sessionID]
+	if !ok {
+		return
+	}
+	if session.IsActive && b.metrics != nil {
+		b.metrics.ActiveSessions.Dec()
 	}
 	delete(b.sessions, sessionID)
+	stopPendingFlow(session)
 }
 
-// countUserSessions returns the number of active sessions for the given user.
-func (b *Broker) countUserSessions(userID string) int {
+// stopPendingFlow releases the goroutine polling for a pending session's device
+// authorization. Callers pass the value they have just deleted from the store, and
+// only that value, so the channel is closed exactly once: a Session pointer is
+// reachable under one key, and a key is deleted once (#163).
+func stopPendingFlow(session *Session) {
+	if session != nil && session.cancel != nil {
+		close(session.cancel)
+	}
+}
+
+// countActiveUserSessions returns the number of established sessions for the given
+// user — logins that completed their device flow.
+//
+// (#163) It used to count pending ones too, and that is the whole of the reported
+// denial of service. An authenticate request names the account it wants, and sshd
+// runs the PAM stack for whatever username a client offers before anything about
+// that client has been authenticated, so ten abandoned connection attempts against
+// one account filled that account's max_concurrent_sessions with logins nobody had
+// approved. The eleventh — the real one — was refused TOO_MANY_SESSIONS for as long
+// as the device codes lived. The cap is a bound on how much access one identity may
+// hold at once, so what belongs in it is access that was granted.
+func (b *Broker) countActiveUserSessions(userID string) int {
 	b.sessionMutex.RLock()
 	defer b.sessionMutex.RUnlock()
 
 	count := 0
 	for _, session := range b.sessions {
-		if session.UserID == userID {
+		if session.UserID == userID && session.IsActive {
 			count++
 		}
 	}
 	return count
+}
+
+// Bounds on the logins that have started a device flow and not finished one. They
+// are the accounting #163 is about: a pending login is work and memory the host has
+// committed on behalf of a client that has not authenticated at all, and until it
+// completes there is nothing about it that identifies anybody.
+const (
+	// maxPendingAuthsOnHost is the host-wide ceiling. It bounds the sessions, the
+	// polling goroutines and the provider traffic that unfinished logins cost.
+	//
+	// Reaching it does not refuse the login that arrives next: see
+	// admitPendingSession, which displaces a pending flow from whichever (account,
+	// source) pair holds the most. A hard refusal here is the second half of #163 —
+	// a hundred unfinished logins across ten invented usernames made every login on
+	// the host answer RATE_LIMITED.
+	maxPendingAuthsOnHost = 100
+
+	// defaultMaxPendingAuthsPerSource is how many unfinished logins one account may
+	// have in flight from one address. It is deliberately larger than one: a user
+	// opening several terminals at once starts a device flow per login, and each one
+	// holds its slot until the user approves it or the window closes.
+	defaultMaxPendingAuthsPerSource = 5
+
+	// hardMaxPendingAuthsPerSource is the ceiling on the configured value. A per-source
+	// cap at or above the host-wide pool is not a cap: one pair could fill the pool on
+	// its own, and the sharing rule that keeps the pool from becoming a lockout has
+	// nothing left to redistribute.
+	hardMaxPendingAuthsPerSource = 32
+
+	// The window an unfinished login may hold its slot for, and the bounds on the
+	// configured value. Fifteen minutes is already generous: the PAM module gives up
+	// after 90 seconds, so anything still pending after that is a login nobody is
+	// waiting for. The upper bound matters because the provider's own expires_in — the
+	// clock this used to run on — may be up to 24 hours (maxDeviceCodeExpiry), and the
+	// lower one because a window shorter than the walk to fetch a phone refuses
+	// legitimate logins.
+	defaultPendingAuthLifetime = 15 * time.Minute
+	minPendingAuthLifetime     = time.Minute
+	hardMaxPendingAuthLifetime = time.Hour
+)
+
+// maxPendingAuthsPerSource is the configured per-(account, source) cap, bounded at
+// both ends.
+//
+// Zero means the default rather than "no limit", and an oversized value saturates
+// instead of being honoured — the same fail-open clampToInt32 exists for in the IPC
+// limiter, where an unbounded int narrowed to int32 turned a very large configured
+// cap into no cap at all. This cap is what stops a client that has not authenticated
+// from taking somebody else's login capacity, so it has no off switch.
+func (b *Broker) maxPendingAuthsPerSource() int {
+	configured := 0
+	if b.config != nil {
+		configured = b.config.Authentication.MaxPendingAuthsPerSource
+	}
+	switch {
+	case configured <= 0:
+		return defaultMaxPendingAuthsPerSource
+	case configured > hardMaxPendingAuthsPerSource:
+		return hardMaxPendingAuthsPerSource
+	default:
+		return configured
+	}
+}
+
+// pendingAuthLifetime is how long an unfinished login may hold its slot, bounded at
+// both ends for the reasons on the constants above.
+func (b *Broker) pendingAuthLifetime() time.Duration {
+	configured := time.Duration(0)
+	if b.config != nil {
+		configured = b.config.Authentication.PendingAuthLifetime
+	}
+	switch {
+	case configured <= 0:
+		return defaultPendingAuthLifetime
+	case configured < minPendingAuthLifetime:
+		return minPendingAuthLifetime
+	case configured > hardMaxPendingAuthLifetime:
+		return hardMaxPendingAuthLifetime
+	default:
+		return configured
+	}
+}
+
+// pendingSourceKey identifies the budget an unfinished login is charged against: the
+// account it names, together with the address it came from.
+//
+// (#163) The account on its own is what made the old accounting usable as a weapon.
+// It is the one field of an authenticate request a remote client chooses freely —
+// sshd runs the PAM stack for whatever username it is offered, before anything about
+// the connection has been authenticated — so any cap keyed on it alone can be filled
+// on somebody else's behalf. The source address is not chosen: it is where the TCP
+// connection came from, and the PAM module fills it in from PAM_RHOST rather than
+// from anything the client sends. Keyed on the pair, an attacker can exhaust the
+// budget of (victim, attacker's own address) and nothing else, while the victim's own
+// logins draw on a different budget.
+//
+// A login with no source address — the console, or a PAM_RHOST that is a hostname
+// (#169) — shares one budget per account. Those cannot be produced remotely, which is
+// what makes sharing acceptable here.
+func pendingSourceKey(userID, sourceIP string) string {
+	// NUL cannot appear in either half, so the two fields cannot be confused for one
+	// another however they are spelled.
+	return userID + "\x00" + sourceIP
+}
+
+// pendingAdmission is what admitPendingSession decided, and why.
+type pendingAdmission struct {
+	admitted  bool
+	errorCode string
+	reason    string
+	perSource int    // unfinished logins already held by this (account, source) pair
+	hostTotal int    // unfinished logins already held by the host
+	displaced string // session ID dropped to make room, empty if none
+}
+
+// admitPendingSession stores a session for a login whose device flow has not started
+// yet, if the (account, source) pair and the host have room for another one, and
+// reports what it decided.
+//
+// Counting and inserting happen under one write lock because "there is room" is only
+// true at the instant it is observed. The check and the insert used to sit either side
+// of a device-authorization round trip, so every request that arrived during one
+// passed the same check.
+//
+// An entry whose deadline has passed is not counted. It will go when its own polling
+// goroutine reaches the same deadline, or at the next sweep, and until then a cap that
+// counted it would refuse logins on behalf of one that is already over — the sweep
+// runs every five minutes, so that is five minutes of refusals owed to nothing.
+//
+// When the host-wide pool is full the request is not refused outright: the oldest
+// pending flow of whichever pair holds the most is displaced to make room, and only a
+// pair that holds strictly more than the requester can be displaced. That is what
+// stops the pool being the denial of service it exists to prevent. A client holding
+// unfinished logins for a hundred different accounts cannot refuse the hundred-and-
+// first login, because a pair holding none always displaces a pair holding several;
+// and it cannot protect its own by hoarding, because holding the most is exactly what
+// selects it. It is the argument the rate limiter's bucket eviction rests on
+// (maxTrackedAccounts): spending the budget requires being the biggest holder of it,
+// which is what makes you the one who pays.
+func (b *Broker) admitPendingSession(session *Session, now time.Time) pendingAdmission {
+	key := pendingSourceKey(session.UserID, session.SourceIP)
+	perSourceCap := b.maxPendingAuthsPerSource()
+
+	b.sessionMutex.Lock()
+	defer b.sessionMutex.Unlock()
+
+	counts := make(map[string]int)
+	oldest := make(map[string]*Session)
+	hostTotal := 0
+	for _, s := range b.sessions {
+		if s.IsActive {
+			continue
+		}
+		if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now) {
+			continue
+		}
+		k := pendingSourceKey(s.UserID, s.SourceIP)
+		counts[k]++
+		hostTotal++
+		if prev, seen := oldest[k]; !seen || s.CreatedAt.Before(prev.CreatedAt) {
+			oldest[k] = s
+		}
+	}
+
+	mine := counts[key]
+	if mine >= perSourceCap {
+		return pendingAdmission{
+			errorCode: "TOO_MANY_PENDING_AUTHS",
+			reason: "too many authentications from this address are already awaiting device " +
+				"approval for this account; complete or abandon one and try again",
+			perSource: mine,
+			hostTotal: hostTotal,
+		}
+	}
+
+	admission := pendingAdmission{admitted: true, perSource: mine, hostTotal: hostTotal}
+
+	if hostTotal >= maxPendingAuthsOnHost {
+		displaced := pendingToDisplace(counts, oldest, mine)
+		if displaced == nil {
+			// Nobody holds more than this requester does, so there is no share to
+			// redistribute and the pool really is full of logins with as good a claim as
+			// this one. Refusing is the only answer left, and it cannot be provoked by a
+			// client holding pending flows under other keys.
+			return pendingAdmission{
+				errorCode: "RATE_LIMITED",
+				reason:    "too many pending device authorization flows on this host; try again shortly",
+				perSource: mine,
+				hostTotal: hostTotal,
+			}
+		}
+		delete(b.sessions, displaced.ID)
+		stopPendingFlow(displaced)
+		admission.displaced = displaced.ID
+		log.Warn().
+			Str("displaced_session_id", displaced.ID).
+			Str("displaced_user_id", displaced.UserID).
+			Str("displaced_source_ip", displaced.SourceIP).
+			Int("pending_on_host", hostTotal).
+			Msg("Pending device authorization pool is full; displaced the oldest flow of its " +
+				"largest holder to admit another login")
+	}
+
+	b.sessions[session.ID] = session
+	return admission
+}
+
+// pendingToDisplace picks the pending session to drop when the host-wide pool is
+// full: the oldest one belonging to whichever (account, source) pair holds the most,
+// and only if that pair holds strictly more than the requester's `mine`. It returns
+// nil when no pair does, which is the caller's signal to refuse instead. Callers hold
+// the session lock.
+func pendingToDisplace(counts map[string]int, oldest map[string]*Session, mine int) *Session {
+	var pick *Session
+	pickCount := 0
+
+	for key, count := range counts {
+		if count <= mine {
+			continue
+		}
+		candidate := oldest[key]
+		if candidate == nil {
+			continue
+		}
+		switch {
+		case pick == nil, count > pickCount, count == pickCount && candidate.CreatedAt.Before(pick.CreatedAt):
+			pick, pickCount = candidate, count
+		}
+	}
+
+	return pick
+}
+
+// denyIfNoLocalAccount refuses a login for an account this host does not have, and
+// returns nil when the login may proceed.
+//
+// (#163) Nothing checked that the requested account exists until the device flow had
+// already completed, by which point the broker had spent an authenticated POST to the
+// provider's device endpoint with its own client credentials and given the login a
+// slot in the pending-flow pool. sshd runs its PAM stack for whatever username it is
+// offered — deliberately, so that a valid and an invalid user cost the same time — so
+// every ssh scanner on the internet was starting device authorizations against the
+// site's identity provider from an unauthenticated connection, and could fill the
+// host's pending pool with names that belong to nobody.
+//
+// Nothing is lost by refusing early: sshd needs a passwd entry for the account once
+// the stack returns, and verifyIdentityBinding resolves the same account again when
+// the flow completes, so such a login could never have succeeded. What changes is only
+// what it costs to ask.
+//
+// A lookup that *fails* is not read as "no such account". That is not something this
+// gate knows, and refusing every login on the host while NSS is briefly unavailable is
+// the same denial of service by another route. The privileged-account guard on the
+// completion path is the one that fails closed on an unreadable passwd file (#159);
+// this one exists to make a doomed login cheap, not to decide anything.
+//
+// The cost is an enumeration oracle that did not exist before: a remote client can
+// tell a real local account from an invented one by whether it is offered a device
+// code. That is the deliberate trade — local usernames on a host that federates its
+// logins are rarely secret, and are usually derivable from the addresses the IdP
+// publishes, whereas an unauthenticated client spending a site's IdP quota is the
+// issue being fixed. Operators who need the old behaviour set
+// authentication.require_local_account: false.
+func (b *Broker) denyIfNoLocalAccount(req *AuthRequest) *AuthResponse {
+	if b.config == nil || !b.config.Authentication.RequireLocalAccount {
+		return nil
+	}
+
+	lookup := b.lookupLocalUID
+	if lookup == nil {
+		lookup = lookupLocalUID
+	}
+
+	_, exists, err := lookup(req.UserID)
+	switch {
+	case err != nil:
+		log.Warn().
+			Err(err).
+			Str("user_id", req.UserID).
+			Msg("Could not determine whether the requested account exists locally; " +
+				"continuing with the login, which the identity binding will decide")
+		return nil
+	case exists:
+		return nil
+	}
+
+	log.Warn().
+		Str("user_id", req.UserID).
+		Str("source_ip", req.SourceIP).
+		Msg("Refusing a login for an account this host does not have, before contacting the provider")
+
+	b.auditLogger.LogAuthEvent(b.denialEvent(req, "NO_LOCAL_ACCOUNT",
+		"no such local account on this host; refused before starting a device authorization"))
+
+	// The message says no more than the policy denial's does. The client learns which
+	// accounts exist from the presence of a device code either way, but the audit trail
+	// is where the reason belongs.
+	return &AuthResponse{
+		Success:      false,
+		ErrorCode:    "NO_LOCAL_ACCOUNT",
+		ErrorMessage: "Access denied",
+	}
 }
 
 func (b *Broker) createSuccessResponse(session *Session) *AuthResponse {
@@ -1354,7 +1727,6 @@ func providerPriority(provider *OIDCProvider) int {
 
 func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow, requiredGroups []string) {
 	defer b.wg.Done()
-	defer atomic.AddInt64(&b.pendingFlows, -1)
 
 	// interval is not fixed: RFC 8628 §3.5 lets the provider ask for a slower
 	// poll rate mid-flow with slow_down, and requires the client to comply.
@@ -1362,12 +1734,53 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 	ticker := time.NewTicker(time.Duration(interval) * b.pollUnit())
 	defer ticker.Stop()
 
-	timeout := time.NewTimer(time.Until(deviceFlow.ExpiresAt))
+	// (#163) The flow ends at the earlier of the code's own expiry and the deadline on
+	// the slot its session holds. Running on the provider's expires_in alone let a
+	// device code the provider had issued for 24 hours keep a pending session — and a
+	// goroutine polling for it — alive for the whole of that time, on a lifetime the
+	// broker had no say in.
+	deadline := deviceFlow.ExpiresAt
+	if !session.ExpiresAt.IsZero() && session.ExpiresAt.Before(deadline) {
+		deadline = session.ExpiresAt
+	}
+	timeout := time.NewTimer(time.Until(deadline))
 	defer timeout.Stop()
 
 	for {
 		select {
 		case <-b.stopChan:
+			return
+		case <-session.cancel:
+			// The session was removed while the flow was still running: revoked by an
+			// operator, swept for expiry, or displaced to make room for another login.
+			// Nothing can be done with an authorization for a session that no longer
+			// exists, and a goroutine that keeps a device code warm after its slot is
+			// gone is how a cap on pending flows stops being a cap. A nil channel — every
+			// session not built by Authenticate — never selects here.
+			log.Warn().
+				Str("session_id", session.ID).
+				Str("user_id", session.UserID).
+				Msg("Abandoning device authorization for a session that was revoked, expired or displaced")
+			if b.metrics != nil {
+				b.metrics.RecordAuth(provider.Name, "failure", "SESSION_GONE")
+			}
+			// The same record, with the same code, that the completion path writes when
+			// it finds the session gone (#217). Reaching it here rather than there is the
+			// only difference the cancellation makes: an operator's revocation still
+			// leaves a record saying the login it interrupted was refused, and now
+			// nothing was minted in the meantime for that record to have to withdraw.
+			b.auditLogger.LogAuthEvent(security.AuditEvent{
+				EventType: "authentication_denied",
+				UserID:    session.UserID,
+				SessionID: session.ID,
+				SourceIP:  session.SourceIP,
+				Provider:  provider.Name,
+				Success:   false,
+				ErrorCode: "SESSION_GONE",
+				ErrorMessage: "the session was revoked, expired or displaced before device " +
+					"authorization completed; polling was abandoned",
+				Timestamp: time.Now(),
+			})
 			return
 		case <-timeout.C:
 			// Device flow expired
@@ -1603,6 +2016,20 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			updated.IsActive = true
 			updated.DeviceTrusted = userInfo.DeviceTrusted
 
+			// (#163) The session stops being a pending flow here, so its expiry stops
+			// being the pending window's deadline — minutes — and becomes the session
+			// lifetime: one token_lifetime from now, still bounded by the
+			// max_session_duration of the policy that admitted the login (#212).
+			// LastAccessed moves with it, because a session whose idle clock started
+			// before the user had approved anything can be swept the moment it opens.
+			completedAt := time.Now()
+			updated.ExpiresAt = b.sessionExpiry(session.CreatedAt, completedAt, session.MaxDuration)
+			updated.LastAccessed = completedAt
+
+			// There is no pending flow left to cancel, and the channel must not be
+			// reachable from two stored sessions at once — see stopPendingFlow.
+			updated.cancel = nil
+
 			// Generate SSH key if needed
 			if updated.SSHKeyID == "" {
 				sshKey, err := b.generateSSHKey(&updated)
@@ -1767,6 +2194,10 @@ func (b *Broker) expireSessions(now time.Time) {
 		if session.ExpiresAt.Before(now) || idleExpired {
 			expiredSessions = append(expiredSessions, session)
 			delete(b.sessions, id)
+			// A login that never completed has a goroutine still polling for it; the
+			// sweep is the backstop for the ones whose own deadline timer did not fire
+			// first (#163).
+			stopPendingFlow(session)
 		}
 	}
 	b.sessionMutex.Unlock()

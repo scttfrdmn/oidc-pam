@@ -92,6 +92,23 @@ authentication:
 	if cfg.Server.LogLevel != "info" {
 		t.Errorf("Expected default log level 'info', got '%s'", cfg.Server.LogLevel)
 	}
+
+	// (#163) The bounds on logins nobody has completed yet apply to a file written
+	// before they existed, which is every file already deployed. A default of zero
+	// would leave those hosts with the accounting that let an unauthenticated client
+	// exhaust an account's session limit.
+	if cfg.Authentication.MaxPendingAuthsPerSource != 5 {
+		t.Errorf("max_pending_auths_per_source = %d, want the default 5",
+			cfg.Authentication.MaxPendingAuthsPerSource)
+	}
+	if cfg.Authentication.PendingAuthLifetime != 15*time.Minute {
+		t.Errorf("pending_auth_lifetime = %s, want the default 15m",
+			cfg.Authentication.PendingAuthLifetime)
+	}
+	if !cfg.Authentication.RequireLocalAccount {
+		t.Error("require_local_account defaulted to false, so a login for an account this host " +
+			"does not have still reaches the identity provider")
+	}
 }
 
 func TestConfigValidation(t *testing.T) {
