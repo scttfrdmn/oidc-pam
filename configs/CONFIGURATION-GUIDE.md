@@ -411,14 +411,37 @@ audit:
     - "policy_violations"
 ```
 
+## Authentication Policies
+
+An `authentication.policies` entry is selected by its **name**:
+
+- `default` applies to **every host**. Use this unless you need per-host rules.
+- Any other name is matched against the **hostname of the machine being logged
+  into** — exactly, or as a domain component. A policy named `production`
+  applies on `production` and on `api.production.example.com`, but not on
+  `prod-login-01`.
+
+The name is the only selector a policy has. There is no way to scope a policy to
+an operation (`sudo`, `su`) or to an environment that is not part of the
+hostname; a policy whose name matches no host is inert, and the broker logs a
+warning naming it at startup.
+
+Every matching policy applies. `require_groups` is the union of the global
+`authentication.require_groups` and every matching policy's, and
+`max_session_duration` is the smallest — so an additional matching policy can
+only further restrict access.
+
 ## Environment-Specific Configurations
+
+Deploy one configuration per environment and name its policy `default`, so that
+it applies to the hosts in that environment regardless of what they are called.
 
 ### Development Environment
 
 ```yaml
 authentication:
   policies:
-    development:
+    default:
       require_groups: ["developers"]
       max_session_duration: "8h"
       allow_untrusted_devices: true
@@ -434,7 +457,7 @@ security:
 ```yaml
 authentication:
   policies:
-    staging:
+    default:
       require_groups: ["developers", "qa-team"]
       max_session_duration: "4h"
       require_device_trust: true
@@ -446,7 +469,7 @@ authentication:
 ```yaml
 authentication:
   policies:
-    production:
+    default:
       require_groups: ["production-access"]
       max_session_duration: "2h"
       require_device_trust: true

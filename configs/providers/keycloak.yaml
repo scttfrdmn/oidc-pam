@@ -66,6 +66,13 @@ authentication:
   require_groups: ["linux-users"]
   
   # Keycloak-specific policies
+  # A policy is selected by its NAME: "default" applies to every host, any other
+  # name must match this host's name (exactly, or as a domain component, so
+  # "production" matches "api.production.example.com" but not "prod-login-01").
+  # A policy that matches no host never applies — the broker logs a warning
+  # naming it at startup. Rename the tier that applies to these hosts to
+  # "default", or name your hosts to match. Every matching policy applies:
+  # require_groups is the union of all matches and the global setting.
   policies:
     production:
       require_groups: ["production-access", "keycloak-admin"]

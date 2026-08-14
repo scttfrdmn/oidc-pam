@@ -422,7 +422,12 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 
 	// Start polling for device authorization in background
 	b.wg.Add(1)
-	go b.pollDeviceAuthorization(session, provider, deviceFlow)
+	// policyResult.RequiredGroups is the union of the global
+	// authentication.require_groups and every matching per-resource policy's
+	// require_groups. It has to be carried into the goroutine: the group check
+	// happens when the flow completes, long after this function has returned, and
+	// re-evaluating policy there would evaluate it against a different clock.
+	go b.pollDeviceAuthorization(session, provider, deviceFlow, policyResult.RequiredGroups)
 
 	return &AuthResponse{
 		Success:        true,
@@ -811,7 +816,7 @@ func providerPriority(provider *OIDCProvider) int {
 	return provider.Config.Priority
 }
 
-func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow) {
+func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow, requiredGroups []string) {
 	defer b.wg.Done()
 	defer atomic.AddInt64(&b.pendingFlows, -1)
 
@@ -929,7 +934,14 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 
 			// SECURITY (H-1): enforce required group membership. RequiredGroups
 			// was previously collected by the policy engine but never checked.
-			if err := b.verifyRequiredGroups(userInfo.Groups); err != nil {
+			//
+			// (#158) Enforce the list the policy engine resolved, not
+			// config.Authentication.RequireGroups. Reading the global key directly
+			// meant require_groups written under authentication.policies.<name> —
+			// the form QUICK-START.md and DEPLOYMENT.md both tell operators to use —
+			// was collected into PolicyResult.RequiredGroups and then never read by
+			// anything, so the documented config enforced no groups at all.
+			if err := b.verifyRequiredGroups(requiredGroups, userInfo.Groups); err != nil {
 				log.Warn().
 					Err(err).
 					Str("session_id", session.ID).
@@ -1412,12 +1424,16 @@ func classifyPollError(err error) string {
 	}
 }
 
-// verifyRequiredGroups enforces that the authenticated user is a member of all
-// globally required groups (Authentication.RequireGroups). Returns nil when no
-// groups are required. Comparison is exact and case-sensitive (group names are
-// provider-defined identifiers).
-func (b *Broker) verifyRequiredGroups(userGroups []string) error {
-	required := b.config.Authentication.RequireGroups
+// verifyRequiredGroups enforces that the authenticated user is a member of every
+// group in required. Returns nil when no groups are required. Comparison is exact
+// and case-sensitive (group names are provider-defined identifiers).
+//
+// required is supplied by the caller rather than read from config here, because the
+// effective list is the union of the global authentication.require_groups and the
+// require_groups of every matching per-resource policy — a union only the policy
+// engine can compute. See PolicyEngine.applyGlobalPolicies and
+// applyResourcePolicies.
+func (b *Broker) verifyRequiredGroups(required, userGroups []string) error {
 	if len(required) == 0 {
 		return nil
 	}
