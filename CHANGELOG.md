@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **`pam_oidc.so` no longer carries the Go runtime into `sshd`, and is compiled
+  with hardening flags (#198).** The module is loaded into every authenticating
+  `sshd` pre-auth child, as root, and holds a 16 KB broker response on the stack.
+  It was compiled with `-Wall -Wextra` and nothing else: no stack protector, no
+  `_FORTIFY_SOURCE`, and partial RELRO with a writable PLT.
+
+  It was also built as a Go `c-shared` library, which starts the Go runtime in
+  every process that `dlopen`s it. The runtime replaces the process's handlers for
+  `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGPIPE` and `SIGURG` with its own, adds
+  `SA_ONSTACK` to the handlers it leaves alone, runs its own threads, and marks the
+  library `DF_1_NODELETE` so `dlclose` cannot unload it. It did all of that in
+  `sshd` in service of no Go code: all six `pam_sm_*` entry points are C, they call
+  no Go, and the package exports no Go function to C, so the Go files in
+  `cmd/pam-module` are cgo wrappers that exist to let `go test` drive the C.
+
+  The module is now compiled from that one C file by the C compiler, with
+  `-fstack-protector-strong`, a `_FORTIFY_SOURCE` floor of 2 set in the source so a
+  distribution asking for a higher level keeps it, and `-Wl,-z,relro -Wl,-z,now
+  -Wl,-z,noexecstack`. The result is 70 KB rather than 2.4 MB, has full RELRO and a
+  guarded stack, starts no threads, installs no signal handlers, and can be
+  unloaded. Every SSH login in the end-to-end harness authenticates against it.
+
+  The same flags are in `bridge_linux.go`'s `#cgo` directives, so the C the tests
+  exercise is compiled the way the shipped module is. `-Werror` was deliberately
+  not added: the code is warning-clean today, but making a future compiler's new
+  diagnostic a build failure for anyone building from source is a different bargain
+  from the flags above, and CI compiles the module on every push anyway.
 - **Release artifacts are now signed and carry build provenance (#180).** Until
   now the only integrity material published was a `.sha256` file uploaded to the
   same release page as the tarball it describes, which detects a corrupted
@@ -39,6 +66,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the download; nothing checked the payload that actually reaches PAM.
 
 ### Fixed
+- **One script now builds `pam_oidc.so`, and it cannot finish without inspecting
+  what it built (#222).** A module with no PAM entry points in it builds and exits
+  0 — that is #140, and it shipped in every release before it was found — so
+  `scripts/verify-pam-module.sh` exists to read the artifact. Four places compiled
+  the module and one of them ran the verifier. The three that did not were
+  `scripts/build-simple.sh`, `scripts/build-releases.sh` — both since deleted as
+  unreferenced (#241) — and `make release`; the Makefile's `build-pam` and the e2e
+  image did verify, contrary to the issue.
+
+  Every remaining producer now calls `scripts/build-pam-module.sh`, which compiles
+  the module and runs the verifier over the result with no way to ask it not to.
+  `scripts/check-pam-module-producers.sh` (a `Validate` step, and
+  `make check-pam-producers`) fails the build if a second producer appears, because
+  a check every producer has to remember is one edit away from being forgotten
+  again.
+- A module can no longer be packaged as an architecture it was not built for.
+  `scripts/build-simple.sh` used to package one host-native `pam_oidc.so` as *both*
+  the `linux-amd64` and the `linux-arm64` artifact: it built the module as
+  `pam_oidc-native.so` and copied that file into every Linux package, so on an
+  arm64 host the amd64 tarball contained an arm64 module — a file that installs
+  cleanly and then fails at `dlopen` time, inside `sshd`'s auth path. The PAM helper
+  was packaged the same way. That script and `scripts/build-releases.sh` have since
+  been deleted (#241), which removes those two paths outright; what keeps the
+  property is that `build-pam-module.sh` now checks a module's machine type against
+  the architecture its name claims whenever a caller states one, and the release
+  workflow — the one path that publishes artifacts — states it for each.
 - The README's release-download snippet still read `VERSION=v0.4.0`, two releases
   stale, and every `curl`, `tar` and verification command below it interpolates
   that value — so the new signature-verification instructions would have been run

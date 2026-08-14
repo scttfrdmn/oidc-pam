@@ -233,6 +233,14 @@ jobs:
       - name: Check the cgo quarantine
         run: ./scripts/check-cgo-quarantine.sh
 
+      # #222: four places compiled pam_oidc.so and three of them did not inspect
+      # the result, which a build with no PAM entry points in it does not report
+      # (#140). scripts/build-pam-module.sh cannot finish without inspecting it, so
+      # what has to stay true is that nothing else compiles the module — a second
+      # producer is where the check gets forgotten again.
+      - name: Check one script is the only producer of the PAM module
+        run: ./scripts/check-pam-module-producers.sh
+
       # Every `uses:` in this directory must name a 40-hex commit SHA. A version
       # tag is mutable: whoever controls the action's repository can retarget it,
       # and the two references that were left unpinned sat between "build the PAM

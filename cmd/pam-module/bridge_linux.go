@@ -4,7 +4,9 @@ package main
 
 /*
 #cgo CFLAGS: -I${SRCDIR} -I/usr/include/security -Wall -Wextra
+#cgo CFLAGS: -fstack-protector-strong
 #cgo LDFLAGS: -lpam -ljson-c
+#cgo LDFLAGS: -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 #include "cgo_bridge.h"
 */
 import "C"
@@ -24,9 +26,17 @@ import "github.com/scttfrdmn/oidc-pam/pkg/pam"
 //
 // Keeping the "C" import behind a build tag is also what lets `go build ./...`
 // and `go test ./...` run on a developer's Mac (#141). On a non-Linux host this
-// package compiles to a trivial main with no C in it, which is why `make
-// build-pam` refuses to run outside Linux instead of quietly emitting an empty
-// module.
+// package compiles to a trivial main with no C in it, which is why
+// scripts/build-pam-module.sh refuses to run outside Linux instead of quietly
+// emitting an empty module.
+//
+// The hardening flags are here so that the C these tests exercise is compiled the
+// way the shipped module is compiled. The shipped module is not built by cgo —
+// scripts/build-pam-module.sh hands cgo_bridge_linux.c to the C compiler, which
+// is what keeps the Go runtime out of sshd (#198) — so this list and the one in
+// that script are two views of the same decision and are meant to agree. The
+// fortify level is set in cgo_bridge_linux.c rather than in either of them,
+// because it has to precede the first system header.
 
 // pamCodesFromHeaders is every PAM result code pkg/pam declares, read from the
 // headers this module is compiled against.

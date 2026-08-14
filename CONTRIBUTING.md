@@ -107,13 +107,28 @@ not have. Its cgo is behind a `//go:build linux` tag, so `go build ./...` and
 `go test ./...` work on a Mac — the C and the tests that drive it are simply
 absent there. Everything else, `pkg/pam` included, is pure Go.
 
-**The C must stay in `cmd/pam-module`.** cgo compiles only the C sources in the
-directory of the package being built, so C living anywhere else is not compiled
-into the module — and because a header supplies valid declarations, the build
-still exits 0 and produces a `.so` with no entry points in it. That shipped in
-every release before this one (#140). `scripts/verify-pam-module.sh` checks the
-built artifact for exactly that, and runs from `make build-pam`,
-`make verify-linux` and the release workflow.
+**The shipped module is C only, and nothing in it calls Go.** All six entry
+points are in `cgo_bridge_linux.c`; the package's Go files are cgo wrappers that
+let `go test` drive that C (cgo is not permitted in `_test.go` files, so they live
+in normal ones). `scripts/build-pam-module.sh` therefore compiles the one C file
+with the C compiler rather than building the package as a Go `c-shared` library,
+which is what keeps the Go runtime — its threads, its handlers for `SIGSEGV`,
+`SIGBUS`, `SIGFPE`, `SIGPIPE` and `SIGURG`, and `DF_1_NODELETE` — out of every
+`sshd` pre-auth child that loads the module (#198). **A `//export` in this package,
+or any other C→Go call, brings all of that back**, so it is a change to weigh
+rather than make in passing.
+
+**`scripts/build-pam-module.sh` is the only thing that builds the module.** The
+Makefile, both release scripts, the e2e image and the release workflow all call it,
+and it applies the hardening flags and inspects what it produced. That inspection
+cannot be separated from the build: a module with no entry points in it exits 0,
+because a header supplies valid declarations, and that shipped in every release
+before #140 was found. `make check-pam-producers`
+(`scripts/check-pam-module-producers.sh`) fails the build if a second producer
+appears — four producers with the check pasted into one of them is what #222 was.
+
+**The C must stay in `cmd/pam-module`** so `go test` still compiles it: cgo
+compiles only the C sources in the directory of the package being built.
 
 Two checks keep that quarantine from eroding: a `macOS (no PAM headers)` CI job
 that runs `go build/vet/test ./...` on a host with no PAM headers, and
@@ -121,6 +136,13 @@ that runs `go build/vet/test ./...` on a host with no PAM headers, and
 graph that `cmd/pam-module` is the only package with cgo files on Linux and that
 none has any on macOS. `make check-cgo` needs no headers and runs on any OS, so
 run it after touching a `#cgo` line or a build constraint.
+
+The `#cgo CFLAGS`/`LDFLAGS` in `bridge_linux.go` carry the same hardening flags as
+`scripts/build-pam-module.sh`, so the C the tests exercise is compiled the way the
+shipped module is compiled. Change one and change the other. `_FORTIFY_SOURCE` is
+set in `cgo_bridge_linux.c` instead of either, because it has to precede the first
+system header, and as a floor rather than an assignment so a distribution asking
+for a higher level keeps it.
 
 To exercise the C locally, run the sweep CI runs inside a Linux container:
 

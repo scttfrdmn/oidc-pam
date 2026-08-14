@@ -1,4 +1,4 @@
-.PHONY: build build-pam skip-pam test install clean lint fmt vet check-cgo tidy verify-linux help
+.PHONY: build build-pam skip-pam test install clean lint fmt vet check-cgo check-pam-producers tidy verify-linux help
 
 # Build variables
 BINARY_DIR := bin
@@ -71,21 +71,11 @@ build-broker:
 ## Build PAM module (Linux only; verifies the result is loadable)
 build-pam:
 	@echo "Building PAM module..."
-	@# The module's C bridge needs Linux-PAM (<security/pam_ext.h>) and json-c,
-	@# which macOS does not have, so the cgo in cmd/pam-module is behind a
-	@# //go:build linux tag. On another OS this would build a .so with no PAM
-	@# entry points in it, which is exactly the failure #140 was about — refuse
-	@# instead. Use `make verify-linux` to build and test in the container.
-	@if [ "$$(go env GOOS)" != "linux" ]; then \
-		echo "build-pam: the PAM module can only be built for Linux (GOOS=$$(go env GOOS))." >&2; \
-		echo "           Run 'make verify-linux', or build in a Linux container." >&2; \
-		exit 1; \
-	fi
-	@mkdir -p $(BINARY_DIR)
-	CGO_ENABLED=1 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE) ./cmd/pam-module
-	@# A build that emits a module with no pam_sm_* symbols exits 0, so the only
-	@# way to know it worked is to look at the artifact.
-	@./scripts/verify-pam-module.sh $(BINARY_DIR)/$(PAM_MODULE)
+	@# One script builds the module, everywhere: it applies the hardening flags,
+	@# refuses to run off Linux (where the C bridge's Linux-PAM and json-c headers
+	@# do not exist) and inspects the artifact it produced, because a module with
+	@# no pam_sm_* symbols in it builds and exits 0 (#140, #222).
+	@./scripts/build-pam-module.sh $(BINARY_DIR)/$(PAM_MODULE)
 
 ## Build PAM helper binary
 build-helper:
@@ -131,12 +121,12 @@ verify-linux:
 		-v oidc-pam-gocache:/root/.cache \
 		-w /src oidc-pam-verify \
 		sh -c './scripts/check-cgo-quarantine.sh \
+			&& ./scripts/check-pam-module-producers.sh \
 			&& go vet ./... \
 			&& go test -race ./... \
 			&& golangci-lint run --timeout=5m ./... \
 			&& echo "Building and verifying the PAM module..." \
-			&& CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /tmp/pam_oidc.so ./cmd/pam-module \
-			&& ./scripts/verify-pam-module.sh /tmp/pam_oidc.so'
+			&& ./scripts/build-pam-module.sh /tmp/pam_oidc.so'
 
 ## Install binaries to system locations
 install: build
@@ -199,6 +189,10 @@ vet:
 check-cgo:
 	@./scripts/check-cgo-quarantine.sh
 
+## Check nothing but build-pam-module.sh compiles the module (works on any OS)
+check-pam-producers:
+	@./scripts/check-pam-module-producers.sh
+
 ## Tidy dependencies
 tidy:
 	@echo "Tidying dependencies..."
@@ -226,15 +220,24 @@ docker-run:
 	docker run -it --rm oidc-pam:latest
 
 ## Create release build
+##
+## The broker, helper and admin CLI cross-compile from anywhere. The PAM module
+## does not: it is C, so it needs a compiler that targets the output architecture
+## and that architecture's PAM and json-c headers. Building it for the other
+## architecture here needs CC set to a cross-toolchain; build-pam-module.sh
+## refuses rather than writing a host-architecture module under a name that claims
+## otherwise. The released modules are built on a runner of each architecture —
+## see the build matrix in .github/workflows/release.yml, which is the release
+## path this target predates.
 release: clean
 	@echo "Creating release build..."
 	@mkdir -p $(BINARY_DIR)
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(BROKER_BINARY)-linux-amd64 ./cmd/broker
-	GOOS=linux GOARCH=amd64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-amd64 ./cmd/pam-module
+	./scripts/build-pam-module.sh $(BINARY_DIR)/$(PAM_MODULE)-linux-amd64 amd64
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY)-linux-amd64 ./cmd/pam-helper
 	GOOS=linux GOARCH=amd64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(ADMIN_BINARY)-linux-amd64 ./cmd/oidc-admin
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(BROKER_BINARY)-linux-arm64 ./cmd/broker
-	GOOS=linux GOARCH=arm64 go build -buildmode=c-shared $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(PAM_MODULE)-linux-arm64 ./cmd/pam-module
+	./scripts/build-pam-module.sh $(BINARY_DIR)/$(PAM_MODULE)-linux-arm64 arm64
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(HELPER_BINARY)-linux-arm64 ./cmd/pam-helper
 	GOOS=linux GOARCH=arm64 go build $(GO_BUILD_FLAGS) -o $(BINARY_DIR)/$(ADMIN_BINARY)-linux-arm64 ./cmd/oidc-admin
 
@@ -269,6 +272,7 @@ help:
 	@echo "  fmt             Format code"
 	@echo "  vet             Run go vet"
 	@echo "  check-cgo       Check cgo is confined to cmd/pam-module"
+	@echo "  check-pam-producers  Check one script is the only producer of the PAM module"
 	@echo "  tidy            Tidy dependencies"
 	@echo "  coverage        Generate coverage report"
 	@echo "  security        Run security scan"

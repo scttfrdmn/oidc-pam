@@ -15,9 +15,11 @@
 # a module that PAM could load and find nothing in, so every C-side fix was
 # absent from the artifact regardless of what the source said.
 #
-# A compiler cannot catch that; only inspecting the result can. Anything that
-# produces a shipped .so must run this — `make build-pam` and the release
-# workflow both do.
+# A compiler cannot catch that; only inspecting the result can. Rather than ask
+# every producer to remember this step — which three of them did not (#222) —
+# scripts/build-pam-module.sh is the only thing that builds the module and it runs
+# this itself, on every build. scripts/check-pam-module-producers.sh fails the
+# build if a second producer appears.
 
 set -euo pipefail
 
