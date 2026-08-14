@@ -66,15 +66,28 @@ type OIDCProvider struct {
 
 // UserMapping defines how to map OIDC claims to user attributes
 type UserMapping struct {
-	UsernameClaim       string            `mapstructure:"username_claim"`
-	EmailClaim          string            `mapstructure:"email_claim"`
-	NameClaim           string            `mapstructure:"name_claim"`
-	GroupsClaim         string            `mapstructure:"groups_claim"`
-	RolesClaim          string            `mapstructure:"roles_claim"`
-	DepartmentClaim     string            `mapstructure:"department_claim"`
-	OrganizationClaim   string            `mapstructure:"organization_claim"`
-	InstitutionClaim    string            `mapstructure:"institution_claim"`
-	OrcidClaim          string            `mapstructure:"orcid_claim"`
+	UsernameClaim     string `mapstructure:"username_claim"`
+	EmailClaim        string `mapstructure:"email_claim"`
+	NameClaim         string `mapstructure:"name_claim"`
+	GroupsClaim       string `mapstructure:"groups_claim"`
+	RolesClaim        string `mapstructure:"roles_claim"`
+	DepartmentClaim   string `mapstructure:"department_claim"`
+	OrganizationClaim string `mapstructure:"organization_claim"`
+	InstitutionClaim  string `mapstructure:"institution_claim"`
+	OrcidClaim        string `mapstructure:"orcid_claim"`
+	// StripEmailDomain allows the local part of an email-shaped username claim to
+	// bind to a local account: "alice@example.com" may log in as "alice". It is off
+	// by default and requires AllowedEmailDomains to be set, because on its own it
+	// lets anyone who can choose the local part of their address — a guest identity,
+	// a second verified domain, self-service alias editing — pick which local
+	// account they bind to. See Broker.verifyIdentityBinding (#159).
+	StripEmailDomain bool `mapstructure:"username_claim_strip_domain"`
+
+	// AllowedEmailDomains pins the domains whose local part may be stripped. A
+	// claim from any other domain is refused even when StripEmailDomain is set.
+	// Required when StripEmailDomain is set; ignored otherwise.
+	AllowedEmailDomains []string `mapstructure:"allowed_email_domains"`
+
 	UsernameTemplate    string            `mapstructure:"username_template"`
 	DisplayNameTemplate string            `mapstructure:"display_name_template"`
 	GroupPrefix         string            `mapstructure:"group_prefix"`
@@ -122,6 +135,14 @@ type AuthenticationConfig struct {
 	RiskPolicies          []RiskPolicy                    `mapstructure:"risk_policies"`
 	GeoIPDatabasePath     string                          `mapstructure:"geoip_database_path"`
 	LocationHistory       LocationHistoryConfig           `mapstructure:"location_history"`
+
+	// AllowPrivilegedAccounts names the privileged local accounts an OIDC identity
+	// may log in as. By default no identity may bind to uid 0 or to any account with
+	// uid < PrivilegedUIDThreshold, whatever the token says, because that binding is
+	// the highest-value target on the host and every other check in front of it is
+	// operator-configurable. Listing an account here is a deliberate exception.
+	// See Broker.verifyLocalAccountIsBindable (#159).
+	AllowPrivilegedAccounts []string `mapstructure:"allow_privileged_accounts"`
 }
 
 // AuthenticationPolicy defines access control policies
@@ -384,6 +405,12 @@ func loadFromEnvironment(v *viper.Viper) (*Config, error) {
 				ClientID: clientID,
 				Scopes:   []string{"openid", "email", "profile"},
 				UserMapping: UserMapping{
+					// (#159) No StripEmailDomain here, deliberately. Enabling it requires
+					// pinning allowed_email_domains, and an environment-derived config has
+					// no way to know the operator's domain. So an "email" claim must equal
+					// the local account name; if it does not, verifyIdentityBinding refuses
+					// the login and names the two keys to set. That is the fail-closed
+					// direction: the alternative is guessing a domain pin.
 					UsernameClaim: "email",
 					EmailClaim:    "email",
 					NameClaim:     "name",
@@ -492,6 +519,37 @@ func (c *Config) Validate() error {
 		}
 		if !hasOpenID {
 			return fmt.Errorf("provider[%d].scopes must include 'openid'", i)
+		}
+
+		// (#159) Stripping the domain off an email-shaped claim lets the identity
+		// provider decide which local account a login binds to, so the domains it may
+		// come from have to be pinned. Refused here rather than at first login: an
+		// operator who mis-set this should find out when the broker starts, not when
+		// somebody discovers what it admits.
+		m := provider.UserMapping
+		if m.StripEmailDomain && len(m.AllowedEmailDomains) == 0 {
+			return fmt.Errorf("provider[%d] (%s) sets username_claim_strip_domain but no allowed_email_domains; "+
+				"pin the domains whose local part may become a local username", i, provider.Name)
+		}
+		for _, d := range m.AllowedEmailDomains {
+			if strings.TrimSpace(d) == "" {
+				return fmt.Errorf("provider[%d] (%s) has an empty entry in allowed_email_domains", i, provider.Name)
+			}
+			if strings.ContainsAny(d, "*?") {
+				return fmt.Errorf("provider[%d] (%s) allowed_email_domains entry %q contains a wildcard; "+
+					"domains are matched exactly, since a wildcard re-opens the subdomain an attacker can "+
+					"get a verified address under", i, provider.Name, d)
+			}
+			if strings.Contains(d, "@") {
+				return fmt.Errorf("provider[%d] (%s) allowed_email_domains entry %q looks like an address; "+
+					"list the domain part only", i, provider.Name, d)
+			}
+		}
+	}
+
+	for _, account := range c.Authentication.AllowPrivilegedAccounts {
+		if strings.TrimSpace(account) == "" {
+			return fmt.Errorf("authentication.allow_privileged_accounts has an empty entry")
 		}
 	}
 

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **High (#159): an identity provider could choose which local account a login
+  became, including root.** Identity binding accepted the **local part** of an
+  email-shaped claim as a match for the requested account, so `root@evil.tld`
+  logging in as `root` was bound and approved. With `auth sufficient pam_oidc.so`
+  (the shipped stack) that short-circuits the rest of the auth stack. Reaching it
+  needed only the ability to choose the local part of one's own address — a mail
+  alias, a second verified domain, a B2B guest identity from another tenant —
+  and the branch was live in every shipped configuration: `username_claim: email`
+  in four of them, and `preferred_username`, which *is* the UPN on Entra ID, in
+  two more. The weaker variant needed no provider control at all: guest
+  `alice@partner.example` and employee `alice@example.com` both bound to local
+  `alice`.
+
+  Two independent fixes, either of which stops the escalation:
+
+  - The whole claim value must now equal the requested account. Local-part
+    matching is opt-in per provider (`username_claim_strip_domain: true`) and
+    requires `allowed_email_domains` to pin the domains it may come from —
+    enabling one without the other is a startup error, and domains are matched
+    exactly, since a wildcard re-opens the subdomain an attacker can get a
+    verified address under.
+  - No OIDC identity may bind to uid 0 or to any account with uid below 1000,
+    whatever the token says and however the mapping is configured. This is the
+    check that holds when `username_claim` or `allowed_email_domains` is wrong.
+    Deliberate exceptions go in `authentication.allow_privileged_accounts`, named
+    one at a time, and each use is logged.
+
+  Refusals of the second kind are audited as `PRIVILEGED_ACCOUNT_DENIED`: the
+  identity matched, so recording it as `IDENTITY_MISMATCH` would send an operator
+  looking for a claim problem that is not there.
+
+  **This is a breaking change for anyone using an email-shaped
+  `username_claim`.** Logins that relied on the local part being stripped will be
+  refused until `username_claim_strip_domain` and `allowed_email_domains` are
+  set; the refusal names both keys and the domain it saw. The six affected
+  shipped configs are updated with the opt-in and a placeholder domain. The
+  environment-variable-derived config deliberately does *not* enable it, because
+  it cannot know the operator's domain and guessing a domain pin is the wrong
+  direction to fail.
+
+  Coverage: the previous test suite asserted the vulnerable behaviour was correct
+  (`identity_binding_test.go` had `email: alice@example.com` + requested `alice`
+  ⇒ no error), which is why it survived. That case now asserts the refusal and
+  moves under the opt-in. `root@evil.tld` is tested against all four plausible
+  provider configurations, the uid guard is tested on an exact claim match, and
+  both run through the full device flow — not just the binding function — so the
+  poll loop is proven to act on the result. Two e2e cases: an exactly-matching
+  identity refused for a uid-400 account (`root` is unusable there, since
+  `PermitRootLogin no` means sshd refuses before PAM runs and the case would pass
+  without testing anything), and `alice@example.org` refused for local `alice`.
+
 ### Fixed
 - **High (#158): `require_groups` written the way every document tells operators
   to write it enforced nothing.** Group membership was checked against the global

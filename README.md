@@ -114,10 +114,18 @@ oidc:
       # match, preventing an IdP user from logging in as another local account.
       user_mapping:
         username_claim: "preferred_username"
+        # If that claim is an email or a UPN, the whole value must equal the local
+        # username by default. To let the local part match instead — alice@example.com
+        # logging in as "alice" — opt in and pin the domains it may come from:
+        # username_claim_strip_domain: true
+        # allowed_email_domains: ["example.com"]
 
 authentication:
   token_lifetime: "8h"
   require_groups: ["linux-users"]    # enforced against the user's OIDC groups
+  # No OIDC identity may log in as uid 0 or any account with uid < 1000. List an
+  # account here to make a deliberate exception:
+  # allow_privileged_accounts: ["deploy"]
 
 security:
   audit_enabled: true

@@ -806,3 +806,113 @@ func TestDevelopmentModeDetection(t *testing.T) {
 		})
 	}
 }
+
+// TestUserMappingDomainPinValidation covers the config half of #159: an operator
+// who turns on local-part binding without pinning the domains it may come from has
+// re-opened the hole the pin exists to close, and finds out when the broker starts
+// rather than when someone discovers what it admits.
+func TestUserMappingDomainPinValidation(t *testing.T) {
+	withMapping := func(m UserMapping) *Config {
+		return &Config{
+			Server: ServerConfig{SocketPath: "/tmp/test.sock"},
+			OIDC: OIDCConfig{Providers: []OIDCProvider{{
+				Name:        "test",
+				Issuer:      "https://test.example.com",
+				ClientID:    "test-client",
+				Scopes:      []string{"openid"},
+				UserMapping: m,
+			}}},
+			Authentication: AuthenticationConfig{
+				TokenLifetime:         time.Hour,
+				RefreshThreshold:      time.Minute,
+				MaxConcurrentSessions: 5,
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mapping UserMapping
+		wantErr string
+	}{
+		{
+			name:    "off by default needs no domains",
+			mapping: UserMapping{UsernameClaim: "email"},
+		},
+		{
+			name:    "opted in with a pinned domain",
+			mapping: UserMapping{UsernameClaim: "email", StripEmailDomain: true, AllowedEmailDomains: []string{"example.com"}},
+		},
+		{
+			name:    "opted in with no domains",
+			mapping: UserMapping{UsernameClaim: "email", StripEmailDomain: true},
+			wantErr: "no allowed_email_domains",
+		},
+		{
+			name:    "wildcard domain refused",
+			mapping: UserMapping{UsernameClaim: "email", StripEmailDomain: true, AllowedEmailDomains: []string{"*.example.com"}},
+			wantErr: "wildcard",
+		},
+		{
+			name:    "an address instead of a domain",
+			mapping: UserMapping{UsernameClaim: "email", StripEmailDomain: true, AllowedEmailDomains: []string{"alice@example.com"}},
+			wantErr: "looks like an address",
+		},
+		{
+			name:    "empty domain entry",
+			mapping: UserMapping{UsernameClaim: "email", StripEmailDomain: true, AllowedEmailDomains: []string{"example.com", "  "}},
+			wantErr: "empty entry",
+		},
+		{
+			// Domains listed without the opt-in are inert, not an error: an operator
+			// staging the pin before flipping the switch is not misconfigured.
+			name:    "domains without the opt-in are allowed",
+			mapping: UserMapping{UsernameClaim: "email", AllowedEmailDomains: []string{"example.com"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := withMapping(tc.mapping).Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Validate() = %v, want an error mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestShippedConfigsPinTheirDomains asserts the configs in configs/ satisfy the
+// rule above. They were all written when local-part binding was unconditional, so
+// they are exactly the population at risk of shipping a config that either cannot
+// log anyone in or admits any domain.
+func TestShippedConfigsPinTheirDomains(t *testing.T) {
+	paths, err := filepath.Glob("../../configs/**/*.yaml")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	more, _ := filepath.Glob("../../configs/*.yaml")
+	paths = append(paths, more...)
+	if len(paths) == 0 {
+		t.Skip("no shipped configs found from this working directory")
+	}
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read %s: %v", path, err)
+			continue
+		}
+		text := string(data)
+		if !strings.Contains(text, "username_claim_strip_domain") {
+			continue
+		}
+		if !strings.Contains(text, "allowed_email_domains") {
+			t.Errorf("%s enables username_claim_strip_domain without allowed_email_domains", path)
+		}
+	}
+}

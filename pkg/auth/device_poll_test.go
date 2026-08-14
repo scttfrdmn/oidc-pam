@@ -122,6 +122,11 @@ func newPollTestEnv(t *testing.T) *pollTestEnv {
 		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
 		stopChan:              make(chan struct{}),
 		pollIntervalUnit:      testPollUnit,
+		// A fixed passwd table, so the privileged-account guard (#159) behaves the
+		// same wherever the suite runs. Reading the host's real passwd would make
+		// these tests depend on whether it happens to have a "testuser" and what uid
+		// it gave them.
+		lookupLocalUID: testLookupUID,
 	}
 
 	// A real StartDeviceFlow, so the device code and nonce the token endpoint
@@ -732,5 +737,71 @@ authentication:
 	}
 	if event := env.auditEvent(t, "authentication_denied"); event.ErrorCode != "GROUP_DENIED" {
 		t.Errorf("denial recorded with error_code %q, want GROUP_DENIED", event.ErrorCode)
+	}
+}
+
+// TestPrivilegedAccountRefusedOnTheRealPath drives #159 through the whole device
+// flow, not just the binding function: a completed, approved authorization whose
+// identity exactly matches a privileged local account must still be refused, leave
+// no session, install no key, and be audited as PRIVILEGED_ACCOUNT_DENIED rather
+// than as an identity mismatch.
+//
+// The unit tests call verifyIdentityBinding directly. This one proves the poll loop
+// reaches it and acts on what it returns, which is where #120 showed the wiring can
+// be wrong even when the check is right.
+func TestPrivilegedAccountRefusedOnTheRealPath(t *testing.T) {
+	// uid 400 in testPasswd. Nothing about this identity is wrong except the
+	// account it wants to be: the claim matches exactly.
+	const account = "deploy"
+
+	env := newPollTestEnv(t)
+	env.session.UserID = account
+	env.idp.SetClaims(map[string]any{
+		"sub":                "sub-deploy",
+		"preferred_username": account,
+		"email":              account + "@example.org",
+		"groups":             []string{"researchers"},
+	})
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("an OIDC login was activated for privileged account %q: %+v", account, session)
+	}
+
+	event := env.auditEvent(t, "authentication_denied")
+	if event.ErrorCode != "PRIVILEGED_ACCOUNT_DENIED" {
+		t.Errorf("denial recorded with error_code %q, want PRIVILEGED_ACCOUNT_DENIED "+
+			"(the identity matched; the account is what was refused)", event.ErrorCode)
+	}
+	for _, e := range env.auditEvents(t) {
+		if e.EventType == "authentication_successful" {
+			t.Fatal("a login to a privileged local account was recorded as successful (#159)")
+		}
+	}
+
+	authorizedKeys := filepath.Join(env.homeDir, account, ".ssh", "authorized_keys")
+	if data, err := os.ReadFile(authorizedKeys); err == nil && strings.Contains(string(data), "@oidc-pam-") {
+		t.Errorf("a refused privileged login installed a login key:\n%s", data)
+	}
+
+	// And with the account explicitly allowed, the same flow succeeds — the guard is
+	// an override, not a wall.
+	allowed := newPollTestEnv(t)
+	allowed.session.UserID = account
+	allowed.broker.config.Authentication.AllowPrivilegedAccounts = []string{account}
+	allowed.idp.SetClaims(map[string]any{
+		"sub":                "sub-deploy",
+		"preferred_username": account,
+		"email":              account + "@example.org",
+		"groups":             []string{"researchers"},
+	})
+	allowed.idp.Script(testoidc.Grant)
+
+	allowed.run(t)
+
+	if session := allowed.activeSession(); session == nil {
+		t.Error("allow_privileged_accounts did not permit the login it names")
 	}
 }

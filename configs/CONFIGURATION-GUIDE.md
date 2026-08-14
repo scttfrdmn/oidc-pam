@@ -411,6 +411,51 @@ audit:
     - "policy_violations"
 ```
 
+## Binding an OIDC Identity to a Local Account
+
+`user_mapping.username_claim` names the claim whose value must equal the local
+account being logged into. By default the comparison is against the **whole**
+value, case-insensitively.
+
+When that claim is an email address or a UPN — `email` anywhere, and
+`preferred_username` on Entra ID — the whole value never equals a Unix account
+name, so nothing matches until you say what should happen:
+
+```yaml
+user_mapping:
+  username_claim: "email"
+  username_claim_strip_domain: true
+  allowed_email_domains: ["example.com", "eng.example.com"]
+```
+
+That permits `alice@example.com` to log in as `alice`, and refuses
+`alice@partner.example` and `root@anything`. Both keys are required together;
+enabling the first without the second is a startup error.
+
+Domains are matched exactly — no wildcards. A wildcard would re-open what the
+pin exists to close: a subdomain under which an attacker can get a verified
+address. Every domain you list is a domain whose local parts choose local
+accounts on this host, so list only domains whose addresses you control.
+
+### Privileged accounts
+
+No OIDC identity may log in as uid 0, or as any account with uid below 1000,
+regardless of what the token says or how the mapping is configured. This holds
+even for an exact claim match, because whether `root` is a legitimate destination
+for a federated login does not depend on the mapping being right.
+
+To make a deliberate exception:
+
+```yaml
+authentication:
+  allow_privileged_accounts: ["deploy"]
+```
+
+Each exception is named individually — allowing `deploy` does not allow `root` —
+and the broker logs a warning every time one is used. Refusals are audited as
+`PRIVILEGED_ACCOUNT_DENIED`, distinct from the `IDENTITY_MISMATCH` recorded when
+the claim itself does not match.
+
 ## Authentication Policies
 
 An `authentication.policies` entry is selected by its **name**:
