@@ -5,30 +5,22 @@ package ipc
 import (
 	"fmt"
 	"net"
-	"syscall"
 )
 
 // verifyPeerCredentials checks that the connecting process is running as root (UID 0).
 // PAM modules always run as root, so non-root connections are rejected.
+//
+// The kernel lookup itself lives in getPeerCredentials so there is exactly one of
+// it: this function used to carry its own copy of the SO_PEERCRED call, and the two
+// copies drifted — one of them reached the descriptor in a way that disabled the
+// connection's read deadline (#216).
 func verifyPeerCredentials(conn net.Conn) error {
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return fmt.Errorf("connection is not a Unix socket")
-	}
-	rawConn, err := unixConn.SyscallConn()
+	uid, _, err := getPeerCredentials(conn)
 	if err != nil {
-		return fmt.Errorf("failed to get raw connection: %w", err)
+		return err
 	}
-	var cred *syscall.Ucred
-	var credErr error
-	_ = rawConn.Control(func(fd uintptr) {
-		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-	})
-	if credErr != nil {
-		return fmt.Errorf("failed to get peer credentials: %w", credErr)
-	}
-	if cred.Uid != 0 {
-		return fmt.Errorf("peer UID %d is not root", cred.Uid)
+	if uid != 0 {
+		return fmt.Errorf("peer UID %d is not root", uid)
 	}
 	return nil
 }

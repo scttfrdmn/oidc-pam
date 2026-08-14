@@ -492,15 +492,32 @@ ProtectSystem=strict
 # service, so no authorized_keys can be written at all (#171).
 ProtectHome=false
 # ProtectSystem=strict makes everything read-only, so every path the broker
-# writes is listed: its runtime socket, its logs, its state directory (issued keys
-# and per-user locks), and the home directories it provisions keys into. Add your
-# own home path here if homes are not under /home. The "-" prefix makes a missing
-# path non-fatal: without it systemd refuses to start the unit at all on a host
-# that has no /home, which is exactly the host whose homes are somewhere else.
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
+# writes is listed: its logs, its state directory (issued keys and per-user locks),
+# and the home directories it provisions keys into. Add your own home path here if
+# homes are not under /home. The "-" prefix makes a missing path non-fatal: without
+# it systemd refuses to start the unit at all on a host that has no /home, which is
+# exactly the host whose homes are somewhere else.
+#
+# The socket directory is deliberately not listed. It lives on the /run tmpfs, which
+# is empty after a reboot, and a bare ReadWritePaths entry for a path that does not
+# exist makes systemd fail the unit's namespace setup with 226/NAMESPACE before
+# ExecStart runs — forever, since Restart=always retries the identical failure. Use
+# RuntimeDirectory= instead, which creates it (#211).
+ReadWritePaths=/var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
 StateDirectory=oidc-pam
 StateDirectoryMode=0700
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+# Creates /run/oidc-auth root:root 0750 before ExecStart and removes it on stop, and
+# reasserts that mode and owner on every start. Both halves matter: write access to
+# the directory holding the socket is enough to unlink it and bind an impostor at the
+# same path, which the broker now refuses to serve under (#200).
+RuntimeDirectory=oidc-auth
+RuntimeDirectoryMode=0750
+# CAP_CHOWN is what lets the broker hand a newly written authorized_keys to the
+# account it belongs to; without it every key provisioning failed with EPERM and
+# every login was denied (#202). It is only safe because the handover goes through
+# fchown(2) on an already-open descriptor rather than chown(2) on a path the account
+# can replace with a symlink (#203).
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Resource limits
 LimitNOFILE=65536
@@ -686,10 +703,16 @@ server {
     delaycompress
     missingok
     notifempty
-    create 640 oidc-auth oidc-auth
-    postrotate
-        systemctl reload oidc-auth-broker
-    endscript
+    # No `create`: copytruncate leaves the original file in place, so create would
+    # have no effect. The broker runs as root, not as oidc-auth.
+    # copytruncate, not a postrotate reload. The broker has no configuration reload
+    # and never had one; this stanza used to say `systemctl reload oidc-auth-broker`,
+    # which sent a SIGHUP that terminated the process — a ten-second authentication
+    # outage for the whole host, every night, with nothing in the journal but a clean
+    # exit and a restart (#224). The unit no longer advertises ExecReload= and the
+    # broker now ignores a stray SIGHUP, but neither of those reopens the log file,
+    # which is what rotation actually needs.
+    copytruncate
 }
 ```
 

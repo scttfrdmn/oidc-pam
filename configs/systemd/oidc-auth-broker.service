@@ -9,7 +9,25 @@ Type=simple
 User=root
 Group=root
 ExecStart=/usr/local/bin/oidc-auth-broker --config=/etc/oidc-auth/broker.yaml
-ExecReload=/bin/kill -HUP $MAINPID
+# There is deliberately no ExecReload=. The broker reads its configuration once, at
+# startup, and has no reload: pkg/config is loaded before auth.NewBroker and nothing
+# re-reads it.
+#
+# This line used to be `ExecReload=/bin/kill -HUP $MAINPID`, which advertised a
+# reload the broker could not perform — and Go's default disposition for SIGHUP is to
+# terminate. So `systemctl reload oidc-auth-broker` after an edit to broker.yaml, or a
+# logrotate postrotate stanza reloading the service that holds /var/log/oidc-auth
+# open, killed the broker outright. Restart=always brought it back RestartSec=10s
+# later, so the symptom was a daily ten-second authentication outage with nothing in
+# the journal but a clean exit (#224).
+#
+# Without ExecReload, `systemctl reload` refuses the job instead ("Job type reload is
+# not applicable"), which is the honest answer. The broker also ignores a stray
+# SIGHUP now (see cmd/broker/main.go) so a hand-written `kill -HUP` cannot kill it
+# either — but ignoring a signal is not a reload, and advertising one would only move
+# the surprise from "the service died" to "the new configuration silently did not
+# take effect". If a real reload is ever implemented, this line comes back and
+# TestShippedUnitDoesNotAdvertiseAReloadTheBrokerCannotDo changes with it.
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30s
@@ -38,11 +56,37 @@ ProtectHome=false
 # site that keeps homes on /export/home — still starts. Without it systemd fails
 # the unit outright when a listed path is missing, which would turn a misconfigured
 # home path into a broker that never runs.
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
+#
+# The broker's socket directory is deliberately *not* listed here: RuntimeDirectory=
+# below both creates it and makes it writable to this service, and a bare
+# ReadWritePaths entry for a path on the /run tmpfs is the bug described there.
+ReadWritePaths=/var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
 # Creates /var/lib/oidc-pam (0700, root) before ExecStart, so a first start on a
 # host installed by hand does not fail on a missing state directory.
 StateDirectory=oidc-pam
 StateDirectoryMode=0700
+# Creates /run/oidc-auth (which is what /var/run/oidc-auth resolves to) root:root
+# 0750 before ExecStart, and removes it on stop.
+#
+# This directory holds the socket every PAM login connects to, and it used to be
+# created only by the installers — so it did not survive a reboot. /run is a fresh
+# tmpfs after boot, the directory was gone, and because it was listed in
+# ReadWritePaths *without* a "-" prefix, systemd failed the unit's mount-namespace
+# setup with 226/NAMESPACE before ExecStart ever ran. The broker's own MkdirAll never
+# got the chance, ProtectSystem=strict would have made /run read-only to it anyway,
+# and Restart=always retried forever with the identical failure. On a host wired with
+# configs/pam/ssh that means nobody can log in after a reboot except via the recovery
+# paths in configs/pam/ssh (#211).
+#
+# RuntimeDirectory= is the fix rather than a "-" prefix, because the prefix only stops
+# the unit failing: it would start a broker whose socket directory does not exist and
+# cannot be created. systemd creating the directory is also what makes the ownership
+# right — root:root 0750 is reasserted on every start, healing a host whose installer
+# had chowned it to the unprivileged oidc-auth account, from where the socket could be
+# unlinked and replaced by an impostor (#200; internal/ipc refuses to bind under such
+# a directory).
+RuntimeDirectory=oidc-auth
+RuntimeDirectoryMode=0750
 # CAP_CHOWN is what lets the broker hand a newly written authorized_keys to the
 # account it belongs to. CapabilityBoundingSet caps the *effective* set even for
 # User=root, so without it every chown(2) to another uid returned EPERM, every SSH

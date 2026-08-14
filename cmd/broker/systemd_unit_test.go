@@ -94,6 +94,143 @@ func TestShippedUnitLetsTheBrokerWriteWhereItMust(t *testing.T) {
 	}
 }
 
+// The socket directory has to exist before ExecStart, on every boot.
+//
+// It holds the socket every PAM login connects to, and nothing but systemd can
+// create it in time: /run is a tmpfs, so a directory the installer made is gone
+// after a reboot, and ProtectSystem=strict makes /run read-only to the service, so
+// the broker cannot create it either. It was listed in ReadWritePaths without a "-"
+// prefix, which meant systemd failed the unit's namespace setup with 226/NAMESPACE
+// before ExecStart ran, and Restart=always retried that forever. On a host wired
+// with configs/pam/ssh, that is "nobody can SSH in after a reboot" (#211).
+//
+// Not verifiable from Go, and not verifiable on the machine most of this is written
+// on: it needs systemd. This test pins the settings; `systemd-analyze verify` and a
+// VM or nspawn boot with an empty /run are what confirm the behaviour.
+func TestShippedUnitCreatesItsRuntimeDirectoryOnEveryBoot(t *testing.T) {
+	settings := shippedUnitSettings(t)
+
+	// oidc-auth, not oidc-pam: this must be the directory in server.socket_path,
+	// /var/run/oidc-auth/broker.sock, which resolves to /run/oidc-auth.
+	if got := settings["RuntimeDirectory"]; got != "oidc-auth" {
+		t.Errorf("RuntimeDirectory=%q, want oidc-auth: without it /run/oidc-auth does not "+
+			"exist after a reboot, and neither systemd nor the broker creates it, so the "+
+			"broker never starts and no login succeeds (#211)", got)
+	}
+
+	// 0750 root:root is also what keeps the socket un-hijackable: write access to
+	// this directory is enough to unlink the socket and bind an impostor, and
+	// RuntimeDirectoryMode is reasserted on every start, so it heals a host whose
+	// installer chowned the directory to an unprivileged account (#200).
+	if got := settings["RuntimeDirectoryMode"]; got != "0750" {
+		t.Errorf("RuntimeDirectoryMode=%q, want 0750: any account that can write to the "+
+			"socket's directory can replace the socket with its own (#200)", got)
+	}
+
+	// And nothing under the /run tmpfs may be a bare ReadWritePaths entry, which is
+	// the shape of the original bug: a hard dependency on a path that does not
+	// survive a reboot and that nothing recreates.
+	for _, entry := range strings.Fields(settings["ReadWritePaths"]) {
+		if strings.HasPrefix(entry, "/run/") || strings.HasPrefix(entry, "/var/run/") {
+			t.Errorf("ReadWritePaths lists %s: /run is a tmpfs, so on the first boot after "+
+				"install systemd fails the unit's namespace setup before ExecStart. Have "+
+				"systemd create the directory with RuntimeDirectory= instead (#211)", entry)
+		}
+	}
+}
+
+// The unit must not advertise a reload the broker cannot perform.
+//
+// It used to carry ExecReload=/bin/kill -HUP $MAINPID while the broker installed no
+// SIGHUP handler, and Go's default disposition for SIGHUP is to terminate. So
+// `systemctl reload oidc-auth-broker` — the action the unit itself advertises — and
+// any logrotate postrotate stanza that reloads the service killed the broker, for a
+// ten-second authentication outage that looked like a clean exit in the journal
+// (#224).
+//
+// The broker now ignores SIGHUP (see ignoreSIGHUP, pinned by
+// TestSIGHUPDoesNotKillTheBroker), so restoring this line would no longer kill it —
+// it would silently do nothing while systemctl reported success, which is why the
+// line stays out until there is a real reload to advertise.
+func TestShippedUnitDoesNotAdvertiseAReloadTheBrokerCannotDo(t *testing.T) {
+	settings := shippedUnitSettings(t)
+
+	if got := settings["ExecReload"]; got != "" {
+		t.Errorf("ExecReload=%q, want no ExecReload at all: the broker reads its "+
+			"configuration once at startup and has no reload, so a reload either kills it "+
+			"(SIGHUP's default disposition) or silently does nothing. Without ExecReload, "+
+			"systemctl reload refuses the job and says so (#224)", got)
+	}
+}
+
+// The unit in DEPLOYMENT.md must not drift from the one this repo installs.
+//
+// An operator who follows the deployment guide types that unit in by hand rather
+// than installing the shipped file — it is presented as the unit to use — so a
+// setting the guide omits is a setting their host does not have. It had already
+// drifted: the guide's copy carried neither CAP_CHOWN nor RuntimeDirectory=, so a
+// host built from the guide had #202 (every SSH key provisioning denied by EPERM)
+// and #211 (the broker never starts after a reboot) with both fixed in the shipped
+// unit and the tests above passing.
+//
+// Only the settings whose absence is an outage are compared. The guide is allowed
+// to differ in wording, ordering and commentary, and to omit tuning like
+// LimitNOFILE — this is a check on what breaks, not a diff.
+func TestTheDocumentedUnitAgreesWithTheShippedOne(t *testing.T) {
+	shipped := shippedUnitSettings(t)
+
+	path := filepath.Join("..", "..", "DEPLOYMENT.md")
+	content, err := os.ReadFile(path) // #nosec G304 -- fixed repo-relative path
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	documented := unitSettings(string(content))
+	if documented["ExecStart"] == "" {
+		t.Fatalf("no systemd unit found in %s; this test is pinned to the unit the "+
+			"deployment guide tells operators to write", path)
+	}
+
+	for _, setting := range []string{
+		"ProtectHome",           // #171: an empty /home means no key can be installed
+		"StateDirectory",        // the issued keys and the per-user locks
+		"StateDirectoryMode",    //
+		"RuntimeDirectory",      // #211: no socket directory after a reboot
+		"RuntimeDirectoryMode",  // #200: and nobody else may write into it
+		"CapabilityBoundingSet", // #202: CAP_CHOWN or every provisioning fails
+		"ProtectSystem",         // the hardening that must not quietly come off
+		"NoNewPrivileges",
+	} {
+		if documented[setting] != shipped[setting] {
+			t.Errorf("DEPLOYMENT.md has %s=%q where the shipped unit has %q. An operator who "+
+				"follows the guide gets the guide's value, so a fix that lands only in "+
+				"configs/systemd/ has not shipped",
+				setting, documented[setting], shipped[setting])
+		}
+	}
+
+	// Neither unit may hard-depend on a path under the /run tmpfs — the shape of
+	// #211, and the reason RuntimeDirectory= exists.
+	for _, entry := range strings.Fields(documented["ReadWritePaths"]) {
+		if strings.HasPrefix(entry, "/run/") || strings.HasPrefix(entry, "/var/run/") {
+			t.Errorf("the unit in DEPLOYMENT.md lists %s in ReadWritePaths: /run is a tmpfs, "+
+				"so systemd fails the unit's namespace setup on the first boot after install "+
+				"(#211)", entry)
+		}
+	}
+}
+
+// shippedUnitSettings parses the unit this repo installs.
+func shippedUnitSettings(t *testing.T) map[string]string {
+	t.Helper()
+
+	path := filepath.Join("..", "..", "configs", "systemd", "oidc-auth-broker.service")
+	content, err := os.ReadFile(path) // #nosec G304 -- fixed repo-relative path
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return unitSettings(string(content))
+}
+
 // unitSettings collects the last value of each key in a systemd unit, ignoring
 // comments. Last wins, as systemd does for non-list settings.
 func unitSettings(content string) map[string]string {
