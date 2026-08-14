@@ -66,6 +66,20 @@ perl -0pi -e "s{badge/Version-[^-]*(?:-[^-]*)*?-blue}{badge/Version-${VER}-blue}
 # Simpler, robust replacement of just the version token between 'Version-' and '-blue':
 perl -0pi -e "s{(badge/Version-)([^)]*?)(-blue)}{\${1}${VER}\${3}}g" README.md
 
+# --- stamp the download snippet's VERSION ------------------------------------
+# The README's "From a release" block opens with `VERSION=vX.Y.Z`, and every curl,
+# tar and verify command below it interpolates that. Nothing used to stamp it, so it
+# sat at v0.4.0 through two releases: readers were told to download a version that
+# was no longer current, and — once the cosign instructions landed beneath it — to
+# verify a signature that version does not have (#180). The badge check in
+# verify-version did not catch it because it only reads the badge; that job now
+# checks this line too, so the two cannot disagree again.
+if ! grep -qE '^VERSION=v[0-9]' README.md; then
+  echo "error: could not find the 'VERSION=vX.Y.Z' download snippet in README.md" >&2
+  exit 1
+fi
+perl -0pi -e "s{^VERSION=v[0-9][^\n]*}{VERSION=v${VER}}mg" README.md
+
 # --- roll CHANGELOG: insert a new version section below [Unreleased] ---------
 # Turn:
 #   ## [Unreleased]

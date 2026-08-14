@@ -38,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`OIDC_PAM_SKIP_VERIFY=1` overrides). The archive's own `.sha256` covers only
   the download; nothing checked the payload that actually reaches PAM.
 
+### Fixed
+- The README's release-download snippet still read `VERSION=v0.4.0`, two releases
+  stale, and every `curl`, `tar` and verification command below it interpolates
+  that value — so the new signature-verification instructions would have been run
+  against a release that has no signature. `scripts/release.sh` now stamps that
+  line alongside the version badge, and the release workflow's version check fails
+  the release if it disagrees with the tag; previously it read only the badge and
+  the CHANGELOG, which is why this drifted unnoticed.
+- `gh attestation verify` is now given `--source-ref` in the README and in the
+  generated release notes, matching `docs/verifying-releases.md`, which explains
+  why: `--repo` alone is satisfied by any attestation this repository has ever
+  produced.
+- SECURITY.md's supported-versions table still claimed 0.4.x.
+
 ### Added
 - `docs/verifying-releases.md`: the exact `cosign verify-blob` and
   `gh attestation verify` commands, including the `--certificate-identity` and
