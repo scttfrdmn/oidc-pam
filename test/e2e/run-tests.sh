@@ -87,8 +87,6 @@ passed=0
 failed=()
 
 for name in "${cases[@]}"; do
-    reset_homes
-
     # Every case starts from a broker with no sessions and no in-flight device
     # flows. Otherwise a flow left polling by the previous case can be granted by
     # this case's approval, and turn up in the audit log as an event this case
@@ -106,6 +104,14 @@ for name in "${cases[@]}"; do
         wait_for_socket || { dump_logs; exit 1; }
         "${COMPOSE[@]}" exec -T client cp /harness/pam-sshd /etc/pam.d/sshd
     fi
+
+    # After the restart, deliberately. The broker writes the login key from the
+    # goroutine that completes the device flow, which can still be running when
+    # the previous case's ssh has already exited — so a reset before the restart
+    # races with it and this case starts with the previous case's key. Stopping
+    # the broker first takes every in-flight flow with it, which is what makes the
+    # removal final.
+    reset_homes
 
     if "${COMPOSE[@]}" exec -T client /harness/cases.sh "${name}"; then
         echo "    PASS ${name}"

@@ -409,11 +409,14 @@ case_account_stack_denies() {
 #
 # Two probes, because of #154. The broker closes the connection with the peer's
 # request still unread, and Linux discards a queued response when a socket is
-# closed with unread data — so a non-root peer that *sends* a request reliably
-# gets nothing back at all, while one that connects and sends nothing does receive
-# the refusal. Both halves are worth asserting: the first probe shows the broker
-# does refuse a non-root peer and with which code, the second shows that a
-# non-root request is not served regardless of what comes back.
+# closed with unread data — so whether a non-root peer that *sends* a request gets
+# its refusal back is a race with the close, and has been observed both ways (on
+# this machine: nothing at all; on the CI runner: the refusal). A peer that
+# connects and sends nothing always receives it.
+#
+# So the two probes assert different things. The silent one pins the refusal and
+# its code, which is a real guarantee. The request one asserts only that the
+# request was not *served*, which holds however the race falls.
 #
 # The code is PERMISSION_DENIED, not PEER_AUTH_DENIED: two peer checks run in
 # sequence and the unconditional one always answers first, which is the other half
