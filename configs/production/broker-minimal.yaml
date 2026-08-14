@@ -32,6 +32,13 @@ oidc:
       # REQUIRED: Map OIDC claims to user attributes
       user_mapping:
         username_claim: "email"
+        # (#159) An email-shaped claim binds on its local part only when you ask for it
+        # and pin the domains it may come from: with these settings alice@example.com can
+        # log in as "alice", while alice@partner.example and root@anything cannot.
+        # Replace example.com with your domain(s). Privileged accounts (uid < 1000)
+        # are refused regardless; see authentication.allow_privileged_accounts.
+        username_claim_strip_domain: true
+        allowed_email_domains: ["example.com"]
         email_claim: "email"
         name_claim: "name"
         groups_claim: "groups"

@@ -62,7 +62,8 @@ RUN moddir="$(dirname "$(dpkg -L libpam-modules | grep -m1 '/pam_permit\.so$')")
 # before PAM is ever consulted — which would make every case pass for the wrong
 # reason.
 RUN useradd --create-home --shell /bin/bash --password '*' alice \
-    && useradd --create-home --shell /bin/bash --password '*' bob
+    && useradd --create-home --shell /bin/bash --password '*' bob \
+    && useradd --create-home --shell /bin/bash --password '*' --uid 400 svcacct
 
 COPY test/e2e/sshd_config.d/oidc-pam.conf /etc/ssh/sshd_config.d/oidc-pam.conf
 COPY test/e2e/pam-sshd /etc/pam.d/sshd

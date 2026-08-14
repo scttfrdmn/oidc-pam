@@ -368,6 +368,42 @@ case_identity_mismatch() {
     expect_no_oidc_key_for alice
 }
 
+# #159: no OIDC identity binds to a privileged local account. svcacct has uid
+# 400, and the identity here matches it *exactly* — same preferred_username, in
+# the required group, approved by the user. The only thing wrong with this login
+# is the account it wants to be, which is the whole point: this is the check that
+# still holds when username_claim or allowed_email_domains is misconfigured.
+#
+# Deliberately not root: sshd_config.d/oidc-pam.conf sets PermitRootLogin no, so
+# `ssh root@` never reaches PAM and the case would pass without testing anything.
+# A uid < 1000 account that sshd will accept is what exercises the guard.
+case_privileged_account_refused() {
+    reset_state svcacct || return 1
+
+    control approve >/dev/null
+    attempt_login svcacct
+
+    expect_login_refused "svcacct is uid 400, below the privileged threshold"
+    expect_audit PRIVILEGED_ACCOUNT_DENIED
+    expect_no_oidc_key_for svcacct
+}
+
+# #159: the local part of an email-shaped claim does not bind on its own. The
+# identity is alice@example.org and the login is for alice; broker.yaml does not
+# set username_claim_strip_domain, so this is refused. Before #159 the local part
+# matched unconditionally, which is what let root@anything log in as root.
+case_email_local_part_refused() {
+    reset_state alice || return 1
+    control 'identity?username=alice@example.org' >/dev/null
+
+    control approve >/dev/null
+    attempt_login alice
+
+    expect_login_refused "alice@example.org must not bind to local alice without the opt-in"
+    expect_audit IDENTITY_MISMATCH
+    expect_no_oidc_key_for alice
+}
+
 # #92: require_groups is enforced. Same user, same approval, no group.
 case_group_denied() {
     reset_state alice || return 1
@@ -486,13 +522,35 @@ CASES=(
     never_approved
     denied_by_provider
     identity_mismatch
+    privileged_account_refused
+    email_local_part_refused
     group_denied
     account_stack_denies
     nonroot_ipc_rejected
     broker_down
 )
 
+# CASES is ordered deliberately (simplest flow first), so it is written out
+# rather than derived. That means it can fall out of step with the functions
+# actually defined, and a case missing from it is silently never run — which is
+# exactly the kind of gap this harness exists to catch. So check.
+check_cases_are_registered() {
+    local fn name missing=()
+    for fn in $(compgen -A function case_); do
+        name="${fn#case_}"
+        # shellcheck disable=SC2076
+        if [[ ! " ${CASES[*]} " =~ " ${name} " ]]; then
+            missing+=("${name}")
+        fi
+    done
+    if [[ "${#missing[@]}" -ne 0 ]]; then
+        echo "cases.sh: defined but not in CASES, so never run: ${missing[*]}" >&2
+        return 1
+    fi
+}
+
 if [[ "${1:-}" == "--list" ]]; then
+    check_cases_are_registered || exit 2
     printf '%s\n' "${CASES[@]}"
     exit 0
 fi

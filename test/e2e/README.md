@@ -65,6 +65,8 @@ recorded — not only on what `ssh` did.
 | `denied_by_provider` | A provider refusal is terminal (RFC 8628) and the login is refused *because of it* — asserted from the module log and audit trail, not the clock. |
 | `identity_mismatch` | **#90.** An ID token for `carol` cannot log in as `alice`, however valid it is. |
 | `group_denied` | **#92.** `require_groups` is enforced. |
+| `privileged_account_refused` | **#159.** An exactly-matching identity still cannot log in as a uid < 1000 account. |
+| `email_local_part_refused` | **#159.** `alice@example.org` does not bind to local `alice` without the domain-pinned opt-in. |
 | `account_stack_denies` | **#122.** The account phase still decides: the auth phase genuinely succeeds here and the login is refused anyway. |
 | `nonroot_ipc_rejected` | The IPC socket is root-only by broker decision, not by file mode. |
 | `broker_down` | No broker → refused at once with `PAM_AUTHINFO_UNAVAIL`, not after the device-flow budget. |

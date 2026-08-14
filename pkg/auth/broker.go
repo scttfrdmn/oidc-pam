@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/user"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +47,12 @@ type Broker struct {
 	// several authorization_pending polls finishes in milliseconds instead of
 	// the ~15 s that RFC 8628's 5 s floor would otherwise cost.
 	pollIntervalUnit time.Duration
+
+	// lookupLocalUID resolves a local account name to its uid, reporting whether the
+	// account exists. Nil means the real getpwnam-backed lookup; tests substitute a
+	// fixed passwd table so that the privileged-account guard can be exercised
+	// without depending on the uids of whatever host runs the suite (#159).
+	lookupLocalUID func(name string) (int, bool, error)
 }
 
 // pollUnit is the real-time duration of one second of a device flow's polling
@@ -909,14 +917,25 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			// could authenticate as any local account (including root). Fail
 			// closed on any mismatch or misconfiguration.
 			if err := b.verifyIdentityBinding(provider, userInfo, session.UserID); err != nil {
+				// (#159) A privileged-account refusal is not a mismatch: the identity
+				// matched, and the local account is simply not one an OIDC login may
+				// become. Audited separately so an operator is not sent looking for a
+				// claim problem that is not there.
+				errCode := "IDENTITY_MISMATCH"
+				message := "Rejected authentication: OIDC identity does not match requested local user"
+				if errors.Is(err, ErrPrivilegedAccount) {
+					errCode = "PRIVILEGED_ACCOUNT_DENIED"
+					message = "Rejected authentication: refusing to bind an OIDC identity to a privileged local account"
+				}
 				log.Warn().
 					Err(err).
 					Str("session_id", session.ID).
 					Str("requested_user", session.UserID).
 					Str("oidc_subject", userInfo.Subject).
-					Msg("Rejected authentication: OIDC identity does not match requested local user")
+					Str("error_code", errCode).
+					Msg(message)
 				if b.metrics != nil {
-					b.metrics.RecordAuth(provider.Name, "failure", "IDENTITY_MISMATCH")
+					b.metrics.RecordAuth(provider.Name, "failure", errCode)
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "authentication_denied",
@@ -924,7 +943,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					Email:        userInfo.Email,
 					SessionID:    session.ID,
 					Success:      false,
-					ErrorCode:    "IDENTITY_MISMATCH",
+					ErrorCode:    errCode,
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -1360,15 +1379,148 @@ func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInf
 		return fmt.Errorf("username_claim %q produced an empty username", claimName)
 	}
 
-	// If the claim is an email (e.g. preferred_username/email), allow matching
-	// either the full value or its local-part against the requested user.
+	// No OIDC identity binds to a privileged account, however well it matches.
+	// Checked before the claim comparison so that it holds even when the claim is an
+	// exact match and the domain is pinned.
+	if err := b.verifyLocalAccountIsBindable(requested); err != nil {
+		return err
+	}
+
+	// The whole claim value must equal the requested account.
 	if mapped == requested {
 		return nil
 	}
-	if local, _, found := strings.Cut(mapped, "@"); found && local == requested {
+
+	// (#159) The local part of an email-shaped claim binds only when the operator
+	// has asked for it *and* pinned the domains it may come from. This used to be
+	// unconditional, which meant anyone able to choose the local part of their
+	// address — a B2B guest from another tenant, a second verified domain,
+	// self-service alias editing — chose which local account they logged in as, by
+	// setting it to e.g. "root@their.tld".
+	local, domain, isEmail := strings.Cut(mapped, "@")
+	mapping := provider.Config.UserMapping
+	if isEmail && local == requested {
+		switch {
+		case !mapping.StripEmailDomain:
+			return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q; "+
+				"its local part does, but binding on the local part is off by default because it lets the "+
+				"identity provider choose the local account. To allow it, set "+
+				"username_claim_strip_domain: true and allowed_email_domains: [%q] on provider %q",
+				mapped, claimName, requested, domain, provider.Config.Name)
+		case len(mapping.AllowedEmailDomains) == 0:
+			return fmt.Errorf("provider %q sets username_claim_strip_domain but no allowed_email_domains; "+
+				"refusing to bind %q to local user %q, since an unpinned domain lets any federated or guest "+
+				"identity claim any local account", provider.Config.Name, mapped, requested)
+		case !domainIsAllowed(domain, mapping.AllowedEmailDomains):
+			return fmt.Errorf("authenticated identity %q is from domain %q, which is not in "+
+				"allowed_email_domains for provider %q; refusing to bind it to local user %q",
+				mapped, domain, provider.Config.Name, requested)
+		default:
+			return nil
+		}
+	}
+
+	return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q", mapped, claimName, requested)
+}
+
+// domainIsAllowed reports whether domain is pinned in allowed. Comparison is exact
+// and case-insensitive: no wildcards, because a wildcard on an email domain
+// re-opens exactly what allowed_email_domains exists to close (a subdomain an
+// attacker can get a verified address under).
+func domainIsAllowed(domain string, allowed []string) bool {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return false
+	}
+	for _, a := range allowed {
+		if domain == strings.TrimSpace(strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrPrivilegedAccount is returned when an OIDC identity is refused because the
+// local account it would bind to is privileged, rather than because the identity
+// did not match. The two are audited under different error codes: the identity in
+// the privileged case matched perfectly, and reporting it as a mismatch would send
+// an operator looking for a claim problem that is not there.
+var ErrPrivilegedAccount = errors.New("local account is privileged")
+
+// PrivilegedUIDThreshold is the uid below which a local account is treated as
+// privileged and is not bindable by an OIDC identity unless explicitly allowed.
+// 1000 is the first non-system uid on every distribution this project targets
+// (Debian/Ubuntu, RHEL/Fedora, SUSE, Arch).
+const PrivilegedUIDThreshold = 1000
+
+// verifyLocalAccountIsBindable refuses to bind an OIDC identity to a privileged
+// local account: uid 0, or any uid below PrivilegedUIDThreshold, unless the account
+// is named in authentication.allow_privileged_accounts.
+//
+// (#159) This is the check that holds when the others are misconfigured. Identity
+// binding depends on username_claim being set correctly, on the provider not letting
+// the user edit that claim, and on allowed_email_domains being pinned — three things
+// the operator can get wrong. Whether "root" is a legitimate destination for a
+// federated login does not depend on any of them.
+//
+// An account that does not exist locally is not refused here: there is no privilege
+// to escalate to, and the login cannot succeed anyway. "root" is refused by name
+// even if the lookup fails, since that is the case worth being sure about.
+func (b *Broker) verifyLocalAccountIsBindable(requested string) error {
+	if b.config != nil {
+		for _, allowed := range b.config.Authentication.AllowPrivilegedAccounts {
+			if strings.EqualFold(strings.TrimSpace(allowed), requested) {
+				log.Warn().
+					Str("local_user", requested).
+					Msg("Binding an OIDC identity to a privileged local account, permitted by authentication.allow_privileged_accounts")
+				return nil
+			}
+		}
+	}
+
+	if requested == "root" {
+		return fmt.Errorf("refusing to bind an OIDC identity to local user %q: it is uid 0. "+
+			"Log in as an unprivileged account and escalate, or add it to "+
+			"authentication.allow_privileged_accounts to override: %w", requested, ErrPrivilegedAccount)
+	}
+
+	lookup := b.lookupLocalUID
+	if lookup == nil {
+		lookup = lookupLocalUID
+	}
+	uid, exists, err := lookup(requested)
+	if err != nil {
+		// Neither "it exists and is privileged" nor "it does not exist": we could not
+		// tell. Do not silently allow a check we did not perform.
+		return fmt.Errorf("could not determine whether local user %q is privileged: %w", requested, err)
+	}
+	if !exists {
 		return nil
 	}
-	return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q", mapped, claimName, requested)
+	if uid < PrivilegedUIDThreshold {
+		return fmt.Errorf("refusing to bind an OIDC identity to local user %q: it is a system account "+
+			"(uid %d < %d). Add it to authentication.allow_privileged_accounts to override: %w",
+			requested, uid, PrivilegedUIDThreshold, ErrPrivilegedAccount)
+	}
+	return nil
+}
+
+// lookupLocalUID resolves a local account name to its numeric uid. The second
+// return value is false when there is no such account, which is not an error.
+func lookupLocalUID(name string) (int, bool, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		var unknown user.UnknownUserError
+		if errors.As(err, &unknown) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, false, fmt.Errorf("local user %q has a non-numeric uid %q: %w", name, u.Uid, err)
+	}
+	return uid, true, nil
 }
 
 // claimToUsername extracts a string username from the resolved claims using the
