@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#164): if the identity provider stopped returning the configured
+  `username_claim`, the authorization decision moved silently to `sub`.** An absent
+  `preferred_username` or `sub` claim was substituted with `userInfo.Subject`, and an
+  absent `email` with `userInfo.Email`, so a scope change, a claim-mapper edit or a
+  tenant migration re-pointed identity binding at an identifier the operator never
+  chose and never audited — without an error, a warning or an audit record. The claim
+  it fell back to is the one shipped in every provider config
+  (`preferred_username` in `azure-ad.yaml`, `okta.yaml`, `keycloak.yaml` and
+  `test/e2e/broker.yaml`), and for the many IdPs whose `sub` is an email or a
+  username — LDAP/AD-backed and self-hosted ones especially — that substituted value
+  was then matched against local account names, so #159's local-part matching applied
+  to it too.
+
+  - The configured claim is now the only claim consulted. A token that does not carry
+    it is refused: no session, no login key, and no token stored.
+  - The refusal names the claim that was configured and missing, and points at the
+    provider's scopes and claim mapping. A `sub`-based deployment stays expressible,
+    deliberately, as `username_claim: sub`.
+  - Audited as `USERNAME_CLAIM_MISSING` rather than `IDENTITY_MISMATCH`: nothing was
+    wrong with the identity, every login through that provider is failing for the same
+    reason, and the fix is in the provider or the config.
+
+  Coverage: the existing "claim absent in token fails closed" case passed against the
+  defect because its fixture had an empty `Subject`, which is exactly the condition
+  that hides the fallback. The new cases give the identity a non-empty `Subject` and
+  `Email`, cover all three deleted branches, and run through the full device flow —
+  proven to fail with the fallback restored (an active session, a provisioned key and
+  an `authentication_successful` record).
 - **High (#161): any local user could stop session expiry and key revocation for
   the whole host.** The broker serialized its `authorized_keys` writes on
   `~/.ssh/authorized_keys.lock` — a path inside the home directory of the very

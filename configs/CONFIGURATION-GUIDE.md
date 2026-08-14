@@ -437,6 +437,12 @@ pin exists to close: a subdomain under which an attacker can get a verified
 address. Every domain you list is a domain whose local parts choose local
 accounts on this host, so list only domains whose addresses you control.
 
+The claim you name is the only claim consulted. If the token does not carry it,
+the login is refused and audited as `USERNAME_CLAIM_MISSING` naming the claim —
+there is no fallback to `sub` or to any other claim, because an identifier you
+did not choose is not one you have audited. If your provider puts the login name
+in `sub`, say so with `username_claim: "sub"`.
+
 ### Privileged accounts
 
 No OIDC identity may log in as uid 0, or as any account with uid below 1000,
