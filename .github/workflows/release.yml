@@ -39,10 +39,26 @@ jobs:
           fi
           echo "Version $VERSION is consistent across the tag, README badge, and CHANGELOG."
 
+  # A tag push used to publish a release with no test, lint or e2e job having run:
+  # `build` needed only `verify-version`, which reads two files (#214). This calls
+  # the CI workflow rather than restating its jobs, because two hand-maintained
+  # copies of the test set drift and the drift is silent — the release would keep
+  # passing a weaker gate than every pull request has to clear.
+  #
+  # `contents: read` is deliberately narrower than this workflow's `contents:
+  # write`: nothing CI does needs to write, and a called workflow may only be
+  # granted permissions the caller already has.
+  ci:
+    name: CI
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runs_on }}
-    needs: verify-version
+    needs: [verify-version, ci]
 
     strategy:
       fail-fast: false
@@ -145,7 +161,7 @@ jobs:
           sha256sum ${DIR}.tar.gz > ${DIR}.tar.gz.sha256
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-linux-${{ matrix.arch }}
           path: |
@@ -163,11 +179,34 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-linux-*
           merge-multiple: true
           path: dist/
+
+      # The .sha256 files are computed in the build job, before the upload, but
+      # until now nothing re-checked them after the download — so anything that
+      # substituted an artifact between the two steps went undetected (#221). The
+      # checksums are only evidence if something compares them.
+      - name: Verify artifact checksums
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          sums=(*.tar.gz.sha256)
+          tars=(*.tar.gz)
+          # `sha256sum -c` over an empty file list exits 0, so an upload that
+          # produced nothing would otherwise verify clean. Count first.
+          if [ "${#sums[@]}" -eq 0 ] || [ "${#tars[@]}" -eq 0 ]; then
+            echo "::error::dist/ has ${#tars[@]} tarball(s) and ${#sums[@]} checksum file(s); expected at least one of each"
+            exit 1
+          fi
+          if [ "${#sums[@]}" -ne "${#tars[@]}" ]; then
+            echo "::error::${#tars[@]} tarball(s) but ${#sums[@]} checksum file(s) in dist/ — an artifact is unaccounted for"
+            exit 1
+          fi
+          sha256sum -c "${sums[@]}"
+          echo "Verified ${#tars[@]} artifact(s) against their checksums."
 
       - name: Create release
         env:
