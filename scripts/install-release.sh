@@ -16,10 +16,22 @@
 # lock you out of SSH on its own. Console login, su and sudo are never wired:
 # the console is the recovery path when the broker is down.
 #
+# The archive ships a SHA256SUMS manifest of its own binaries, written by the
+# release workflow. This script verifies it before installing anything and
+# refuses to continue if it does not match (#180): pam_oidc.so is loaded into
+# every authenticating process on the host, including sshd, so "the bytes in this
+# tarball are the bytes that were built" has to be checked somewhere, and the
+# tarball's own .sha256 covers only the download.
+#
+# The archive and the manifest are both cosign-signed. Verify those signatures
+# before extracting — see docs/verifying-releases.md; a checksum manifest that
+# travelled inside the artifact it describes proves nothing on its own.
+#
 # Environment:
 #   PAM_MODULE_DIR=<dir>   where to install pam_oidc.so, if detection gets it
 #                          wrong. It must be a directory libpam itself loads
 #                          modules from, or the module will never run.
+#   OIDC_PAM_SKIP_VERIFY=1 skip the payload checksum check (see verify_payload).
 
 set -euo pipefail
 
@@ -287,6 +299,38 @@ pam_insert_block() {
     mv -f "$tmp" "$file"
 }
 
+# Verify the archive payload against the manifest the release workflow put in it
+# (#180). Runs before anything is created or copied, so a mismatch leaves the host
+# untouched rather than half-installed.
+#
+# Fails closed on a missing manifest or a missing sha256sum: an archive built by
+# the release workflow always has one, so absence means either a hand-assembled
+# tarball or a tampered one, and "verify unless it is inconvenient" is not
+# verification. Override only if you know why: OIDC_PAM_SKIP_VERIFY=1.
+verify_payload() {
+    local manifest="$SCRIPT_DIR/SHA256SUMS"
+
+    if [[ "${OIDC_PAM_SKIP_VERIFY:-0}" == "1" ]]; then
+        print_warn "OIDC_PAM_SKIP_VERIFY=1: skipping payload checksum verification"
+        return
+    fi
+
+    if [[ ! -f "$manifest" ]]; then
+        print_error "SHA256SUMS not found next to this script. Release archives from v0.5.1 on always contain one; set OIDC_PAM_SKIP_VERIFY=1 to install anyway."
+    fi
+
+    command -v sha256sum >/dev/null 2>&1 \
+        || print_error "sha256sum not found; cannot verify the payload. Install coreutils, or set OIDC_PAM_SKIP_VERIFY=1 to install anyway."
+
+    print_info "Verifying payload against SHA256SUMS..."
+    # --quiet prints only failures. Checked from SCRIPT_DIR because the manifest
+    # names the binaries relative to the archive root.
+    if ! (cd "$SCRIPT_DIR" && sha256sum --quiet -c SHA256SUMS); then
+        print_error "Payload checksum verification FAILED. Do not install this archive: one of its binaries does not match what was built. Re-download and verify its cosign signature (docs/verifying-releases.md)."
+    fi
+    print_info "Payload matches SHA256SUMS"
+}
+
 create_directories() {
     print_info "Creating required directories..."
     install -d -m 0755 "$CONFIG_DIR"
@@ -460,6 +504,9 @@ main() {
     parse_args "$@"
     print_info "Installing OIDC PAM from release tarball..."
     check_root
+    # Before anything is written, and before the host is even inspected: if these
+    # are not the bytes the release workflow built, nothing below should run (#180).
+    verify_payload
     # Before anything is written: a module installed outside PAM's module path is
     # worse than no install at all (#208).
     resolve_pam_dir

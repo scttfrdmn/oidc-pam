@@ -100,6 +100,35 @@ OIDC PAM includes several security features:
 - **Session Management**: Automatic token expiration and cleanup
 - **Secure Communication**: Unix socket with strict permissions
 
+## Release Integrity and Provenance
+
+From **v0.5.1** onward, every release artifact is signed and carries build
+provenance. There is **no oidc-pam signing key** and none is stored in this
+repository or in its secrets: signing is
+[cosign](https://docs.sigstore.dev/) *keyless*, so the signer is the release
+workflow's own GitHub Actions OIDC identity and the certificate is short-lived.
+
+Each release publishes, for both `amd64` and `arm64`:
+
+- the archive and its `.sha256`
+- a cosign signature bundle (`.sigstore.json`) for the archive
+- a single signed `SHA256SUMS` manifest covering every architecture
+- a **SLSA v1 build provenance attestation** per archive, verifiable with
+  `gh attestation verify`
+
+Each archive also carries an internal `SHA256SUMS` of the binaries it installs;
+the bundled `install.sh` verifies it and refuses to install on a mismatch.
+
+**Verify before you install.** `pam_oidc.so` is loaded into `sshd` and the broker
+runs as root, so the checksum alone — published to the same page as the archive it
+describes — is not evidence of origin. The exact
+`cosign verify-blob --certificate-identity ... --certificate-oidc-issuer ...` and
+`gh attestation verify` commands, what each one proves, and how to verify offline
+are in **[docs/verifying-releases.md](docs/verifying-releases.md)**.
+
+Releases up to and including v0.5.0 are unsigned and cannot be signed
+retroactively.
+
 ## Security Scanning
 
 This project uses automated security scanning:

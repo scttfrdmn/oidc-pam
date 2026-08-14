@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Release artifacts are now signed and carry build provenance (#180).** Until
+  now the only integrity material published was a `.sha256` file uploaded to the
+  same release page as the tarball it describes, which detects a corrupted
+  download and nothing else — anyone able to publish a release could publish a
+  matching checksum. For artifacts that include `pam_oidc.so`, loaded into every
+  authenticating process including `sshd`, and a root-run broker, "where did this
+  binary come from" should be answerable without trusting the release page.
+
+  Each release now publishes, for both `amd64` and `arm64`: the archive, its
+  `.sha256`, a cosign signature bundle (`.sigstore.json`), a single signed
+  `SHA256SUMS` manifest covering every architecture, and a SLSA v1 build
+  provenance attestation per archive (`actions/attest-build-provenance`).
+
+  Signing is cosign *keyless*: the signer is the release workflow's own GitHub
+  Actions OIDC identity, so no key material exists in this repository or in its
+  secrets, and the identity an operator verifies is
+  `https://github.com/scttfrdmn/oidc-pam/.github/workflows/release.yml@refs/tags/<tag>`.
+
+  Signing runs in its own job, which holds `id-token: write` but not
+  `contents: write`; the publishing job holds `contents: write` and cannot mint
+  signatures. The workflow-level default dropped from `contents: write` to
+  `contents: read`. The release workflow verifies its own signatures — with the
+  same command the documentation gives users — before the release is created, and
+  re-verifies them after the artifacts and signatures are reunited for publishing.
+- Release archives now contain a `SHA256SUMS` manifest of the binaries they
+  install, and the bundled `install.sh` verifies it before copying anything into
+  `/usr/local/bin` or `/lib/security`, refusing to install on a mismatch
+  (`OIDC_PAM_SKIP_VERIFY=1` overrides). The archive's own `.sha256` covers only
+  the download; nothing checked the payload that actually reaches PAM.
+
+### Added
+- `docs/verifying-releases.md`: the exact `cosign verify-blob` and
+  `gh attestation verify` commands, including the `--certificate-identity` and
+  `--certificate-oidc-issuer` values for this repository, what each check proves
+  (and what it does not), offline verification, and the pitfalls of matching the
+  signer identity with a regexp. Every release's notes now carry the same
+  commands with the tag substituted in.
+
 ## [0.5.0] - 2026-08-14
 
 ### Security
