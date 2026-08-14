@@ -740,6 +740,76 @@ authentication:
 	}
 }
 
+// TestAbsentUsernameClaimRefusedOnTheRealPath drives #164 through the whole device
+// flow: an approved authorization whose token does not carry the configured
+// username_claim must leave no session and no SSH key, and be audited as
+// USERNAME_CLAIM_MISSING naming the claim that was configured and missing.
+//
+// The scenario is an IdP that stopped returning preferred_username — a scope change,
+// a claim-mapper edit, a tenant migration — while `sub` is a login name, as it is on
+// LDAP/AD-backed and self-hosted IdPs. Here `sub` happens to equal the local account
+// being logged into, so the deleted fallback bound it and the login was approved on a
+// claim the operator never chose. The end-to-end path is what shows the consequence:
+// on the broken code this run produces an active session and an installed key.
+func TestAbsentUsernameClaimRefusedOnTheRealPath(t *testing.T) {
+	// The provider is configured for preferred_username, as newPollTestEnv and every
+	// shipped provider config are. testuser is uid 1500, so the privileged-account
+	// guard is not what refuses this.
+	claimsWithoutPreferredUsername := map[string]any{
+		"sub":    "testuser",
+		"email":  "testuser@example.org",
+		"groups": []string{"researchers"},
+	}
+
+	env := newPollTestEnv(t)
+	env.idp.SetClaims(claimsWithoutPreferredUsername)
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("a login was activated with no preferred_username claim in the token, "+
+			"on the value of sub instead (#164): %+v", session)
+	}
+
+	event := env.auditEvent(t, "authentication_denied")
+	if event.ErrorCode != "USERNAME_CLAIM_MISSING" {
+		t.Errorf("denial recorded with error_code %q, want USERNAME_CLAIM_MISSING "+
+			"(nothing was wrong with the identity; the configured claim never arrived)", event.ErrorCode)
+	}
+	if !strings.Contains(event.ErrorMessage, "preferred_username") {
+		t.Errorf("the audited denial does not name the claim that was configured and missing: %q",
+			event.ErrorMessage)
+	}
+	for _, e := range env.auditEvents(t) {
+		if e.EventType == "authentication_successful" {
+			t.Fatal("a login with no configured username_claim in the token was recorded as successful (#164)")
+		}
+	}
+
+	// No credential of either kind: nothing in the key store, nothing authorized.
+	if _, err := env.broker.keyManager.LoadKey(env.session.ID); err == nil {
+		t.Error("a refused login left a key pair in the key store")
+	}
+	authorizedKeys := filepath.Join(env.homeDir, env.session.UserID, ".ssh", "authorized_keys")
+	if data, err := os.ReadFile(authorizedKeys); err == nil && strings.Contains(string(data), "@oidc-pam-") {
+		t.Errorf("a refused login installed a login key:\n%s", data)
+	}
+
+	// And the deployment the fix does not break: an operator whose IdP puts the login
+	// name in `sub` configures that, and the very same token is bound.
+	explicit := newPollTestEnv(t)
+	explicit.provider.Config.UserMapping.UsernameClaim = "sub"
+	explicit.idp.SetClaims(claimsWithoutPreferredUsername)
+	explicit.idp.Script(testoidc.Grant)
+
+	explicit.run(t)
+
+	if session := explicit.activeSession(); session == nil || !session.IsActive {
+		t.Error("username_claim: sub did not bind an identity whose sub is the local account")
+	}
+}
+
 // TestPrivilegedAccountRefusedOnTheRealPath drives #159 through the whole device
 // flow, not just the binding function: a completed, approved authorization whose
 // identity exactly matches a privileged local account must still be refused, leave

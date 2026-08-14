@@ -223,6 +223,93 @@ func TestRootIsNotBindableViaEmailLocalPart(t *testing.T) {
 	}
 }
 
+// TestAbsentUsernameClaimBindsNothing is the gate for #164: when the configured
+// claim is not in the token, binding must fail, not quietly authorize on whichever
+// other claim the token happens to carry.
+//
+// claimToUsername substituted userInfo.Subject for an absent "preferred_username" or
+// "sub", and userInfo.Email for an absent "email". Every case here has a *non-empty*
+// Subject and Email, which is what the pre-existing coverage lacked: with an empty
+// Subject the fallback yielded "" and the empty-username check refused the login
+// anyway, so "claim absent in token fails closed" above passed against the defect.
+//
+// The local account is alice (uid 1001), so neither the privileged-account guard nor
+// a domain pin can be what refuses these — only the missing claim can.
+func TestAbsentUsernameClaimBindsNothing(t *testing.T) {
+	b := brokerForBinding()
+
+	cases := []struct {
+		name     string
+		claim    string
+		provider *OIDCProvider
+		userInfo *UserInfo
+	}{
+		{
+			// The headline case. preferred_username is what azure-ad.yaml, okta.yaml,
+			// keycloak.yaml and test/e2e/broker.yaml all configure, and a `sub` that is a
+			// login name is what LDAP/AD-backed and self-hosted IdPs commonly issue.
+			name:     "preferred_username absent while sub is a username",
+			claim:    "preferred_username",
+			provider: providerWithClaim("preferred_username"),
+			userInfo: &UserInfo{
+				Subject: "alice",
+				Email:   "alice@example.com",
+				Claims:  map[string]interface{}{"sub": "alice", "email": "alice@example.com"},
+			},
+		},
+		{
+			// With #159's opt-in in place the email fallback was live too: the domain is
+			// pinned and stripping is on, so the substituted address bound cleanly.
+			name:     "email absent under a pinned strip-domain mapping",
+			claim:    "email",
+			provider: providerWithMapping("email", true, "example.com"),
+			userInfo: &UserInfo{
+				Subject: "sub-alice",
+				Email:   "alice@example.com",
+				Claims:  map[string]interface{}{"sub": "sub-alice"},
+			},
+		},
+		{
+			// The third deleted branch. extractUserInfoFromClaims fills Subject from
+			// claims["sub"], so this shape needs a UserInfo assembled some other way —
+			// but the branch was reachable by claim name alone, so it is asserted by
+			// claim name too.
+			name:     "sub absent from the claim map",
+			claim:    "sub",
+			provider: providerWithClaim("sub"),
+			userInfo: &UserInfo{
+				Subject: "alice",
+				Email:   "alice@example.com",
+				Claims:  map[string]interface{}{"email": "alice@example.com"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := b.verifyIdentityBinding(tc.provider, tc.userInfo, "alice")
+			if err == nil {
+				t.Fatalf("an absent %q claim bound local user alice on another claim: this is #164", tc.claim)
+			}
+			if !errors.Is(err, ErrUsernameClaimMissing) {
+				t.Errorf("refused, but not as a missing claim, so the denial is audited as an "+
+					"identity mismatch and sends the operator after the wrong problem: %v", err)
+			}
+			// The operator's only lead is which claim they configured and did not get.
+			if !strings.Contains(err.Error(), tc.claim) {
+				t.Errorf("the error does not name the configured claim %q: %v", tc.claim, err)
+			}
+		})
+	}
+
+	// The deployment this does not break: `sub` is a perfectly good username_claim
+	// when the operator chooses it, which is the migration the error message points at.
+	userInfo := &UserInfo{Subject: "alice", Claims: map[string]interface{}{"sub": "alice"}}
+	if err := b.verifyIdentityBinding(providerWithClaim("sub"), userInfo, "alice"); err != nil {
+		t.Errorf("username_claim: sub did not bind an identity whose sub is the local account: %v", err)
+	}
+}
+
 // TestPrivilegedAccountGuardIsIndependentOfTheClaim covers the second acceptance
 // criterion of #159: the uid guard holds even when the claim is an exact match and
 // nothing about the mapping is misconfigured. It is the check that survives the

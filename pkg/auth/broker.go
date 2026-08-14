@@ -923,9 +923,17 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				// claim problem that is not there.
 				errCode := "IDENTITY_MISMATCH"
 				message := "Rejected authentication: OIDC identity does not match requested local user"
-				if errors.Is(err, ErrPrivilegedAccount) {
+				switch {
+				case errors.Is(err, ErrPrivilegedAccount):
 					errCode = "PRIVILEGED_ACCOUNT_DENIED"
 					message = "Rejected authentication: refusing to bind an OIDC identity to a privileged local account"
+				case errors.Is(err, ErrUsernameClaimMissing):
+					// (#164) Also not a mismatch: there was nothing to compare. The claim the
+					// operator configured never arrived, so every login through this provider
+					// is failing for the same reason and the fix is in the provider or the
+					// config, not in this user's identity.
+					errCode = "USERNAME_CLAIM_MISSING"
+					message = "Rejected authentication: the configured username_claim is absent from the token, so the identity could not be bound"
 				}
 				log.Warn().
 					Err(err).
@@ -1351,9 +1359,9 @@ func sanitizeErrorForClient(err error) string {
 // arbitrary local account. It fails closed — any misconfiguration or mismatch
 // returns an error rather than allowing the login.
 //
-// The expected local username is resolved from the configured username_claim
-// (falling back to the standard "preferred_username" claim). Comparison is
-// case-insensitive on the local-part, matching typical POSIX/login behavior.
+// The expected local username is resolved from the configured username_claim, and
+// from no other claim (#164). Comparison is case-insensitive, and on the local-part
+// only where the provider has opted in (#159).
 func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInfo, requestedUser string) error {
 	if userInfo == nil {
 		return fmt.Errorf("no user info available")
@@ -1372,7 +1380,7 @@ func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInf
 
 	mapped, err := claimToUsername(userInfo, claimName)
 	if err != nil {
-		return err
+		return fmt.Errorf("provider %q: %w", provider.Config.Name, err)
 	}
 	mapped = strings.TrimSpace(strings.ToLower(mapped))
 	if mapped == "" {
@@ -1531,29 +1539,35 @@ func lookupLocalUID(name string) (int, bool, error) {
 	return uid, true, nil
 }
 
-// claimToUsername extracts a string username from the resolved claims using the
-// configured claim name, with sensible fallbacks to well-known UserInfo fields.
+// ErrUsernameClaimMissing is returned when the configured username_claim is not
+// in the token's claims at all. Distinguished from a mismatch because nothing about
+// the identity was wrong: the claim the operator named was never delivered, which is
+// a configuration or provider problem and is audited as one.
+var ErrUsernameClaimMissing = errors.New("configured username_claim is absent from the token claims")
+
+// claimToUsername extracts the string value of the configured claim. The claim the
+// operator named is the only claim consulted.
+//
+// (#164) There used to be a fallback here: an absent "preferred_username" or "sub"
+// substituted userInfo.Subject, and an absent "email" substituted userInfo.Email. So
+// if an IdP stopped returning preferred_username — a scope change, a claim-mapper
+// edit, a tenant migration — the authorization decision moved silently to `sub`, an
+// identifier the operator never chose and never audited, and for the many IdPs whose
+// `sub` is an email or a username it was then matched against local account names. A
+// `sub`-based deployment is expressible as username_claim: sub, which reaches
+// Claims["sub"] directly (extractUserInfoFromClaims always populates it).
 func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
-	if userInfo.Claims != nil {
-		if v, ok := userInfo.Claims[claimName]; ok {
-			if s, ok := v.(string); ok {
-				return s, nil
-			}
-			return "", fmt.Errorf("username_claim %q is not a string", claimName)
-		}
+	v, ok := userInfo.Claims[claimName]
+	if !ok {
+		return "", fmt.Errorf("username_claim %q is absent from the token claims for this identity; "+
+			"check the provider's scopes and claim mapping, or set username_claim to a claim it does "+
+			"return: %w", claimName, ErrUsernameClaimMissing)
 	}
-	// Fallbacks for the common standard claims even if not present in the raw map.
-	switch claimName {
-	case "preferred_username", "sub":
-		if userInfo.Subject != "" {
-			return userInfo.Subject, nil
-		}
-	case "email":
-		if userInfo.Email != "" {
-			return userInfo.Email, nil
-		}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("username_claim %q is not a string", claimName)
 	}
-	return "", fmt.Errorf("username_claim %q not present in token claims", claimName)
+	return s, nil
 }
 
 // classifyPollError maps a device-authorization polling error to a small, fixed
