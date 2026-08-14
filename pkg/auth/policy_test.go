@@ -45,7 +45,7 @@ func TestPolicyEngine_BasicEvaluation(t *testing.T) {
 		Timestamp:  time.Now(),
 	}
 
-	result, err := pe.EvaluateRequest(request)
+	result, err := pe.EvaluateRequest(request, "")
 	if err != nil {
 		t.Fatalf("Failed to evaluate request: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestPolicyEngine_DifferentIPTypes(t *testing.T) {
 			Timestamp:  time.Now(),
 		}
 
-		result, err := pe.EvaluateRequest(request)
+		result, err := pe.EvaluateRequest(request, "")
 		if err != nil {
 			t.Logf("Warning: Failed to evaluate request with IP %s: %v", ip, err)
 			continue
@@ -123,7 +123,7 @@ func TestPolicyEngine_RequestValidation(t *testing.T) {
 	}
 
 	// Test with nil request (should be handled gracefully)
-	result, err := pe.EvaluateRequest(nil)
+	result, err := pe.EvaluateRequest(nil, "")
 	if err == nil {
 		t.Error("Expected error with nil request")
 	}
@@ -133,7 +133,7 @@ func TestPolicyEngine_RequestValidation(t *testing.T) {
 
 	// Test with empty request
 	emptyRequest := &AuthRequest{}
-	result, err = pe.EvaluateRequest(emptyRequest)
+	result, err = pe.EvaluateRequest(emptyRequest, "")
 	if err != nil {
 		t.Logf("Warning: Error with empty request: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestPolicyEngine_TimeBasedEvaluation(t *testing.T) {
 			Timestamp:  timestamp,
 		}
 
-		result, err := pe.EvaluateRequest(request)
+		result, err := pe.EvaluateRequest(request, "")
 		if err != nil {
 			t.Logf("Warning: Failed to evaluate request with timestamp %v: %v", timestamp, err)
 			continue
@@ -218,7 +218,7 @@ func TestPolicyEngine_UserAgentEvaluation(t *testing.T) {
 			Timestamp:  time.Now(),
 		}
 
-		result, err := pe.EvaluateRequest(request)
+		result, err := pe.EvaluateRequest(request, "")
 		if err != nil {
 			t.Logf("Warning: Failed to evaluate request with user agent %s: %v", userAgent, err)
 			continue
@@ -264,7 +264,7 @@ func TestPolicyEngine_TargetHostEvaluation(t *testing.T) {
 			Timestamp:  time.Now(),
 		}
 
-		result, err := pe.EvaluateRequest(request)
+		result, err := pe.EvaluateRequest(request, "")
 		if err != nil {
 			t.Logf("Warning: Failed to evaluate request with host %s: %v", host, err)
 			continue
@@ -296,7 +296,7 @@ func TestPolicyEngine_EmptyConfiguration(t *testing.T) {
 		Timestamp:  time.Now(),
 	}
 
-	result, err := pe.EvaluateRequest(request)
+	result, err := pe.EvaluateRequest(request, "")
 	if err != nil {
 		t.Logf("Warning: Failed to evaluate request with empty config: %v", err)
 		return

@@ -25,6 +25,41 @@ type PolicyEngine struct {
 	// machine, the resource being logged into. It is deliberately not taken from
 	// the request — see applyResourcePolicies (#158).
 	resourceHost string
+
+	// riskPolicies are the configured risk policies with their conditions already
+	// parsed. Parsing at startup rather than per login is what makes a
+	// misconfigured condition a startup failure instead of a policy that silently
+	// never matches (#213).
+	riskPolicies []parsedRiskPolicy
+
+	// timeRestrictions and geoRestrictions are the configured restrictions with
+	// their windows parsed and their provider scopes resolved, for the same reason.
+	timeRestrictions []parsedTimeRestriction
+	geoRestrictions  []parsedGeoRestriction
+}
+
+// parsedRiskPolicy is a risk policy the engine has fully understood.
+type parsedRiskPolicy struct {
+	condition      riskCondition
+	action         string
+	recommendation string
+}
+
+// parsedTimeRestriction is a time restriction with its window parsed and its
+// timezone resolved.
+type parsedTimeRestriction struct {
+	providers []string
+	window    hourWindow
+	location  *time.Location
+	raw       string
+}
+
+// parsedGeoRestriction is a geographic restriction with its provider scope kept
+// alongside its country lists.
+type parsedGeoRestriction struct {
+	providers        []string
+	allowedCountries []string
+	blockedCountries []string
 }
 
 // SetMetrics attaches a Metrics instance to the policy engine.
@@ -34,9 +69,12 @@ func (pe *PolicyEngine) SetMetrics(m *oidcmetrics.Metrics) {
 
 // PolicyResult represents the result of policy evaluation
 type PolicyResult struct {
-	Allowed        bool
-	Reason         string
-	RequiredMFA    bool
+	Allowed bool
+	Reason  string
+	// (#212) There is no RequiredMFA field. It had no reader, and the two settings
+	// that wrote it — a policy's require_additional_mfa and a risk policy's
+	// REQUIRE_ADDITIONAL_MFA action — are now refused at startup rather than
+	// silently doing nothing. Reinstate it together with the code that acts on it.
 	RequiredGroups []string
 	MaxDuration    time.Duration
 	RiskScore      int
@@ -47,6 +85,19 @@ type PolicyResult struct {
 // NewPolicyEngine creates a new policy engine
 func NewPolicyEngine(cfg *config.Config) (*PolicyEngine, error) {
 	pe := &PolicyEngine{config: cfg}
+
+	// (#212) Before anything else: refuse a configuration whose access controls
+	// this broker cannot enforce. Every check below is only worth running if the
+	// operator's stated policy and the code's behaviour are the same thing.
+	if err := validatePolicySupport(cfg); err != nil {
+		return nil, err
+	}
+	if err := pe.compilePolicies(); err != nil {
+		// Unreachable if validatePolicySupport is complete; returned rather than
+		// ignored so that a gap between the two is a startup failure and not a
+		// policy that silently never matches.
+		return nil, err
+	}
 
 	if cfg != nil && cfg.Authentication.GeoIPDatabasePath != "" {
 		db, err := geoip2.Open(cfg.Authentication.GeoIPDatabasePath)
@@ -139,8 +190,15 @@ func (pe *PolicyEngine) Close() {
 	}
 }
 
-// EvaluateRequest evaluates an authentication request against policies
-func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest) (*PolicyResult, error) {
+// EvaluateRequest evaluates an authentication request against policies.
+//
+// providerName is the provider that will serve this login, chosen by the broker
+// before evaluation. It is a parameter rather than a field on AuthRequest because
+// AuthRequest is built from what the client sent: a provider-scoped restriction
+// that a client could opt out of by naming a different provider would be no
+// restriction at all (#213). An empty providerName scopes out every restriction
+// that names a provider, and leaves those scoped "all" in force.
+func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest, providerName string) (*PolicyResult, error) {
 	if req == nil {
 		return nil, fmt.Errorf("authentication request cannot be nil")
 	}
@@ -170,7 +228,7 @@ func (pe *PolicyEngine) EvaluateRequest(req *AuthRequest) (*PolicyResult, error)
 	}
 
 	// Apply time-based policies
-	if err := pe.applyTimeBasedPolicies(req, result); err != nil {
+	if err := pe.applyTimeBasedPolicies(req, providerName, result); err != nil {
 		return nil, fmt.Errorf("failed to apply time-based policies: %w", err)
 	}
 
@@ -215,6 +273,12 @@ func (pe *PolicyEngine) applyGlobalPolicies(req *AuthRequest, result *PolicyResu
 // only because the operator chose unknown_source_ip: allow. The broker audits
 // it: a waived requirement is a security-relevant event, not a detail.
 const MetadataSourceIPUnknown = "source_ip_unknown"
+
+// MetadataRequireDeviceTrust marks a result whose matching policies required a
+// trusted device. The broker carries it onto the session and enforces it once the
+// identity is known — policy is evaluated before the device flow starts, so at
+// evaluation time there is no amr claim to judge the device by (#212).
+const MetadataRequireDeviceTrust = "require_device_trust"
 
 // applyNetworkPolicies applies network-related policies
 func (pe *PolicyEngine) applyNetworkPolicies(req *AuthRequest, result *PolicyResult) error {
@@ -266,49 +330,60 @@ func (pe *PolicyEngine) applyNetworkPolicies(req *AuthRequest, result *PolicyRes
 	return nil
 }
 
-// applyTimeBasedPolicies applies time-based access policies
-func (pe *PolicyEngine) applyTimeBasedPolicies(req *AuthRequest, result *PolicyResult) error {
+// applyTimeBasedPolicies applies the configured time and geographic restrictions
+// that govern a login served by providerName.
+func (pe *PolicyEngine) applyTimeBasedPolicies(req *AuthRequest, providerName string, result *PolicyResult) error {
 	now := time.Now()
 
-	// Check time restrictions
-	for _, restriction := range pe.config.Authentication.TimeBasedPolicies.TimeRestrictions {
-		if pe.matchesTimeRestriction(req, restriction, now) {
-			if !pe.isWithinAllowedHours(restriction.AllowedHours, now, restriction.Timezone) {
-				result.Allowed = false
-				result.Reason = fmt.Sprintf("Access not allowed at this time: %s", restriction.AllowedHours)
-				return nil
-			}
+	for _, restriction := range pe.timeRestrictions {
+		if !restrictionApplies(restriction.providers, providerName) {
+			continue
+		}
+		if !restriction.window.contains(now.In(restriction.location)) {
+			result.Allowed = false
+			result.Reason = fmt.Sprintf("Access not allowed at this time: %s", restriction.raw)
+			return nil
 		}
 	}
 
-	// Check geographic restrictions
-	for _, restriction := range pe.config.Authentication.TimeBasedPolicies.GeoRestrictions {
-		if pe.matchesGeoRestriction(req, restriction) {
-			country := pe.getCountryFromIP(req.SourceIP)
+	for _, restriction := range pe.geoRestrictions {
+		if !restrictionApplies(restriction.providers, providerName) {
+			continue
+		}
+		country := pe.getCountryFromIP(req.SourceIP)
 
-			// Check blocked countries
-			for _, blocked := range restriction.BlockedCountries {
-				if country == blocked {
-					result.Allowed = false
-					result.Reason = fmt.Sprintf("Access blocked from country: %s", country)
-					return nil
+		for _, blocked := range restriction.blockedCountries {
+			if country == blocked {
+				result.Allowed = false
+				result.Reason = fmt.Sprintf("Access blocked from country: %s", country)
+				return nil
+			}
+		}
+
+		if len(restriction.allowedCountries) > 0 {
+			allowed := false
+			for _, allowedCountry := range restriction.allowedCountries {
+				if country == allowedCountry {
+					allowed = true
+					break
 				}
 			}
-
-			// Check allowed countries
-			if len(restriction.AllowedCountries) > 0 {
-				allowed := false
-				for _, allowedCountry := range restriction.AllowedCountries {
-					if country == allowedCountry {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
+			if !allowed {
+				// The reason names what the broker concluded rather than only what it
+				// wanted, because "" here means the login could not be placed at all —
+				// a private or loopback source address, or an address the GeoIP
+				// database does not cover — and that is a different conversation with
+				// the operator than "this login came from a country you excluded".
+				if country == "" {
 					result.Allowed = false
-					result.Reason = fmt.Sprintf("Access not allowed from country: %s", country)
+					result.Reason = fmt.Sprintf("Access is restricted to %s and this login's country "+
+						"could not be determined from %q", strings.Join(restriction.allowedCountries, ", "),
+						req.SourceIP)
 					return nil
 				}
+				result.Allowed = false
+				result.Reason = fmt.Sprintf("Access not allowed from country: %s", country)
+				return nil
 			}
 		}
 	}
@@ -322,19 +397,35 @@ func (pe *PolicyEngine) applyRiskPolicies(req *AuthRequest, result *PolicyResult
 	riskScore := pe.calculateRiskScore(req, result)
 	result.RiskScore = riskScore
 
-	// Apply risk policies
-	for _, policy := range pe.config.Authentication.RiskPolicies {
-		if pe.evaluateRiskCondition(policy.Condition, req, result) {
-			switch policy.Action {
-			case "DENY":
-				result.Allowed = false
-				result.Reason = policy.Recommendation
-				return nil
-			case "REQUIRE_ADDITIONAL_MFA":
-				result.RequiredMFA = true
-			case "REQUIRE_APPROVAL":
-				result.Metadata["requires_approval"] = true
+	// Apply risk policies. Conditions and actions were parsed and checked at
+	// startup (#213), so there is no unrecognized case to skip over here.
+	now := time.Now()
+	for _, policy := range pe.riskPolicies {
+		if !policy.condition.holds(pe, req, result, now) {
+			continue
+		}
+		switch policy.action {
+		case "DENY":
+			result.Allowed = false
+			// The condition is always named, even when the operator wrote a
+			// recommendation: the recommendation says what the user should do, and
+			// the audit trail has to say which rule fired (#218). A blank
+			// recommendation used to make the reason blank, which is
+			// indistinguishable from a bug.
+			result.Reason = fmt.Sprintf("denied by risk policy %q (risk score %d)",
+				policy.condition.raw, result.RiskScore)
+			if policy.recommendation != "" {
+				result.Reason += ": " + policy.recommendation
 			}
+			return nil
+		case "LOG":
+			log.Info().
+				Str("user_id", req.UserID).
+				Str("condition", policy.condition.raw).
+				Int("risk_score", result.RiskScore).
+				Strs("risk_factors", result.RiskFactors).
+				Str("recommendation", policy.recommendation).
+				Msg("Risk policy matched")
 		}
 	}
 
@@ -382,11 +473,7 @@ func (pe *PolicyEngine) applyResourcePolicies(req *AuthRequest, result *PolicyRe
 			}
 
 			if policy.RequireDeviceTrust {
-				result.Metadata["require_device_trust"] = true
-			}
-
-			if policy.RequireAdditionalMFA {
-				result.RequiredMFA = true
+				result.Metadata[MetadataRequireDeviceTrust] = true
 			}
 
 			// Check IP whitelist
@@ -400,7 +487,13 @@ func (pe *PolicyEngine) applyResourcePolicies(req *AuthRequest, result *PolicyRe
 				}
 				if !allowed {
 					result.Allowed = false
-					result.Reason = "Source IP not in whitelist"
+					// Named, because the reason is what the audit trail carries and
+					// what an operator debugging a lockout reads (#218). "Source IP
+					// not in whitelist" does not say which of several matching
+					// policies refused, nor what address was compared, so it left
+					// the operator to guess both.
+					result.Reason = fmt.Sprintf("source IP %q is not in the ip_whitelist of policy %q",
+						req.SourceIP, policyName)
 					return nil
 				}
 			}
@@ -444,68 +537,6 @@ func (pe *PolicyEngine) isPrivateIP(ip string) bool {
 	}
 
 	return false
-}
-
-func (pe *PolicyEngine) matchesTimeRestriction(req *AuthRequest, restriction config.TimeRestriction, now time.Time) bool {
-	// "all" applies to every user. Provider-scoped matching requires a ProviderName
-	// field on AuthRequest (TODO: add when provider selection moves earlier in the flow).
-	for _, provider := range restriction.Providers {
-		if provider == "all" {
-			return true
-		}
-	}
-	return false
-}
-
-func (pe *PolicyEngine) matchesGeoRestriction(req *AuthRequest, restriction config.GeoRestriction) bool {
-	// "all" applies to every user. Provider-scoped matching requires a ProviderName
-	// field on AuthRequest (TODO: add when provider selection moves earlier in the flow).
-	for _, provider := range restriction.Providers {
-		if provider == "all" {
-			return true
-		}
-	}
-	return false
-}
-
-func (pe *PolicyEngine) isWithinAllowedHours(allowedHours string, now time.Time, timezone string) bool {
-	if allowedHours == "" {
-		return true
-	}
-
-	// Parse timezone
-	loc, err := time.LoadLocation(timezone)
-	if err != nil {
-		log.Warn().Err(err).Str("timezone", timezone).Msg("Failed to load timezone")
-		loc = time.UTC
-	}
-
-	// Convert to specified timezone
-	localTime := now.In(loc)
-
-	// Parse allowed hours (e.g., "09:00-17:00")
-	parts := strings.Split(allowedHours, "-")
-	if len(parts) != 2 {
-		return true
-	}
-
-	startTime, err := time.ParseInLocation("15:04", parts[0], loc)
-	if err != nil {
-		return true
-	}
-
-	endTime, err := time.ParseInLocation("15:04", parts[1], loc)
-	if err != nil {
-		return true
-	}
-
-	// Adjust for current date
-	startTime = time.Date(localTime.Year(), localTime.Month(), localTime.Day(),
-		startTime.Hour(), startTime.Minute(), 0, 0, loc)
-	endTime = time.Date(localTime.Year(), localTime.Month(), localTime.Day(),
-		endTime.Hour(), endTime.Minute(), 0, 0, loc)
-
-	return localTime.After(startTime) && localTime.Before(endTime)
 }
 
 // getCountryFromIP returns the ISO 3166-1 alpha-2 country code for the given IP
@@ -572,27 +603,6 @@ func (pe *PolicyEngine) calculateRiskScore(req *AuthRequest, result *PolicyResul
 	}
 
 	return score
-}
-
-func (pe *PolicyEngine) evaluateRiskCondition(condition string, req *AuthRequest, result *PolicyResult) bool {
-	// Simple condition evaluation
-	// In a real implementation, this would be more sophisticated
-	switch condition {
-	case "risk_score >= 70":
-		return result.RiskScore >= 70
-	case "unusual_location AND after_hours":
-		return pe.isUnusualLocation(req.UserID, req.SourceIP) && pe.isAfterHours(time.Now())
-	case "untrusted_network":
-		return !pe.isPrivateIP(req.SourceIP)
-	default:
-		// L-7: an unrecognized condition silently evaluates to "does not fire",
-		// which means a misconfigured DENY policy would never apply. Log loudly so
-		// the misconfiguration is visible rather than failing open silently.
-		log.Warn().
-			Str("condition", condition).
-			Msg("Unknown risk policy condition; it will not match. Check policy configuration")
-		return false
-	}
 }
 
 func (pe *PolicyEngine) matchesResourcePolicy(targetHost, policyName string) bool {

@@ -437,15 +437,18 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 
 	tokenManager := newTestTokenManager(t)
 
-	broker := &Broker{
-		config: &config.Config{
-			Authentication: config.AuthenticationConfig{
-				TokenLifetime:    time.Hour,
-				RefreshThreshold: 15 * time.Minute,
-			},
+	cfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:    time.Hour,
+			RefreshThreshold: 15 * time.Minute,
 		},
+	}
+
+	broker := &Broker{
+		config:       cfg,
 		sessions:     make(map[string]*Session),
 		sessionMutex: sync.RWMutex{},
+		policyEngine: newTestPolicyEngine(t, cfg),
 		providers:    map[string]*OIDCProvider{"test-provider": provider},
 		auditLogger:  auditLogger,
 		tokenManager: tokenManager,
@@ -518,15 +521,18 @@ func TestBrokerRefreshSessionNoRefreshToken(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
-	broker := &Broker{
-		config: &config.Config{
-			Authentication: config.AuthenticationConfig{
-				TokenLifetime:    time.Hour,
-				RefreshThreshold: 15 * time.Minute,
-			},
+	cfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:    time.Hour,
+			RefreshThreshold: 15 * time.Minute,
 		},
+	}
+
+	broker := &Broker{
+		config:       cfg,
 		sessions:     make(map[string]*Session),
 		sessionMutex: sync.RWMutex{},
+		policyEngine: newTestPolicyEngine(t, cfg),
 		providers:    map[string]*OIDCProvider{"test-provider": {}},
 		auditLogger:  auditLogger,
 	}
@@ -557,15 +563,18 @@ func TestBrokerRefreshSessionNoRefreshToken(t *testing.T) {
 func TestBrokerRefreshSessionNotCloseToExpiry(t *testing.T) {
 	// Session not yet within the refresh threshold — RefreshSession should return success
 	// without hitting the token endpoint.
-	broker := &Broker{
-		config: &config.Config{
-			Authentication: config.AuthenticationConfig{
-				TokenLifetime:    time.Hour,
-				RefreshThreshold: 15 * time.Minute,
-			},
+	cfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			TokenLifetime:    time.Hour,
+			RefreshThreshold: 15 * time.Minute,
 		},
+	}
+
+	broker := &Broker{
+		config:       cfg,
 		sessions:     make(map[string]*Session),
 		sessionMutex: sync.RWMutex{},
+		policyEngine: newTestPolicyEngine(t, cfg),
 		providers:    map[string]*OIDCProvider{},
 	}
 
@@ -610,6 +619,21 @@ func TestAuthenticateSessionIDUniqueness(t *testing.T) {
 		}
 		seen[resp.SessionID] = true
 	}
+}
+
+// newTestPolicyEngine builds an engine through the real constructor, so tests that
+// hand-assemble a Broker get the same startup validation and policy compilation a
+// running broker has. RefreshSession re-evaluates policy (#215), so a broker
+// without an engine is refused rather than passed — meaning these tests need a
+// real one to reach the paths they are about.
+func newTestPolicyEngine(t *testing.T, cfg *config.Config) *PolicyEngine {
+	t.Helper()
+
+	pe, err := NewPolicyEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewPolicyEngine: %v", err)
+	}
+	return pe
 }
 
 // newTestTokenManager returns a TokenManager with a valid AES-256 key, for tests

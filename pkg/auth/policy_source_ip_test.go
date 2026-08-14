@@ -28,7 +28,7 @@ func networkPolicyEngine(t *testing.T, nr config.NetworkRequirements) *PolicyEng
 func evaluate(t *testing.T, pe *PolicyEngine, req *AuthRequest) *PolicyResult {
 	t.Helper()
 
-	result, err := pe.EvaluateRequest(req)
+	result, err := pe.EvaluateRequest(req, "")
 	if err != nil {
 		t.Fatalf("EvaluateRequest: %v", err)
 	}

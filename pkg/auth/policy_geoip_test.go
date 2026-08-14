@@ -2,6 +2,7 @@ package auth
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
@@ -129,42 +130,69 @@ func TestNewPolicyEngineNoGeoIPPath(t *testing.T) {
 	pe.Close() // must not panic
 }
 
-// TestGeoRestrictionWithoutDatabase verifies that geographic restrictions do
-// not block access when no GeoIP database is configured (country resolves to
-// ""), so that a missing database does not lock out all users.
-func TestGeoRestrictionWithoutDatabase(t *testing.T) {
+// TestGeoRestrictionWithoutDatabaseIsRefusedAtStartup pins the fix for what this
+// test used to accept. A geo_restriction with no geoip_database_path resolves every
+// country to "", so the restriction matched nothing and denied every login it
+// applied to — an operator who names allowed_countries and forgets the database
+// locks out the host. The old test observed that outcome, logged it, and asserted
+// nothing.
+//
+// A missing database is now a startup error (#212): the broker refuses to run a
+// restriction it cannot evaluate, which the operator sees at install time instead
+// of at the first login.
+func TestGeoRestrictionWithoutDatabaseIsRefusedAtStartup(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		restrictor config.GeoRestriction
+	}{
+		{"allowed countries", config.GeoRestriction{Providers: []string{"all"}, AllowedCountries: []string{"US", "CA"}}},
+		{"blocked countries", config.GeoRestriction{Providers: []string{"all"}, BlockedCountries: []string{"XX"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Authentication: config.AuthenticationConfig{
+					TimeBasedPolicies: config.TimeBasedPolicies{
+						GeoRestrictions: []config.GeoRestriction{tc.restrictor},
+					},
+				},
+			}
+
+			pe, err := NewPolicyEngine(cfg)
+			if err == nil {
+				pe.Close()
+				t.Fatal("NewPolicyEngine accepted a geo restriction with no GeoIP database; " +
+					"every login it applies to would be denied for a country it cannot resolve (#212)")
+			}
+			if !strings.Contains(err.Error(), "geoip_database_path") {
+				t.Errorf("startup error does not name the setting the operator has to add: %v", err)
+			}
+		})
+	}
+}
+
+// TestGeoRestrictionNeedsAProviderScope covers the other half: a restriction with
+// no providers list matched no provider, so it was inert. Silently applying to
+// nothing is the failure mode this whole change is about.
+func TestGeoRestrictionNeedsAProviderScope(t *testing.T) {
 	cfg := &config.Config{
 		Authentication: config.AuthenticationConfig{
 			TimeBasedPolicies: config.TimeBasedPolicies{
 				GeoRestrictions: []config.GeoRestriction{
-					{
-						AllowedCountries: []string{"US", "CA"},
-					},
+					{AllowedCountries: []string{"US"}},
 				},
 			},
 		},
 	}
 
 	pe, err := NewPolicyEngine(cfg)
-	if err != nil {
-		t.Fatalf("NewPolicyEngine failed: %v", err)
+	if err == nil {
+		pe.Close()
+		t.Fatal("NewPolicyEngine accepted a geo restriction with an empty providers list, " +
+			"which applies to no provider and therefore restricts nothing (#212)")
 	}
-
-	req := &AuthRequest{
-		UserID:   "testuser",
-		SourceIP: "8.8.8.8",
+	if !strings.Contains(err.Error(), "providers") {
+		t.Errorf("startup error does not name the empty providers list: %v", err)
 	}
-
-	result := &PolicyResult{Allowed: true}
-	if err := pe.applyTimeBasedPolicies(req, result); err != nil {
-		t.Fatalf("applyTimeBasedPolicies returned error: %v", err)
-	}
-
-	// With no database, country is "" which is not in the allowed list, so
-	// the restriction will block access. This is intentional: operators who
-	// configure geo restrictions MUST provide a GeoIP database.
-	// The test simply asserts the behaviour is deterministic (not a panic).
-	t.Logf("access allowed=%v reason=%q (no GeoIP DB)", result.Allowed, result.Reason)
 }
 
 // TestPolicyEngineClose verifies that Close is idempotent and safe to call

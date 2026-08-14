@@ -579,7 +579,7 @@ func TestPerPolicyRequireGroupsIsEnforced(t *testing.T) {
 		LoginType:  "ssh",
 		SourceIP:   "192.0.2.10",
 		TargetHost: "some-client.example.net", // what a client actually sends
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("EvaluateRequest: %v", err)
 	}
@@ -649,7 +649,7 @@ func TestResourcePolicyMatchesTheResourceNotTheClient(t *testing.T) {
 			engine := &PolicyEngine{config: policyCfg, resourceHost: tc.resourceHost}
 			result, err := engine.EvaluateRequest(&AuthRequest{
 				UserID: "testuser", LoginType: "ssh", TargetHost: tc.targetHost,
-			})
+			}, "")
 			if err != nil {
 				t.Fatalf("EvaluateRequest: %v", err)
 			}
@@ -679,6 +679,9 @@ func TestQuickStartConfigEnforcesItsRequiredGroups(t *testing.T) {
 	// (#170) It said `session_duration`, which is not a field of a policy; the
 	// loader dropped it in silence then and refuses it now, so the doc says
 	// max_session_duration.
+	// (#212) It also said `audit_level: "standard"`, which nothing has ever read.
+	// The broker now refuses to start on it rather than reporting an audit level it
+	// does not apply, so the doc no longer offers it.
 	const quickStartAuth = `
 authentication:
   token_lifetime: "8h"
@@ -686,7 +689,6 @@ authentication:
     default:
       require_groups: ["users"]
       max_session_duration: "8h"
-      audit_level: "standard"
 `
 	configPath := filepath.Join(t.TempDir(), "broker.yaml")
 	if err := os.WriteFile(configPath, []byte(quickStartAuth), 0o600); err != nil {
@@ -719,7 +721,7 @@ authentication:
 		LoginType:  "ssh",
 		SourceIP:   "192.0.2.10",
 		TargetHost: "some-client.example.net",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("EvaluateRequest: %v", err)
 	}
