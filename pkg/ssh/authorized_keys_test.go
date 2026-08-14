@@ -160,9 +160,12 @@ func TestRemovePublicKey(t *testing.T) {
 	}
 
 	// Remove the public key
-	err = akm.RemovePublicKey(username, publicKey)
+	removed, err := akm.RemovePublicKey(username, publicKey)
 	if err != nil {
 		t.Errorf("Failed to remove public key: %v", err)
+	}
+	if !removed {
+		t.Error("RemovePublicKey reported no match for a key it had just added")
 	}
 
 	// Verify the key was removed
@@ -191,9 +194,12 @@ func TestRemovePublicKeyNonExistentFile(t *testing.T) {
 	publicKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... testuser@example.com")
 
 	// Try to remove a key when file doesn't exist
-	err = akm.RemovePublicKey(username, publicKey)
+	removed, err := akm.RemovePublicKey(username, publicKey)
 	if err != nil {
 		t.Errorf("Expected no error when removing key from non-existent file, got: %v", err)
+	}
+	if removed {
+		t.Error("RemovePublicKey claimed a removal from a file that does not exist")
 	}
 }
 
@@ -217,9 +223,14 @@ func TestRemovePublicKeyNotFound(t *testing.T) {
 	}
 
 	// Try to remove a different key
-	err = akm.RemovePublicKey(username, nonExistentKey)
+	removed, err := akm.RemovePublicKey(username, nonExistentKey)
 	if err != nil {
 		t.Errorf("Expected no error when removing non-existent key, got: %v", err)
+	}
+	// The caller has to be able to tell this from a real removal, or it audits a
+	// revocation that did not happen (#165).
+	if removed {
+		t.Error("RemovePublicKey reported a removal for a key that was never present")
 	}
 
 	// Verify the existing key is still there
