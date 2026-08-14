@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -434,4 +435,64 @@ func TestAcctMgmtHasNoOpinion(t *testing.T) {
 	if got != pam.PAMIgnore {
 		t.Errorf("pam_sm_acct_mgmt returned %d, want PAM_IGNORE (%d)", got, pam.PAMIgnore)
 	}
+}
+
+// oversizedResponse is a syntactically valid response too large for the module's
+// buffer. It is written verbatim, so what the module sees is a prefix of it with no
+// end of message in it — which is what the broker used to send whenever the QR art
+// pushed a device response past 8 KiB (#162).
+//
+// The size here is far above the module's buffer rather than exactly one byte over
+// it: the exact number is pinned from the other side, by
+// TestResponseSizeMatchesTheModulesBuffer in internal/ipc.
+func oversizedResponse() string {
+	return `{"success":true,"session_id":"sess-big","requires_device":true,"instructions":"` +
+		strings.Repeat("Q", 32<<10) + `"}` + "\n"
+}
+
+// A response the module cannot fit in its buffer must be reported as its own
+// failure, not as "the broker is unavailable".
+//
+// Before this, receive_auth_response returned success on a full buffer with no
+// newline, so the caller parsed a truncated prefix, json_tokener_parse failed, and
+// the only trace was "Failed to parse broker response" — with a PAM result
+// indistinguishable from a broker that is not running. An operator debugging
+// "nobody can log in" was told to look at the wrong thing.
+func TestPerformAuthenticationReportsAnOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	t.Run("on the initial authenticate", func(t *testing.T) {
+		t.Parallel()
+
+		broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+			return oversizedResponse()
+		})
+
+		got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+		if got == pam.PAMAuthInfoUnavail {
+			t.Fatal("an oversized response is reported as PAM_AUTHINFO_UNAVAIL, the same result as a " +
+				"broker that is not running")
+		}
+		if got != pam.PAMServiceError {
+			t.Fatalf("got PAM result %d, want pam.PAMServiceError (%d)", got, pam.PAMServiceError)
+		}
+	})
+
+	// The poll path reads responses with the same buffer, so it must classify them
+	// the same way.
+	t.Run("on a poll", func(t *testing.T) {
+		t.Parallel()
+
+		broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+			if n == 1 {
+				return deviceStarted("sess-big")
+			}
+			return oversizedResponse()
+		})
+
+		got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+		if got != pam.PAMServiceError {
+			t.Fatalf("got PAM result %d, want pam.PAMServiceError (%d)", got, pam.PAMServiceError)
+		}
+	})
 }

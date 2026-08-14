@@ -46,6 +46,26 @@ const (
 	slowDownIncrement  = 5
 )
 
+// Bounds on the provider-supplied strings that end up in the response the PAM
+// module reads.
+//
+// The module reads a response into a fixed-size buffer (MAX_RESPONSE_SIZE, 16 KiB),
+// and the verification URI is in there twice over: as device_url, and inside the
+// formatted instructions as both text and QR art whose size grows with the URI. A
+// provider (or anything that can answer as one) returning a kilobyte-long
+// verification_uri therefore pushes an ordinary login response past what the module
+// can parse, and every login on the host fails with nothing in syslog but "Failed
+// to parse broker response" (#162). internal/ipc bounds the response it sends as
+// well; this bounds the input, where the error can still name the provider and the
+// field.
+//
+// 512 bytes is far above anything real: the longest verification URIs in the wild
+// are around 100 characters, and the user code is meant to be typed by a human.
+const (
+	maxVerificationURILen = 512
+	maxUserCodeLen        = 64
+)
+
 // DeviceFlow represents an OAuth2 device authorization flow
 type DeviceFlow struct {
 	DeviceCode      string
@@ -324,6 +344,10 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		return nil, fmt.Errorf("provider returned invalid expires_in value: %d (must be 1–%d seconds)", deviceResp.ExpiresIn, maxDeviceCodeExpiry)
 	}
 
+	if err := validateDeviceAuthLengths(&deviceResp); err != nil {
+		return nil, err
+	}
+
 	// Clamp the provider's interval to [minPollingInterval, maxPollingInterval].
 	if deviceResp.Interval < minPollingInterval {
 		deviceResp.Interval = minPollingInterval
@@ -356,6 +380,32 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		Msg("Device flow initiated")
 
 	return deviceFlow, nil
+}
+
+// validateDeviceAuthLengths rejects a device authorization response whose
+// user-facing strings are too long to fit in the response the PAM module reads
+// (#162). Refusing here fails the login for the one user whose provider misbehaves,
+// with the provider and field named in the error; letting it through fails every
+// login on the host with an unparseable response.
+func validateDeviceAuthLengths(resp *DeviceAuthResponse) error {
+	fields := []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"verification_uri", resp.VerificationURI, maxVerificationURILen},
+		{"verification_uri_complete", resp.VerificationURIComplete, maxVerificationURILen},
+		{"user_code", resp.UserCode, maxUserCodeLen},
+	}
+
+	for _, field := range fields {
+		if len(field.value) > field.max {
+			return fmt.Errorf("provider returned a %s of %d bytes, over the %d-byte limit",
+				field.name, len(field.value), field.max)
+		}
+	}
+
+	return nil
 }
 
 // PollDeviceAuthorization polls for device authorization completion.

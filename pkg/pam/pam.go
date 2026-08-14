@@ -30,7 +30,15 @@ import (
 type PAMResultCode int
 
 const (
-	PAMSuccess         PAMResultCode = 0  // PAM_SUCCESS
+	PAMSuccess PAMResultCode = 0 // PAM_SUCCESS
+
+	// PAMServiceError is "error in service module": the module and the broker
+	// disagree about something, as opposed to the broker being unreachable
+	// (PAMAuthInfoUnavail) or the user being refused (PAMAuthError). The module
+	// returns it when a broker response does not fit its response buffer, so that
+	// an operator can tell those three apart in auth.log (#162).
+	PAMServiceError PAMResultCode = 3 // PAM_SERVICE_ERR
+
 	PAMSystemError     PAMResultCode = 4  // PAM_SYSTEM_ERR
 	PAMPermDenied      PAMResultCode = 6  // PAM_PERM_DENIED
 	PAMAuthError       PAMResultCode = 7  // PAM_AUTH_ERR

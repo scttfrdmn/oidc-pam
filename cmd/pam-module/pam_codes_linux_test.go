@@ -24,6 +24,7 @@ import (
 func TestPAMResultCodesMatchHeaders(t *testing.T) {
 	declared := map[string]pam.PAMResultCode{
 		"PAM_SUCCESS":          pam.PAMSuccess,
+		"PAM_SERVICE_ERR":      pam.PAMServiceError,
 		"PAM_SYSTEM_ERR":       pam.PAMSystemError,
 		"PAM_PERM_DENIED":      pam.PAMPermDenied,
 		"PAM_AUTH_ERR":         pam.PAMAuthError,

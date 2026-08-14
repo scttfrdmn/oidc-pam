@@ -62,7 +62,6 @@ type Response struct {
 	SessionID        string                 `json:"session_id,omitempty"`
 	DeviceCode       string                 `json:"device_code,omitempty"`
 	DeviceURL        string                 `json:"device_url,omitempty"`
-	QRCode           string                 `json:"qr_code,omitempty"`
 	ExpiresAt        time.Time              `json:"expires_at,omitempty"`
 	SSHPublicKey     string                 `json:"ssh_public_key,omitempty"`
 	RequiresDevice   bool                   `json:"requires_device,omitempty"`
