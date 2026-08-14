@@ -30,6 +30,28 @@ print the verification URL on and a user waiting in front of it, and whether a
 given service's PAM conversation displays `PAM_TEXT_INFO` at all is a property of
 that service. Test them on a host you can still get back into.
 
+### What the installers wire, and what they leave alone
+
+`scripts/install.sh` and `scripts/install-release.sh --configure-pam` edit
+`/etc/pam.d/sshd` and **nothing else** (#220). They:
+
+- add `auth sufficient pam_oidc.so` **after** any `pam_faillock`/`pam_env`/
+  `pam_nologin` prologue and **before** the first module that authenticates, not
+  at line 1. Inserting first breaks `pam_faillock` failure counting, and it makes
+  a `requisite pam_nologin.so` or `pam_access.so` below it unreachable, because a
+  `sufficient` module that succeeds ends the auth phase there;
+- fence the line in `# BEGIN oidc-pam` / `# END oidc-pam` comments, so
+  `scripts/uninstall.sh` removes exactly what was added;
+- **refuse to edit a stack they do not recognise**, printing the line they would
+  have added so you can place it yourself;
+- never touch `login`, `su` or `sudo`. The console is the recovery path when the
+  broker is down, and `su`/`sudo` are how you repair the host once you are on it.
+
+`login` as shipped here tries `pam_unix.so` **before** `pam_oidc.so` for that
+reason: a local password gets you a console session whether or not the broker is
+running. Install it by hand, and only if you have decided you want OIDC on the
+console.
+
 ### Why no host-wide stack is shipped
 
 `/etc/pam.d/common-auth` (Debian/Ubuntu) and `/etc/pam.d/system-auth` (RHEL,
@@ -54,7 +76,11 @@ put it in the per-service file for the service you actually want it in.
 ### Usage Instructions
 
 #### 1. Prerequisites
-- OIDC PAM module installed: `/lib/security/pam_oidc.so`
+- OIDC PAM module installed in the directory *this host's* libpam loads from —
+  `/lib/<triplet>/security` on Debian/Ubuntu, `/lib64/security` on RHEL-family.
+  `scripts/install.sh` detects it; see
+  [PAM Module Not Found](#2-pam-module-not-found) for how to find it by hand.
+  There is no `/lib/security` on either family (#208)
 - OIDC broker running: `systemctl start oidc-auth-broker`
 - OIDC provider configured in `/etc/oidc-auth/broker.yaml`
 
@@ -293,13 +319,28 @@ curl -k https://your-oidc-provider.com/.well-known/openid-configuration
 ```
 
 #### 2. PAM Module Not Found
-```bash
-# Check if module is installed
-ls -la /lib/security/pam_oidc.so
 
-# Check module permissions
-sudo chmod 644 /lib/security/pam_oidc.so
+PAM only loads modules from the path libpam was built with, and that path differs
+by distribution — there is no `/lib/security` on Debian/Ubuntu or on RHEL-family
+systems (#208). Find the directory the same way the installer does, by looking for
+a module libpam itself ships:
+
+```bash
+# Debian/Ubuntu (the path carries a multiarch triplet)
+dirname "$(dpkg -L libpam-modules | grep -m1 '/pam_permit\.so$')"
+
+# RHEL, Fedora, Amazon Linux
+dirname "$(rpm -ql pam | grep -m1 '/pam_permit\.so$')"
+
+# Then check the module is there, and readable
+moddir="$(dirname "$(dpkg -L libpam-modules 2>/dev/null | grep -m1 '/pam_permit\.so$')")"
+ls -la "$moddir/pam_oidc.so"
+sudo chmod 644 "$moddir/pam_oidc.so"
 ```
+
+A module in the wrong directory is not a no-op: with the stack in `ssh` below,
+the unresolvable `sufficient` line falls through to `auth requisite pam_deny.so`
+and **every** login is refused.
 
 #### 3. Configuration Errors
 ```bash

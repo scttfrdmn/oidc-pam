@@ -62,11 +62,6 @@ for platform in "${PLATFORMS[@]}"; do
     for binary_info in "${BINARIES[@]}"; do
         IFS=':' read -r binary_name binary_path <<< "$binary_info"
         
-        output_name="${binary_name}"
-        if [[ "$os" == "windows" ]]; then
-            output_name="${binary_name}.exe"
-        fi
-        
         output_path="${BINARY_DIR}/${binary_name}-${os}-${arch}"
         if [[ "$os" == "windows" ]]; then
             output_path="${output_path}.exe"

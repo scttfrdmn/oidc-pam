@@ -40,7 +40,12 @@ RUN mkdir -p /etc/fakeoidc /etc/oidc-auth \
     && cp /etc/fakeoidc/tls.crt /etc/oidc-auth/fakeoidc.crt
 
 COPY --from=builder /out/oidc-auth-broker /out/oidc-admin /out/fakeoidc /usr/local/bin/
-COPY test/e2e/broker.yaml /etc/oidc-auth/broker.yaml
+# --chmod=600, because COPY's default is 0644 and the broker now refuses to start
+# on a configuration any local process can read (#209) — it holds the token
+# encryption key and every client secret. The harness runs the real check rather
+# than setting OIDC_AUTH_DEV=true to opt out of it: this container is where the
+# broker is started the way a host starts it.
+COPY --chmod=600 test/e2e/broker.yaml /etc/oidc-auth/broker.yaml
 
 # The broker writes SSH keys and its authorized_keys write locks here (locks/ is
 # root-owned and unreachable from the client container, which is the point of

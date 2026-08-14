@@ -77,12 +77,16 @@ All Go dependencies are managed through `go.mod` and will be automatically downl
 - `/etc/oidc-auth/` directory for configuration
 - `/var/run/oidc-auth/` directory for runtime files (sockets, PIDs)
 - `/var/log/oidc-auth/` directory for logs (optional)
-- `/lib/security/` directory for PAM module
+- `/var/lib/oidc-pam/` directory for broker state (issued SSH keys, write locks)
+- the directory this host's libpam loads modules from, for `pam_oidc.so` —
+  `/lib/<triplet>/security` on Debian/Ubuntu, `/lib64/security` on RHEL-family.
+  There is no `/lib/security` on either (#208); `scripts/install.sh` detects the
+  right one and refuses to install if it cannot
 - `/usr/local/bin/` directory for binaries
 
 ### User Permissions
 - Root privileges required for:
-  - Installing PAM module to `/lib/security/`
+  - Installing PAM module into libpam's module directory
   - Configuring PAM in `/etc/pam.d/`
   - Installing systemd service files
   - Creating system directories

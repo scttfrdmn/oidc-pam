@@ -35,7 +35,8 @@ check_requirements() {
     fi
     
     # Check Go version
-    local go_version=$(go version | awk '{print $3}' | sed 's/go//')
+    local go_version
+    go_version=$(go version | awk '{print $3}' | sed 's/go//')
     local required_version="1.21"
     
     if ! printf '%s\n' "$required_version" "$go_version" | sort -V | head -n1 | grep -q "$required_version"; then
