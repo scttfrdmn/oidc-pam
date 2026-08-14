@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 )
@@ -94,6 +96,61 @@ func TestStopDrainsAfterTheContextIsCancelled(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "dave") {
 		t.Errorf("event logged after cancellation was not written; audit log holds %d bytes", len(data))
+	}
+}
+
+// slowAuditOutput is an output that takes its time, standing in for the
+// unreachable HTTP sink that makes an unbounded drain dangerous: three retries
+// against a dead endpoint cost up to 33s for one event.
+type slowAuditOutput struct {
+	delay   time.Duration
+	written atomic.Int64
+}
+
+func (s *slowAuditOutput) Write(AuditEvent) error {
+	time.Sleep(s.delay)
+	s.written.Add(1)
+	return nil
+}
+
+func (s *slowAuditOutput) Close() error { return nil }
+
+// TestStopGivesUpOnASlowOutput pins the bound on the drain. A shutdown that
+// never finishes is worse than an incomplete audit trail, so the budget wins —
+// but it must write what it can, stop in about the budget rather than the time
+// the whole buffer would take, and account for what it abandoned.
+func TestStopGivesUpOnASlowOutput(t *testing.T) {
+	original := auditDrainBudget
+	auditDrainBudget = 50 * time.Millisecond
+	t.Cleanup(func() { auditDrainBudget = original })
+
+	logger, err := NewAuditLogger(fileAuditConfig(filepath.Join(t.TempDir(), "slow.log")))
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	slow := &slowAuditOutput{delay: 25 * time.Millisecond}
+	logger.outputs = []AuditOutput{slow}
+
+	const queued = 40
+	for i := 0; i < queued; i++ {
+		logger.LogAuthEvent(nonCriticalEvent("user"))
+	}
+
+	start := time.Now()
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// 40 events at 25ms each is a full second; the budget is 50ms.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Stop took %v: the drain is not bounded by the budget", elapsed)
+	}
+	if written := slow.written.Load(); written == 0 {
+		t.Error("Stop wrote nothing: the budget must not stop the drain before it makes progress")
+	}
+	if dropped := logger.DroppedEvents(); dropped == 0 {
+		t.Error("abandoned events were not counted, so nothing tells an operator the trail is incomplete")
 	}
 }
 

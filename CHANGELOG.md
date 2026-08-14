@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `Stop` drains again afterwards, so a logger that was never started, or
     whose worker had already returned on a cancelled context, still writes what
     it accepted. `Stop` returning now means every accepted event is on disk.
+  - Draining is bounded by a five-second budget, because an output can be
+    arbitrarily slow: one unreachable HTTP sink costs up to three ten-second
+    timeouts plus backoff for a *single* event, and the default buffer holds a
+    thousand, so an unbounded drain could hold shutdown for hours. A shutdown
+    that never finishes is worse than an incomplete trail, so the budget wins —
+    and what it abandons is counted in `DroppedEvents` and logged with the
+    number, since a gap nobody is told about is indistinguishable from nothing
+    having happened.
   - `Stop` is idempotent (`sync.Once`). It closes a channel, and stopping on a
     shutdown path plus a deferred cleanup — the ordinary shape — used to panic
     with `close of closed channel`.
@@ -37,8 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Coverage: `TestStopWritesEventsStillQueued` (three events queued with no
   worker; the file is empty without the fix), `TestStopDrainsAfterTheContextIsCancelled`
-  (an event logged in the window between cancellation and `Stop`) and
-  `TestStopIsIdempotent` (which panics without the `sync.Once`). Each was run
+  (an event logged in the window between cancellation and `Stop`),
+  `TestStopGivesUpOnASlowOutput` (forty events behind a slow output with the
+  budget shortened: unbounded, `Stop` takes 1.04s against a 50ms budget and
+  counts nothing) and `TestStopIsIdempotent` (which panics without the `sync.Once`). Each was run
   against the defect reintroduced.
 - **Medium (#172): `configs/pam/common-auth` put a 90-second interactive device
   flow in the auth stack of every service on the host.** `common-auth` is the file

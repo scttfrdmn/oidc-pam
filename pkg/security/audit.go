@@ -116,6 +116,13 @@ const (
 	httpAuditTimeout    = 10 * time.Second
 )
 
+// auditDrainBudget caps how long Stop spends writing the events still queued.
+// It is a variable only so tests can shorten it; nothing outside this package
+// sets it. Five seconds is chosen against the slowest output: one unreachable
+// HTTP sink costs up to 33s for a single event, so the budget bounds shutdown at
+// roughly one such event rather than the whole buffer.
+var auditDrainBudget = 5 * time.Second
+
 // NewAuditLogger creates a new audit logger
 func NewAuditLogger(cfg config.AuditConfig) (*AuditLogger, error) {
 	if !cfg.Enabled {
@@ -202,20 +209,49 @@ func (al *AuditLogger) Stop() error {
 // want. Losing records quietly is the one behaviour an audit trail may not
 // have, which is also why the default overflow strategy is "block".
 //
-// Draining is bounded by what is in the buffer: LogAuthEvent's callers have
-// stopped by the time Stop is called, so no new events arrive, and the default
-// branch ends the loop as soon as the buffer is empty.
+// Draining is bounded twice over. By the buffer, because LogAuthEvent's callers
+// have stopped by the time Stop is called, so no new events arrive and the
+// default branch ends the loop as soon as the buffer is empty. And by
+// auditDrainBudget, because an output can be arbitrarily slow: an unreachable
+// HTTP sink costs up to httpAuditMaxRetries timeouts plus backoff per event, so
+// draining a full 1000-event buffer into one could hold shutdown for hours. A
+// shutdown that does not finish is worse than a lost record, so the budget wins
+// and what it abandons is counted and logged rather than silently forgotten.
 func (al *AuditLogger) drain() {
+	deadline := time.Now().Add(auditDrainBudget)
 	for {
 		select {
 		case event := <-al.eventChan:
 			al.writeMu.Lock()
 			al.writeEvent(event)
 			al.writeMu.Unlock()
+			// Checked after a write, so the budget can never stop the drain
+			// before it has made progress.
+			if time.Now().After(deadline) {
+				al.abandonQueue()
+				return
+			}
 		default:
 			return
 		}
 	}
+}
+
+// abandonQueue accounts for the events the drain budget left unwritten, so
+// DroppedEvents and the shutdown log tell an operator that the end of the audit
+// trail is incomplete. A gap nobody is told about is indistinguishable from
+// nothing having happened.
+func (al *AuditLogger) abandonQueue() {
+	remaining := len(al.eventChan)
+	if remaining == 0 {
+		return
+	}
+	total := al.droppedEvents.Add(int64(remaining))
+	log.Error().
+		Int("abandoned", remaining).
+		Int64("total_dropped", total).
+		Dur("budget", auditDrainBudget).
+		Msg("Audit drain budget exhausted at shutdown; queued events were not written")
 }
 
 // LogAuthEvent logs an authentication event
