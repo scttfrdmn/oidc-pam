@@ -424,6 +424,22 @@ func ValidateAuditConfig(cfg config.AuditConfig) error {
 	}
 
 	var problems []string
+
+	// (#210) audit.enabled defaults to true and audit.outputs has no default, so a
+	// configuration that omits the audit block entirely — or writes
+	// `audit: {enabled: true}` — used to produce a logger with no destinations.
+	// writeEvent then iterated an empty slice: every event was accepted, nothing
+	// was written, and neither DroppedEvents nor FailedWrites moved, so the two
+	// counters an operator alerts on stayed at zero while the audit trail did not
+	// exist. Refusing to start is the only honest answer. Defaulting to stdout
+	// would be worse: it puts the audit trail somewhere the operator did not
+	// choose (the journal, under the shipped unit) and keeps the "auditing is on"
+	// claim true by moving the records rather than by writing them where asked.
+	if len(cfg.Outputs) == 0 {
+		problems = append(problems, "audit.enabled is true but audit.outputs is empty: "+
+			"name at least one output ("+SupportedAuditOutputTypes()+"), or set audit.enabled: false")
+	}
+
 	for i, out := range cfg.Outputs {
 		if _, ok := auditOutputConstructors[out.Type]; !ok {
 			problems = append(problems, fmt.Sprintf("audit.outputs[%d]: unsupported type %q (supported: %s)",

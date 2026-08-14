@@ -64,7 +64,8 @@ func TestShippedConfigsLoad(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			path := file
-			if !isWholeConfig(t, file) {
+			whole := isWholeConfig(t, file)
+			if !whole {
 				path = wrapProviderFragment(t, file)
 			}
 			// LoadConfig refuses a configuration anyone but root can read (#209),
@@ -84,8 +85,17 @@ func TestShippedConfigsLoad(t *testing.T) {
 			// error reaches log.Fatal in cmd/broker. Checked rather than
 			// constructed so the test neither writes to /var/log nor needs a
 			// syslog daemon.
-			if err := security.ValidateAuditConfig(cfg.Audit); err != nil {
-				t.Fatalf("%s would kill the broker at startup: %v", name, err)
+			//
+			// Only for a whole configuration: since #210 an enabled audit
+			// subsystem must name an output, and a provider fragment is a single
+			// oidc.providers entry that has no audit section to name one in. The
+			// wrapper above supplies nothing but the provider, so checking it here
+			// would report the wrapper's own emptiness rather than anything about
+			// the shipped file.
+			if whole {
+				if err := security.ValidateAuditConfig(cfg.Audit); err != nil {
+					t.Fatalf("%s would kill the broker at startup: %v", name, err)
+				}
 			}
 		})
 	}
@@ -129,9 +139,21 @@ func TestDocumentedConfigSnippetsLoad(t *testing.T) {
 			t.Run(snippet.name(), func(t *testing.T) {
 				// Validate() is not called: a snippet shows part of a
 				// configuration and is not required to be complete.
-				_, err := config.LoadConfig(path)
+				cfg, err := config.LoadConfig(path)
 				if err != nil && !isUnresolvableSecret(err) {
 					t.Fatalf("the YAML at %s:%d does not load: %v", doc, snippet.line, err)
+				}
+				// An audit: block is the one section a snippet cannot show
+				// partially. Since #210 an enabled audit subsystem must name an
+				// output, and audit.enabled defaults to true, so a documented
+				// audit: block without outputs is a block an operator pastes and
+				// then cannot start the broker. CONFIGURATION-GUIDE.md's "Enable
+				// comprehensive audit logging" example was exactly that.
+				if cfg != nil && setsSection(t, path, "audit") {
+					if err := security.ValidateAuditConfig(cfg.Audit); err != nil {
+						t.Fatalf("the audit configuration at %s:%d would kill the broker at startup: %v",
+							doc, snippet.line, err)
+					}
 				}
 			})
 		}
@@ -237,6 +259,21 @@ func yamlFilesUnder(t *testing.T, root string) []string {
 		t.Fatalf("failed to walk %s: %v", root, err)
 	}
 	return files
+}
+
+// setsSection reports whether a configuration file writes the named top-level
+// section at all, which is how a snippet showing an audit: block is told from one
+// that says nothing about auditing and only inherits the defaults.
+func setsSection(t *testing.T, path, section string) bool {
+	t.Helper()
+
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetConfigType("yaml")
+	if err := v.ReadInConfig(); err != nil {
+		return false
+	}
+	return v.IsSet(section)
 }
 
 // isWholeConfig reports whether a file parses as YAML and is rooted at the top
