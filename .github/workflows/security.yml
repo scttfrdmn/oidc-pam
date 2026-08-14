@@ -171,6 +171,56 @@ jobs:
           semgrep scan --config=auto --sarif --output=semgrep-results.sarif
         continue-on-error: true
 
+      # semgrep writes findings that an in-file `nosemgrep` comment suppressed into the
+      # SARIF anyway, tagged `"suppressions": [{"kind": "inSource"}]`, and code scanning
+      # opens an alert for them regardless of that tag. So `nosemgrep` was inert here:
+      # it quietened the console and nothing else, and the `Semgrep OSS` check kept
+      # failing on a finding a reviewer had already read and annotated (#199). Drop
+      # those results before upload so the annotation means in CI what it means
+      # locally. Only results carrying `suppressions` are dropped — an un-annotated
+      # finding still reaches the Security tab and still fails the check.
+      - name: Drop findings suppressed with nosemgrep
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          path = "semgrep-results.sarif"
+          if not os.path.exists(path):
+              print("no SARIF to filter: semgrep scan did not write " + path)
+              raise SystemExit(0)
+
+
+          def describe(result):
+              try:
+                  loc = result["locations"][0]["physicalLocation"]
+                  return "{}:{} {}".format(loc["artifactLocation"]["uri"],
+                                           loc["region"]["startLine"],
+                                           result.get("ruleId", "?"))
+              except (KeyError, IndexError):
+                  return result.get("ruleId", "?")
+
+
+          with open(path, encoding="utf-8") as fh:
+              sarif = json.load(fh)
+
+          dropped = 0
+          for run in sarif.get("runs", []):
+              kept = []
+              for result in run.get("results", []):
+                  if result.get("suppressions"):
+                      print("suppressed in source: " + describe(result))
+                      dropped += 1
+                      continue
+                  kept.append(result)
+              run["results"] = kept
+
+          with open(path, "w", encoding="utf-8") as fh:
+              json.dump(sarif, fh)
+
+          print("dropped {} in-source suppressed finding(s)".format(dropped))
+          PY
+
       - name: Upload Semgrep results to GitHub Security
         uses: github/codeql-action/upload-sarif@60d8f0d1f1f8c8d07ef53bd027032705d414ec28 # v3
         with:
