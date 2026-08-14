@@ -243,13 +243,25 @@ func TestInstalledEntryCarriesTheExpirySSHDEnforces(t *testing.T) {
 		t.Fatalf("AddPublicKey: %v", err)
 	}
 
-	// The timespec is the host-local form, which is what every sshd that knows the
-	// option accepts; TestTheExpiryTimespecIsTheFormEverySupportedSSHDParses covers
-	// why it is not the UTC one.
+	// The timespec is the unsuffixed 14-digit form, which is what every sshd that knows
+	// the option parses; TestTheExpiryTimespecIsTheFormEverySupportedSSHDParses covers
+	// why it is not the UTC one, and the #226 tests cover the offset it is rendered at.
+	//
+	// The expectation is not expiresAt.Local(): the entry is rendered at the zone's
+	// *standard* offset, because that is the offset sshd's parse_absolute_time resolves
+	// an unsuffixed timespec at whatever the time of year (#226). Asserting the local
+	// rendering made this test's result depend on the time zone of the machine running
+	// it — it passed in UTC and in a northern-hemisphere winter, and failed for a March
+	// expiry anywhere south of the equator, an hour of drift that says nothing about
+	// the code. What is checked here is that the installed line carries the option at
+	// all, and that its value is the digits-only form.
 	content := readKeys(t, baseDir, "testuser")
-	want := fmt.Sprintf(`expiry-time=%q`, expiresAt.Local().Format("20060102150405"))
+	want := fmt.Sprintf(`expiry-time=%q`, formatExpiryTimespec(expiresAt))
 	if !strings.Contains(content, want) {
 		t.Errorf("authorized_keys does not carry %s; file is %q", want, content)
+	}
+	if timespec := formatExpiryTimespec(expiresAt); len(timespec) != 14 || strings.Trim(timespec, "0123456789") != "" {
+		t.Errorf("the timespec written is %q, not the 14 digits every supported sshd parses", timespec)
 	}
 
 	// And the option must be read back as the expiry it states, or the sweep cannot
