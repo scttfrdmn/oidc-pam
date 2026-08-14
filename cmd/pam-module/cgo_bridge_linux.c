@@ -6,6 +6,13 @@
 #include <json-c/json.h>
 
 // Total time budget for reading a complete broker response, in milliseconds.
+//
+// Total across every poll() and recv() of one read, not per poll — see
+// receive_auth_response_within, where a per-poll reading of this number meant a
+// read could last days (#196). It is well inside sshd's default LoginGraceTime of
+// 120 s, which is the deadline that matters: past that sshd tears the pre-auth
+// child down itself and the user is left with a dropped connection and no reason
+// for it.
 #define RESPONSE_READ_TIMEOUT_MS 30000
 
 // Whether this invocation logs at LOG_DEBUG, taken from the module arguments by
@@ -307,7 +314,25 @@ int send_check_session_request(int sock, const char *session_id, const char *use
     return 0;
 }
 
-// Receive authentication response from broker.
+// Milliseconds on a monotonic clock. The same clock as monotonic_seconds() below,
+// and for the same reason — a wall-clock adjustment mid-login must not extend or
+// collapse a budget — in the unit poll() takes, so that the last poll of a read
+// gets whatever sub-second remainder is left rather than having it rounded down to
+// a non-blocking poll.
+static long long monotonic_millis(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        // Should not happen; degrade to the realtime clock rather than reading with
+        // no deadline at all. long long, because seconds-since-epoch expressed in
+        // milliseconds does not fit a 32-bit long.
+        return (long long)time(NULL) * 1000LL;
+    }
+    return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+}
+
+// Receive authentication response from broker, with total_timeout_ms as the time
+// budget for the whole read.
 //
 // The broker writes a single newline-delimited JSON object (json.Encoder.Encode
 // appends '\n'). A single recv() can return only the first TCP segment, which
@@ -315,22 +340,61 @@ int send_check_session_request(int sock, const char *session_id, const char *use
 // newline delimiter is seen, the buffer is full, or the connection closes,
 // bounded by a total read timeout so a stalled/hostile broker cannot hang the
 // PAM stack.
-int receive_auth_response(int sock, char *response, size_t response_size) {
+//
+// The deadline is taken once, before the loop, and every poll() gets only what is
+// left of it. Handing the full budget to each poll() is what #196 was: the timeout
+// was per-poll, so a peer that sent one byte just inside each window reset the
+// clock, and the real bound was one window per byte of the buffer —
+// MAX_RESPONSE_SIZE-1 = 16 383 windows of 30 s, about 5.7 days — with a login held
+// open and an sshd pre-auth child pinned for all of it. Bounding the byte count
+// (#162) bounds how many windows there are, not how long they last, and the comment
+// above promised a total bound that the code did not have.
+//
+// The number this has to be measured against is sshd's LoginGraceTime, which
+// defaults to 120 s. Past that sshd kills the pre-auth child itself, so a module
+// that is still waiting produces the worst possible outcome for the user: the
+// connection drops with nothing said about why, and nothing in auth.log naming the
+// broker. A 30 s bound per read (RESPONSE_READ_TIMEOUT_MS) keeps the module inside
+// that: DEFAULT_AUTH_TIMEOUT (90 s) of device-flow polling plus at most one final
+// read is 120 s — at the limit rather than past it — and it keeps the module, not
+// sshd, the one that decides a stalled broker is a denial. Raising `timeout=` above
+// DEFAULT_AUTH_TIMEOUT needs a matching LoginGraceTime, as cgo_bridge.h says where
+// that timeout is defined.
+//
+// The budget is a parameter so a test can drive the bound with a short one rather
+// than waiting out the shipped 30 s; the module itself always reads through
+// receive_auth_response, which supplies the real RESPONSE_READ_TIMEOUT_MS (#196).
+int receive_auth_response_within(int sock, char *response, size_t response_size, int total_timeout_ms) {
     if (response_size == 0) {
         return RECV_ERROR;
     }
 
     size_t total = 0;
     const size_t cap = response_size - 1; // reserve space for NUL
+    const long long deadline = monotonic_millis() + (total_timeout_ms > 0 ? total_timeout_ms : 0);
 
     while (total < cap) {
         struct pollfd pfd;
+        long long remaining_ms = deadline - monotonic_millis();
+
+        // The budget is gone. This is also the EINTR path's bound: a signal used to
+        // send the loop back to a fresh full window (#196).
+        if (remaining_ms <= 0) {
+            log_pam_message(LOG_ERR,
+                            "Broker response read budget of %dms exhausted after %zu bytes; "
+                            "giving up rather than outliving sshd's LoginGraceTime",
+                            total_timeout_ms, total);
+            return RECV_ERROR;
+        }
+
         pfd.fd = sock;
         pfd.events = POLLIN;
 
-        int pr = poll(&pfd, 1, RESPONSE_READ_TIMEOUT_MS);
+        int pr = poll(&pfd, 1, (int)remaining_ms);
         if (pr == 0) {
-            log_pam_message(LOG_ERR, "Timed out waiting for broker response");
+            log_pam_message(LOG_ERR,
+                            "Timed out waiting for broker response (%dms budget, %zu bytes read)",
+                            total_timeout_ms, total);
             return RECV_ERROR;
         }
         if (pr < 0) {
@@ -394,6 +458,13 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
     log_pam_message(LOG_DEBUG, "Received %zu-byte broker response", total);
 
     return RECV_OK;
+}
+
+// Receive a broker response under the module's own read budget. This is the only
+// entry point the module itself uses; RESPONSE_READ_TIMEOUT_MS is the total, not a
+// per-poll allowance (#196).
+int receive_auth_response(int sock, char *response, size_t response_size) {
+    return receive_auth_response_within(sock, response, response_size, RESPONSE_READ_TIMEOUT_MS);
 }
 
 // Display message to user
@@ -534,10 +605,9 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     }
 }
 
-// Sentinel returned by classify_response for a device flow that has been started
-// but not yet completed. Every PAM_* return code is non-negative, so a negative
-// value cannot collide with one.
-#define BROKER_PENDING (-1)
+// BROKER_PENDING — the sentinel for a device flow that has been started but not yet
+// completed — lives in cgo_bridge.h so that a test can name the same value the
+// decision returns rather than restating -1 (#197).
 
 // Read a string field, or NULL if it is absent, JSON null, or not a JSON string.
 // The result points into obj and is only valid while obj is alive.
@@ -601,7 +671,14 @@ static int response_poll_interval(json_object *obj) {
 // require_groups rejects the user, when device-flow polling fails, and when the
 // session expires, so a poll that can no longer find its session means the
 // authentication was refused.
-static int map_error_code(const char *error_code) {
+//
+// Not static, and declared in cgo_bridge.h, only so that it is linkable from a
+// test: this is one of the two functions that turn a broker reply into a PAM
+// result, and neither had a test of any kind, which means `return PAM_SUCCESS`
+// here was green in every suite in this repository (#197). error_code is NULL
+// whenever the field is absent or is not a JSON string, which is why the NULL
+// case is a denial rather than an accident.
+int map_error_code(const char *error_code) {
     if (error_code == NULL) {
         return PAM_AUTH_ERR;
     }
@@ -682,6 +759,46 @@ static int classify_response(json_object *obj) {
     }
 
     return PAM_SUCCESS;
+}
+
+// Classify a broker reply given the bytes as they arrive on the wire: parse it,
+// then hand it to classify_response. Returns a PAM result code, or BROKER_PENDING
+// while the device flow is still in progress.
+//
+// This exists so classify_response — the module's entire decision about whether a
+// reply is a grant or a denial — is reachable from a test. It had none: both it and
+// map_error_code are static and absent from cgo_bridge.h, the Go tests in this
+// package did not call into them, and e2e drives an honest broker that cannot
+// construct the replies these functions exist to reject, so `classify_response`
+// returning PAM_SUCCESS unconditionally passed everything (#197). Two grants had
+// already gone in unnoticed that way: `"success":"false"` read as a success (#168),
+// and a non-boolean requires_device read as "no device authorization needed" (#201).
+//
+// classify_response takes a json_object, so it cannot be declared in cgo_bridge.h —
+// that header is included by files with no json-c headers available — and a wrapper
+// taking the wire bytes is the closer test anyway. It is not a shortcut around the
+// decision: the parse and the classification are the two steps
+// perform_authentication takes on every reply it receives, in the same order and
+// with the same verdict for a reply that is not JSON at all.
+int classify_response_text(const char *response) {
+    json_object *obj;
+    int result;
+
+    if (response == NULL) {
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    obj = json_tokener_parse(response);
+    if (obj == NULL) {
+        // What perform_authentication does with a reply it cannot parse: no opinion
+        // reached, and the auth stack fails closed.
+        log_pam_message(LOG_ERR, "Failed to parse broker response");
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+
+    result = classify_response(obj);
+    json_object_put(obj);
+    return result;
 }
 
 // Show a message to the user, tolerating a NULL handle so the authentication

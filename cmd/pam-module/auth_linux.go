@@ -129,3 +129,42 @@ func classifyLoginTypeC(service, tty string) string {
 func acctMgmtVerdict() pam.PAMResultCode {
 	return pam.PAMResultCode(C.acct_mgmt_verdict())
 }
+
+// brokerPending is the C module's BROKER_PENDING: classifyBrokerResponse's answer
+// for a device flow that has been started but not finished, which is neither a
+// grant nor a denial. Named from the header rather than written as -1 so the two
+// cannot drift.
+const brokerPending = int(C.BROKER_PENDING)
+
+// classifyBrokerResponse runs the C module's decision over the exact bytes a broker
+// would put on the wire — parse, then classify_response — and returns the PAM result
+// code it reached, or brokerPending.
+//
+// This is the module's whole verdict on a reply, and until now nothing called it:
+// both classify_response and map_error_code are static, the Go tests here drove them
+// only indirectly through a fake broker that a real one resembles, and e2e cannot
+// construct a malformed reply at all. A decision nothing tests is a decision that can
+// be deleted without a single suite noticing (#197).
+func classifyBrokerResponse(response string) int {
+	cResponse := C.CString(response)
+	defer C.free(unsafe.Pointer(cResponse))
+
+	return int(C.classify_response_text(cResponse))
+}
+
+// mapBrokerErrorCode runs the C module's error_code -> PAM result mapping, the
+// second half of the same decision: which kind of denial a refusal becomes.
+//
+// A nil code is the NULL the module is handed whenever error_code is absent or is
+// not a JSON string — the case a Go string cannot express, and the one that has to
+// stay a denial (#197).
+func mapBrokerErrorCode(code *string) pam.PAMResultCode {
+	if code == nil {
+		return pam.PAMResultCode(C.map_error_code((*C.char)(nil)))
+	}
+
+	cCode := C.CString(*code)
+	defer C.free(unsafe.Pointer(cCode))
+
+	return pam.PAMResultCode(C.map_error_code(cCode))
+}

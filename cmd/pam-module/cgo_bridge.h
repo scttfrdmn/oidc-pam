@@ -42,6 +42,15 @@
 #define RECV_OK 0
 #define RECV_ERROR (-1)
 #define RECV_RESPONSE_TOO_LARGE (-2)
+
+// Sentinel returned by classify_response_text for a device flow that has been
+// started but not yet completed: the broker said success=true *and*
+// requires_device=true, which is neither a grant nor a denial. Every PAM_* return
+// code is non-negative, so a negative value cannot collide with one.
+//
+// It lives here rather than in cgo_bridge_linux.c so a test can name the value the
+// decision actually returns instead of restating -1 (#197).
+#define BROKER_PENDING (-1)
 // Longest usable Unix socket path, taken from the platform's sockaddr_un
 // (108 bytes on Linux, 104 on Darwin/BSD) so it can never disagree with it.
 #define MAX_SOCKET_PATH (sizeof(((struct sockaddr_un *)0)->sun_path))
@@ -101,6 +110,14 @@ int acct_mgmt_verdict(void);
 int send_auth_request(int sock, const char *username, const char *service, const char *rhost, const char *tty);
 int send_check_session_request(int sock, const char *session_id, const char *username);
 int receive_auth_response(int sock, char *response, size_t response_size);
+// receive_auth_response with the total read budget as a parameter. The module always
+// uses receive_auth_response, which passes RESPONSE_READ_TIMEOUT_MS; a test needs a
+// budget it can wait for to show that the bound is a bound on the whole read (#196).
+int receive_auth_response_within(int sock, char *response, size_t response_size, int total_timeout_ms);
+// The two functions that decide whether a broker reply is a grant or a denial.
+// Declared here so they are reachable from a test — neither had one (#197).
+int classify_response_text(const char *response);
+int map_error_code(const char *error_code);
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s);
 int display_message(pam_handle_t *pamh, const char *message);
