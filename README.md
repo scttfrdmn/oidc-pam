@@ -81,6 +81,27 @@ cd oidc-pam-${VERSION}-linux-${ARCH}
 sudo ./install.sh            # add --configure-pam to wire pam_oidc.so into sshd
 ```
 
+Releases from v0.5.1 on are signed with cosign keyless signing and carry SLSA
+build provenance. The checksum above only detects a corrupted download — to check
+that the tarball came from this repository's release workflow, verify the signature
+and the attestation:
+
+```bash
+cosign verify-blob \
+  --bundle oidc-pam-${VERSION}-linux-${ARCH}.tar.gz.sigstore.json \
+  --certificate-identity "https://github.com/scttfrdmn/oidc-pam/.github/workflows/release.yml@refs/tags/${VERSION}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
+
+gh attestation verify oidc-pam-${VERSION}-linux-${ARCH}.tar.gz \
+  --repo scttfrdmn/oidc-pam \
+  --signer-workflow scttfrdmn/oidc-pam/.github/workflows/release.yml
+```
+
+Both must succeed before you install. See
+[docs/verifying-releases.md](docs/verifying-releases.md) for what each check
+proves, the signed `SHA256SUMS` manifest, and offline verification.
+
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the full deployment guide (including the
 identity model and prerequisites).
 
@@ -183,6 +204,7 @@ There is no cached credential that lets the next `ssh` skip the prompt.
 - [Configuration Guide](configs/CONFIGURATION-GUIDE.md) — provider setup, security best practices, troubleshooting
 - [Requirements](REQUIREMENTS.md)
 - [Security Policy](SECURITY.md)
+- [Verifying a Release](docs/verifying-releases.md) — cosign signature and SLSA provenance checks for release artifacts
 - Provider examples: [`configs/providers/`](configs/providers/) (Okta, Azure AD, Keycloak, AWS IAM Identity Center)
 - [`docs/design/`](docs/design/) — early design and positioning notes, kept for provenance. Aspirational, unmaintained, and not a description of the current system
 

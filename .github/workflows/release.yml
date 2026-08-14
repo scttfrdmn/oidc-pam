@@ -5,13 +5,49 @@ on:
     tags:
       - 'v*'
 
+# The workflow-level default is the narrowest grant every job can live with, and
+# `release` is the only job that widens it (#180). This used to be `contents:
+# write` for the whole workflow, which handed a write-capable token to the job
+# that compiles third-party Go code and to the reusable CI call as well. Do not
+# raise anything here to satisfy one job: add it to that job's `permissions:`.
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # Deliberately NOT named COSIGN_*: cosign reads its own configuration out of
+  # that prefix (COSIGN_PASSWORD, COSIGN_REPOSITORY, and COSIGN_OIDC_ISSUER in
+  # cosign v2, which bound to --oidc-issuer). Naming a value we only pass on the
+  # command line COSIGN_OIDC_ISSUER would put it where a future cosign might read
+  # it as the issuer to *sign* against instead of the one to *verify* against, and
+  # that failure is silent.
+
+  # The Sigstore identity this workflow signs as, and therefore the exact string
+  # an operator passes to `cosign verify-blob --certificate-identity` (#180). On a
+  # tag push `github.ref` is `refs/tags/vX.Y.Z`, so the identity names the
+  # workflow *and* the tag: a signature made by a workflow run on some other ref
+  # will not satisfy it. Kept here because three places need to agree on it — the
+  # signing self-check, the pre-publish re-check, and the verification
+  # instructions written into the release notes — and a copy that drifts turns
+  # into instructions that fail for every user.
+  RELEASE_SIGNER_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+  # The OIDC issuer that mints this job's token. Fulcio records it in the signing
+  # certificate and `cosign verify-blob` requires it, because "signed by a
+  # GitHub Actions workflow" is only meaningful if the certificate says which
+  # issuer vouched for that claim.
+  RELEASE_SIGNER_OIDC_ISSUER: https://token.actions.githubusercontent.com
+  # One pin for cosign itself, read by both the signing job and the pre-publish
+  # verification job. cosign-installer bootstraps a SHA-verified cosign and uses
+  # it to cosign-verify the release named here, so this version is the one thing
+  # the signing path trusts by name — leaving it at the action's default means it
+  # moves whenever the action is bumped.
+  RELEASE_COSIGN_VERSION: v3.1.3
 
 jobs:
   verify-version:
     name: Verify version sync
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,9 +81,9 @@ jobs:
   # copies of the test set drift and the drift is silent — the release would keep
   # passing a weaker gate than every pull request has to clear.
   #
-  # `contents: read` is deliberately narrower than this workflow's `contents:
-  # write`: nothing CI does needs to write, and a called workflow may only be
-  # granted permissions the caller already has.
+  # `permissions:` is stated rather than inherited: a called workflow may only be
+  # granted permissions the caller already has, so this is the ceiling for
+  # everything CI runs, and nothing CI does needs to write.
   ci:
     name: CI
     needs: verify-version
@@ -59,6 +95,8 @@ jobs:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runs_on }}
     needs: [verify-version, ci]
+    permissions:
+      contents: read
 
     strategy:
       fail-fast: false
@@ -157,6 +195,18 @@ jobs:
           # consumers have a canonical entrypoint (see scripts/install-release.sh).
           cp scripts/install-release.sh            ${DIR}/install.sh
           chmod +x                                 ${DIR}/install.sh
+          # A manifest of the payload, *inside* the archive, so install.sh can
+          # refuse to install a binary that does not match what this job built
+          # (#180). The archive's own .sha256 covers the tarball, which nothing
+          # after the download re-checks; this covers the four files that actually
+          # land in /usr/local/bin and /lib/security, checked by the installer
+          # itself at the moment it is about to copy them. Keep the file list in
+          # sync with install-release.sh's verify_payload().
+          (cd ${DIR} && sha256sum \
+            oidc-auth-broker \
+            oidc-admin \
+            pam_oidc.so \
+            oidc-pam-helper > SHA256SUMS)
           tar czf ${DIR}.tar.gz ${DIR}
           sha256sum ${DIR}.tar.gz > ${DIR}.tar.gz.sha256
 
@@ -169,15 +219,33 @@ jobs:
             oidc-pam-*.tar.gz.sha256
           retention-days: 1
 
-  release:
-    name: Create GitHub Release
+  # Signing is a job of its own, deliberately not folded into `release` (#180): no
+  # single job should hold both `id-token: write` (mint a Sigstore signing identity
+  # that speaks for this repository) and `contents: write` (publish a release under
+  # its name). Split, a compromised step here can produce a signature but cannot
+  # publish it, and a compromised step in `release` can publish but cannot forge a
+  # signature over what it publishes. Merging them for convenience gives one
+  # blast radius the ability to do both.
+  sign:
+    name: Sign and attest
     runs-on: ubuntu-latest
     needs: build
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    permissions:
+      # Keyless signing. cosign exchanges this job's OIDC token for a short-lived
+      # Fulcio signing certificate; the identity an operator verifies *is* this
+      # workflow at this tag. Remove `id-token: write` and there is nothing to sign
+      # with — no key is stored in this repository or in its secrets, which is the
+      # property this whole job exists to preserve (#180).
+      id-token: write
+      # actions/attest-build-provenance writes the SLSA provenance attestation into
+      # this repository's attestation store, which is what `gh attestation verify`
+      # reads back. Without this scope the attestation step fails with a 403 and
+      # the release ships signed but with no statement of where it was built.
+      attestations: write
+      contents: read
 
+    steps:
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -186,9 +254,11 @@ jobs:
           path: dist/
 
       # The .sha256 files are computed in the build job, before the upload, but
-      # until now nothing re-checked them after the download — so anything that
-      # substituted an artifact between the two steps went undetected (#221). The
-      # checksums are only evidence if something compares them.
+      # nothing re-checked them after the download — so anything that substituted
+      # an artifact between the two steps went undetected (#221). The checksums are
+      # only evidence if something compares them. This runs before signing for the
+      # obvious reason: a signature over a substituted tarball is worse than no
+      # signature, because it is a true statement about the wrong bytes.
       - name: Verify artifact checksums
         working-directory: dist
         run: |
@@ -208,6 +278,157 @@ jobs:
           sha256sum -c "${sums[@]}"
           echo "Verified ${#tars[@]} artifact(s) against their checksums."
 
+      # One file covering every architecture. The per-arch .tar.gz.sha256 files stay
+      # (README and DEPLOYMENT.md tell users to fetch them, and the build matrix is
+      # where they are produced), but a single signed SHA256SUMS is what lets an
+      # operator check both tarballs against one signature instead of one per
+      # download — and it is what makes the amd64/arm64 asymmetry the issue calls
+      # out impossible to get half-right: if an arch is missing from dist/, it is
+      # missing from the signed manifest too.
+      - name: Build the release checksum manifest
+        working-directory: dist
+        run: |
+          sha256sum ./*.tar.gz | sed 's#\./##' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.RELEASE_COSIGN_VERSION }}
+
+      # `--yes` because there is no terminal here to accept the transparency-log
+      # notice on; without it cosign blocks and the job dies on the step timeout.
+      #
+      # The output is a Sigstore bundle (.sigstore.json), not the older detached
+      # `.sig` + `.pem` pair: as of cosign v3 `verify-blob` has no `--signature` or
+      # `--certificate` flag at all, so a released .sig/.pem pair would be a
+      # signature current cosign cannot check. The bundle carries the signature,
+      # the Fulcio certificate and the Rekor inclusion proof in one file, which is
+      # also one asset per artifact instead of two or three.
+      #
+      # SHA256SUMS is signed as well as the tarballs, so an operator who trusts one
+      # signature can verify every artifact from it.
+      - name: Sign artifacts with cosign (keyless)
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          for f in *.tar.gz SHA256SUMS; do
+            echo "Signing ${f}"
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "${f}"
+          done
+
+      # A signature that was never verified is an untested code path, and this one
+      # cannot be tested anywhere but in a real tag run — no pull request can mint
+      # a certificate with this identity in it. So verify here, with exactly the
+      # command the documentation gives users (docs/verifying-releases.md): if the
+      # documented identity or issuer is wrong, this fails the release instead of
+      # shipping instructions that fail for everyone who follows them.
+      - name: Verify the signatures we just produced
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          for f in *.tar.gz SHA256SUMS; do
+            echo "Verifying ${f}"
+            cosign verify-blob \
+              --bundle "${f}.sigstore.json" \
+              --certificate-identity "${RELEASE_SIGNER_IDENTITY}" \
+              --certificate-oidc-issuer "${RELEASE_SIGNER_OIDC_ISSUER}" \
+              "${f}"
+          done
+          echo "All signatures verify against ${RELEASE_SIGNER_IDENTITY}"
+
+      # SLSA v1 build provenance, via GitHub's own action rather than
+      # slsa-framework/slsa-github-generator: the generator is a reusable workflow
+      # that must build the artifacts itself to attest them, which would mean
+      # duplicating the build matrix (including the cgo PAM module and the #140
+      # loadability check) into a second definition — the exact drift #214 removed
+      # from this workflow. attest-build-provenance attests artifacts this workflow
+      # already produced, keeps one build definition, and is what `gh attestation
+      # verify` consumes with no extra asset to download.
+      #
+      # The glob covers both architectures; a subject list that silently matched
+      # only the amd64 tarball is the failure the issue warns about.
+      - name: Generate SLSA build provenance attestations
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/*.tar.gz'
+
+      - name: Upload signatures and manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-signatures
+          path: |
+            dist/SHA256SUMS
+            dist/*.sigstore.json
+          retention-days: 1
+          # A release with no signatures is the state this issue exists to end, so
+          # an empty upload here must not pass quietly.
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, sign]
+
+    permissions:
+      # The only job in this workflow that writes anything. It holds no
+      # `id-token: write`: it publishes signatures made in the `sign` job and
+      # cannot produce new ones (#180).
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-linux-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Download signatures and manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-signatures
+          path: dist/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.RELEASE_COSIGN_VERSION }}
+
+      # Same reasoning as the checksum re-check in `sign` (#221), applied to the
+      # second artifact hand-off this workflow now has: the tarballs and the
+      # signatures over them travel through the artifact store separately and are
+      # reunited here, in the job that publishes them. Checking the pair at the
+      # last moment before `gh release create` means the release either goes out
+      # with signatures that verify or does not go out.
+      - name: Verify signatures and manifest before publishing
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          tars=(*.tar.gz)
+          bundles=(*.sigstore.json)
+          if [ "${#tars[@]}" -eq 0 ]; then
+            echo "::error::no tarballs in dist/"
+            exit 1
+          fi
+          # One bundle per tarball, plus one for SHA256SUMS.
+          if [ "${#bundles[@]}" -ne "$(( ${#tars[@]} + 1 ))" ]; then
+            echo "::error::${#tars[@]} tarball(s) but ${#bundles[@]} signature bundle(s) — expected $(( ${#tars[@]} + 1 )) (one per tarball plus SHA256SUMS). An artifact would be published unsigned."
+            exit 1
+          fi
+          sha256sum -c SHA256SUMS
+          for f in *.tar.gz SHA256SUMS; do
+            cosign verify-blob \
+              --bundle "${f}.sigstore.json" \
+              --certificate-identity "${RELEASE_SIGNER_IDENTITY}" \
+              --certificate-oidc-issuer "${RELEASE_SIGNER_OIDC_ISSUER}" \
+              "${f}"
+          done
+          echo "Verified ${#tars[@]} tarball(s) and SHA256SUMS against ${RELEASE_SIGNER_IDENTITY}"
+
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -226,8 +447,78 @@ jobs:
             echo "::warning::no CHANGELOG section for ${VERSION}" >&2
             echo "Release ${VERSION}" > release-notes.md
           fi
+
+          # The verification instructions are appended to every release's notes,
+          # not just linked from the docs (#180). The commands need the tag in
+          # them — `--certificate-identity` names this workflow *at this ref* — so
+          # a static document cannot give a user something they can paste, and a
+          # signature nobody is told how to check protects nobody.
+          #
+          # The heredoc is unquoted so ${VERSION}, ${GITHUB_REPOSITORY} and the
+          # $COSIGN_* values from this workflow's env are written out resolved;
+          # \${ARCH} and \${TARBALL} are escaped because they are the reader's to
+          # fill in. Every backtick is escaped for the same reason — unescaped, an
+          # unquoted heredoc would run the fenced block as command substitution.
+          # YAML strips this block's common indentation before bash sees it, which
+          # is why the closing EOF below lines up with the rest of the script and
+          # still lands in column 0.
+          cat >> release-notes.md <<EOF
+
+          ---
+
+          ## Verifying this release
+
+          Artifacts are signed with [cosign](https://docs.sigstore.dev/) keyless
+          signing — there is no oidc-pam signing key; the signer is this
+          repository's release workflow, identified by its GitHub OIDC identity.
+          Every tarball and the \`SHA256SUMS\` manifest have a matching
+          \`.sigstore.json\` bundle, and each tarball also carries a SLSA build
+          provenance attestation. Requires cosign v3 or newer.
+
+          \`\`\`bash
+          ARCH=amd64   # or arm64
+          TARBALL=oidc-pam-${VERSION}-linux-\${ARCH}.tar.gz
+
+          gh release download ${VERSION} --repo ${GITHUB_REPOSITORY} \\
+            --pattern "\${TARBALL}" --pattern "\${TARBALL}.sigstore.json" \\
+            --pattern SHA256SUMS --pattern SHA256SUMS.sigstore.json
+
+          # 1. The signature over the tarball.
+          cosign verify-blob \\
+            --bundle "\${TARBALL}.sigstore.json" \\
+            --certificate-identity "${RELEASE_SIGNER_IDENTITY}" \\
+            --certificate-oidc-issuer ${RELEASE_SIGNER_OIDC_ISSUER} \\
+            "\${TARBALL}"
+
+          # 2. The signed checksum manifest, then the tarball against it.
+          cosign verify-blob \\
+            --bundle SHA256SUMS.sigstore.json \\
+            --certificate-identity "${RELEASE_SIGNER_IDENTITY}" \\
+            --certificate-oidc-issuer ${RELEASE_SIGNER_OIDC_ISSUER} \\
+            SHA256SUMS
+          sha256sum --ignore-missing -c SHA256SUMS
+
+          # 3. The SLSA build provenance: which workflow, commit and builder made it.
+          gh attestation verify "\${TARBALL}" --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/release.yml
+          \`\`\`
+
+          Each command must print \`Verified OK\` (cosign) or a successful
+          verification summary (\`gh attestation verify\`). If any of them fails, do
+          not install the artifact. See
+          [docs/verifying-releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/${VERSION}/docs/verifying-releases.md)
+          for what each check proves and how to verify offline.
+          EOF
+
+          # Every asset the verification instructions above tell a user to fetch has
+          # to actually be published, or the instructions are a dead end: the
+          # tarballs, the per-arch .sha256 files (README and DEPLOYMENT.md still
+          # document those), the aggregate SHA256SUMS, and one .sigstore.json bundle
+          # per signed file (#180).
           gh release create "${VERSION}" \
             --title "oidc-pam ${VERSION}" \
             --notes-file release-notes.md \
             dist/*.tar.gz \
-            dist/*.sha256
+            dist/*.sha256 \
+            dist/SHA256SUMS \
+            dist/*.sigstore.json
