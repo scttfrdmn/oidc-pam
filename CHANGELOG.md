@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-14
+
 ### Security
 - **High (#171): the SSH key a successful login was granted was written to a
   directory guessed from the login name, was never removed when the session ended,
