@@ -316,19 +316,37 @@ func (b *Broker) reconcileIssuedKeys() {
 
 	// One pass per account, not per key: RemoveOIDCKeys clears every broker-issued
 	// entry the account has, so a user with several orphans is handled once.
-	usernames := make(map[string]struct{}, len(infos))
+	//
+	// The store is grouped first and nothing is deleted from it yet, because the order
+	// of these two operations decides what a crash or a failure in the middle leaves
+	// behind (#228). This used to delete every stored record in one loop and only then
+	// remove the authorized_keys entries in a second: the store is the *only* record
+	// naming which accounts hold broker-issued keys, so if the process died in between —
+	// or if RemoveOIDCKeys failed, which the branch below already anticipates — the
+	// entries stayed in authorized_keys with nothing left that would ever revoke them.
+	// The next startup's reconcile has an empty store and does nothing;
+	// sweepExpiredAuthorizedKeys only reaches accounts with a session expiring now, and
+	// these keys belong to no session at all. A user who never logs in again keeps a
+	// working credential forever, which is #171 again by a different route.
+	//
+	// So the entry goes first and the record that lets us find it again is deleted only
+	// once it is gone. The reverse order can leave a live credential nobody can find;
+	// this order can at worst leave a record of a key already removed, which the next
+	// startup retries harmlessly.
+	keyIDs := make(map[string][]string, len(infos))
+	unattributed := make([]string, 0)
 	for _, info := range infos {
-		if info.Username != "" {
-			usernames[info.Username] = struct{}{}
+		if info.Username == "" {
+			// No account to remove an entry from. Deleting the record loses nothing:
+			// there is nothing it could be reconciled against.
+			unattributed = append(unattributed, info.KeyID)
+			continue
 		}
-		if delErr := b.keyManager.DeleteKey(info.KeyID); delErr != nil {
-			log.Warn().Err(delErr).Str("key_id", info.KeyID).
-				Msg("Failed to delete an orphaned stored SSH key at startup")
-		}
+		keyIDs[info.Username] = append(keyIDs[info.Username], info.KeyID)
 	}
 
 	removedTotal := 0
-	for username := range usernames {
+	for username, ids := range keyIDs {
 		removed, remErr := b.authorizedKeysManager.RemoveOIDCKeys(username)
 		if remErr != nil {
 			// Audited, not just logged: an entry that could not be removed is a
@@ -348,20 +366,38 @@ func (b *Broker) reconcileIssuedKeys() {
 			if b.metrics != nil {
 				b.metrics.RecordSSHKeyOp("revoke", "failure")
 			}
+			// The records stay, deliberately: they are what the next startup needs to
+			// know this account still has entries to remove.
 			continue
 		}
 		removedTotal += removed
 		if removed > 0 && b.metrics != nil {
 			b.metrics.RecordSSHKeyOp("revoke", "success")
 		}
+		b.deleteStoredKeys(ids)
 	}
+	b.deleteStoredKeys(unattributed)
 
 	log.Info().
 		Int("stored_keys", len(infos)).
 		Int("unreadable_stored_keys", unreadable).
-		Int("accounts", len(usernames)).
+		Int("accounts", len(keyIDs)).
 		Int("authorized_keys_entries_removed", removedTotal).
 		Msg("Reconciled SSH keys left over from a previous broker run")
+}
+
+// deleteStoredKeys drops key records from the broker's own store. It is called only
+// once the authorized_keys entries those records stand for are gone, so that a
+// failure never leaves an entry behind with no record naming the account that holds
+// it (#228). A record that outlives its entry is harmless; an entry that outlives its
+// record cannot be found again.
+func (b *Broker) deleteStoredKeys(keyIDs []string) {
+	for _, keyID := range keyIDs {
+		if err := b.keyManager.DeleteKey(keyID); err != nil {
+			log.Warn().Err(err).Str("key_id", keyID).
+				Msg("Failed to delete an orphaned stored SSH key at startup")
+		}
+	}
 }
 
 // DroppedAuditEvents returns the cumulative count of audit events dropped by
