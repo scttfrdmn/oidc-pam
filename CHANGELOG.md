@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Medium (#188): stopping the audit logger discarded every record still
+  queued, and a second `Stop` panicked.** `processEvents` selected on its stop
+  channel and returned without looking at the buffer, so the events sitting in
+  `eventChan` when the broker shut down were collected unwritten. The records
+  most likely to be in that buffer are the ones logged immediately before
+  shutdown — the tail of the audit trail, and the part an investigation into why
+  a host stopped answering would reach for first. The default overflow strategy
+  is `block` precisely so that load cannot cost a record; shutdown was throwing
+  away the same records for free.
+
+  - The worker drains the buffer on both exits (stop and a cancelled context),
+    and `Stop` drains again afterwards, so a logger that was never started, or
+    whose worker had already returned on a cancelled context, still writes what
+    it accepted. `Stop` returning now means every accepted event is on disk.
+  - `Stop` is idempotent (`sync.Once`). It closes a channel, and stopping on a
+    shutdown path plus a deferred cleanup — the ordinary shape — used to panic
+    with `close of closed channel`.
+  - The four `pkg/security` cases that logged events and then read the file back
+    synchronised on a fixed `time.Sleep`, which is an assertion about the
+    scheduler: on a loaded machine the events were not written yet and the case
+    reported the field it could not find rather than the event that never
+    arrived. This is what turned up as an intermittent
+    `TestAuditLoggerComplianceRequirements` failure in CI, with an identical
+    missing-field list to the one the defect above produces on demand. They now
+    stop the logger and read, and no longer bound the worker's life with a
+    two-second context.
+
+  Coverage: `TestStopWritesEventsStillQueued` (three events queued with no
+  worker; the file is empty without the fix), `TestStopDrainsAfterTheContextIsCancelled`
+  (an event logged in the window between cancellation and `Stop`) and
+  `TestStopIsIdempotent` (which panics without the `sync.Once`). Each was run
+  against the defect reintroduced.
 - **Medium (#172): `configs/pam/common-auth` put a 90-second interactive device
   flow in the auth stack of every service on the host.** `common-auth` is the file
   every Debian/Ubuntu PAM service `@include`s, so an operator who followed the

@@ -37,7 +37,7 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := logger.Start(ctx); err != nil {
@@ -82,8 +82,12 @@ func TestAuditLoggerSecurityEvents(t *testing.T) {
 		logger.LogAuthEvent(event)
 	}
 
-	// Allow time for async processing
-	time.Sleep(500 * time.Millisecond)
+	// Stop is the synchronisation point: it drains the queue and closes the
+	// outputs, so every accepted event is on disk when it returns. Sleeping a
+	// fixed interval instead asserts on the scheduler (#188).
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Failed to stop audit logger: %v", err)
+	}
 
 	// Verify events were logged to file
 	logData, err := os.ReadFile(logFile)
@@ -147,7 +151,7 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := logger.Start(ctx); err != nil {
@@ -167,7 +171,9 @@ func TestAuditLoggerDataIntegrity(t *testing.T) {
 	}
 
 	logger.LogAuthEvent(criticalEvent)
-	time.Sleep(200 * time.Millisecond)
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Failed to stop audit logger: %v", err)
+	}
 
 	// Read the original log content
 	originalContent, err := os.ReadFile(logFile)
@@ -229,7 +235,7 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := logger.Start(ctx); err != nil {
@@ -267,7 +273,9 @@ func TestAuditLoggerComplianceRequirements(t *testing.T) {
 		logger.LogAuthEvent(event)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Failed to stop audit logger: %v", err)
+	}
 
 	// Verify compliance-required fields are present
 	logData, err := os.ReadFile(logFile)
@@ -335,7 +343,7 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 		t.Fatalf("Failed to create audit logger: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := logger.Start(ctx); err != nil {
@@ -386,7 +394,9 @@ func TestAuditLoggerThreatDetection(t *testing.T) {
 		logger.LogAuthEvent(event)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	if err := logger.Stop(); err != nil {
+		t.Fatalf("Failed to stop audit logger: %v", err)
+	}
 
 	// Read and analyze the threat log
 	logData, err := os.ReadFile(logFile)
