@@ -8,7 +8,7 @@
 # Always maintain console or SSH access for emergency recovery.
 
 # Authentication stack
-auth    sufficient  pam_oidc.so debug
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_nologin.so
 auth    required    pam_unix.so try_first_pass nullok_secure
 auth    optional    pam_group.so

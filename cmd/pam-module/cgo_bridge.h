@@ -71,14 +71,20 @@
 #define MAX_POLL_INTERVAL 60
 
 // Options parsed from the module arguments in /etc/pam.d/<service>.
+//
+// debug belongs here, per invocation, rather than only in the module's global:
+// the flag used to be set once and never cleared, so one service's `debug` turned
+// on debug logging for every later authentication in the same process (#168).
 typedef struct {
     char socket_path[MAX_SOCKET_PATH];
     int timeout_s;
+    int debug;
 } pam_oidc_options;
 
 // Function prototypes
 void parse_arguments(int argc, const char **argv, pam_oidc_options *opts);
 void log_pam_message(int priority, const char *format, ...);
+int debug_logging_enabled(void);
 int connect_to_broker(const char *socket_path);
 int get_user_info(pam_handle_t *pamh, const char **username, const char **service, const char **rhost, const char **tty);
 const char *classify_login_type(const char *service, const char *tty);
@@ -89,6 +95,5 @@ int receive_auth_response(int sock, char *response, size_t response_size);
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s);
 int display_message(pam_handle_t *pamh, const char *message);
-int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t response_size);
 
 #endif // CGO_BRIDGE_H

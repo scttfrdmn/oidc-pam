@@ -12,7 +12,7 @@
 # 'sufficient' means a successful OIDC authentication ends the auth phase here;
 # 'requisite pam_deny.so' means anything else is refused immediately. Nothing can
 # follow pam_deny.so -- a pam_unix.so line here would never be reached.
-auth    sufficient  pam_oidc.so debug
+auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
 
 # Account management.
@@ -38,7 +38,9 @@ password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 # CONFIGURATION NOTES:
 # 1. The 'sufficient' control means if pam_oidc.so succeeds, no further auth modules are tried
 # 2. The 'requisite' pam_deny.so refuses everything else, and stops the stack
-# 3. Remove 'debug' from pam_oidc.so in production
+# 3. This stack passes no 'debug' argument, deliberately. Add it while diagnosing
+#    a login and take it out again: it makes the module log the details of every
+#    authentication to LOG_AUTHPRIV, which is not where a login's details belong.
 # 4. The module reads no configuration file; the broker reads
 #    /etc/oidc-auth/broker.yaml itself. The module only needs to reach the
 #    broker's socket (/var/run/oidc-auth/broker.sock by default).

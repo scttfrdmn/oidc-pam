@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#168): the shipped PAM stacks logged every login's broker response to
+  syslog, and a service with no PAM conversation crashed the login outright.** Five
+  defects in the C module, grouped because they are one PR's worth of work.
+
+  - `display_message` called through `conv->conv` on the strength of
+    `pam_get_item(PAM_CONV, …)` answering `PAM_SUCCESS`, which it does even for a
+    service that set no conversation function. Showing the device-flow instructions
+    then jumped to address zero and killed the auth child — under sshd that child
+    *is* the login. Both the item and the function pointer are checked now, and a
+    message that cannot be shown is logged and skipped instead.
+  - `get_user_info` applied its `"unknown"`/`"localhost"` substitutes only when
+    `pam_get_item` *failed*. An item a service never set comes back as
+    `PAM_SUCCESS` with a NULL pointer, and the next thing that happens to it is
+    `json_object_new_string()`, i.e. `strlen(NULL)`. `PAM_RHOST` is not set by
+    services that are not remote and `PAM_TTY` not by services with no terminal, so
+    this was reachable from any non-sshd stack — `su`, `sudo`, `login`, cron — and
+    not from something exotic. Found while writing the test for the defect above,
+    which crashed on this one first; fixed with it.
+  - `debug_enabled` was a process global that was set and never cleared, so a single
+    `debug` anywhere turned on debug logging for every *later* authentication in the
+    process — and `pam_sm_authenticate` runs inside sshd, which serves many logins
+    from one process and may run more than one service's stack there. What that
+    logged included the **entire broker response**: the live device code, the user's
+    email and groups, and whatever the broker↔module contract grows next. The flag
+    is now taken from each invocation's own arguments (`pam_oidc_options.debug`), a
+    response is logged by size and never by body, and the shipped `ssh` and `login`
+    stacks no longer pass `debug` — they used to, next to a note telling the reader
+    to remove it, which is not a default.
+  - `classify_response` read the grant condition with `json_object_get_boolean`,
+    which answers true for any non-empty JSON *string*: `"success":"false"` was a
+    success, and under `auth sufficient pam_oidc.so` a success is a login. The field
+    must be a JSON boolean now. The broker emits one, which is why insisting on it
+    costs nothing in the one function whose whole job is to be strict about the
+    grant.
+  - The unused `prompt_user`, which copied a conversation reply into a buffer whose
+    size only its caller knew, is deleted rather than left to be wired up. This
+    module never prompts: the device flow happens in the user's browser.
+
+  Coverage: three cgo tests against a fake broker, two of them driving
+  `pam_sm_authenticate` itself so that argument parsing is part of what is
+  exercised — an authentication whose PAM handle carries no conversation function
+  (a segfault before the fix), a second authentication in the same process not
+  inheriting the first's `debug`, and `success` as the string `"false"`, the string
+  `"true"`, `1` and `null` each refused rather than granted. A fourth test reads
+  `configs/pam` and fails if a shipped stack passes `debug`.
 - **Low (#166): `allowed_groups` and `allowed_roles` denied nothing.** Both were
   applied while claims were being read, where the only thing they could do was drop
   the group and role names that were not in the list. A user in **none** of the
