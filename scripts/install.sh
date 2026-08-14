@@ -11,6 +11,10 @@ PAM_DIR="/lib/security"
 CONFIG_DIR="/etc/oidc-auth"
 RUN_DIR="/var/run/oidc-auth"
 LOG_DIR="/var/log/oidc-auth"
+# The broker's own state: SSH keys it issues, and the per-user locks that
+# serialize its authorized_keys writes. 0700 and root-owned, because a lock a
+# user can take is a lock a user can hold (#161).
+STATE_DIR="/var/lib/oidc-pam"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Colors for output
@@ -110,7 +114,10 @@ create_directories() {
     
     mkdir -p "$LOG_DIR"
     chmod 755 "$LOG_DIR"
-    
+
+    mkdir -p "$STATE_DIR/ssh-keys" "$STATE_DIR/locks"
+    chmod 700 "$STATE_DIR" "$STATE_DIR/ssh-keys" "$STATE_DIR/locks"
+
     print_info "Directories created"
 }
 

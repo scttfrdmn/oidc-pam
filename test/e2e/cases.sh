@@ -544,6 +544,77 @@ case_rate_limit_is_per_account() {
     expect_oidc_key_for alice
 }
 
+# #161: a user holding a lock in their own home must not affect the broker.
+#
+# The broker used to serialize its authorized_keys writes on
+# ~/.ssh/authorized_keys.lock — a path inside the home of the account it was
+# protecting — with a blocking flock. So `flock ~/.ssh/authorized_keys.lock -c
+# 'sleep infinity'`, which any user can run, blocked the broker's next write to
+# that file forever: the login below never finished, and worse, the broker's single
+# cleanup goroutine stopped expiring sessions and revoking keys for every account
+# on the host.
+#
+# The lock now lives in /var/lib/oidc-pam/locks inside the broker, which the user
+# cannot reach, and every acquisition is bounded. So the file alice holds here is
+# just a file, and her login is ordinary.
+#
+# The client and broker containers share /home, so alice's flock here really does
+# contend with anything the broker takes on the same path — which is what makes
+# this a regression test rather than a demonstration.
+case_home_lock_does_not_block_login() {
+    reset_state alice || return 1
+
+    if ! command -v flock >/dev/null; then
+        fail "flock is not installed in the client image; this case cannot hold a lock"
+        return 1
+    fi
+
+    # On a real host a user owns their own ~/.ssh, and that ownership is exactly
+    # what made the old lock path reachable. Assert it here rather than assume it:
+    # if an earlier case already logged alice in, the broker created ~/.ssh as root
+    # (a separate problem, #171), alice could not create the lock file at all, and
+    # this case would quietly hold nothing.
+    install -d -o alice -g alice -m 700 /home/alice/.ssh || {
+        fail "could not give alice ownership of her own .ssh"
+        return 1
+    }
+
+    # `exec sleep` so the process that ends up holding fd 9 — and therefore the
+    # lock — is the one whose pid lands in the file, which is what makes the
+    # cleanup below able to release it. A flock started as `flock -c "sleep ..."`
+    # passes the fd to a child, so killing flock would not release anything.
+    local pidfile=/tmp/home-lock-holder.pid
+    rm -f "${pidfile}"
+    su alice -c "mkdir -p ~/.ssh && chmod 700 ~/.ssh \
+        && exec 9>~/.ssh/authorized_keys.lock && flock -x 9 \
+        && echo \$\$ >${pidfile} && exec sleep 120" &
+    # shellcheck disable=SC2064
+    trap "[[ -f ${pidfile} ]] && kill \$(cat ${pidfile}) 2>/dev/null; rm -f ${pidfile}" RETURN
+
+    local deadline=$((SECONDS + 15))
+    while [[ ! -s "${pidfile}" && "${SECONDS}" -lt "${deadline}" ]]; do sleep 1; done
+
+    # Confirm the lock is really held: a case that silently failed to take it would
+    # pass while proving nothing, which is the failure mode this harness keeps
+    # finding.
+    if flock -n -x /home/alice/.ssh/authorized_keys.lock -c true 2>/dev/null; then
+        fail "alice's lock is not held; this case would pass without testing anything"
+        return 1
+    fi
+    log "alice is holding /home/alice/.ssh/authorized_keys.lock (pid $(cat "${pidfile}"))"
+
+    control approve >/dev/null
+    attempt_login alice
+
+    # A successful login is the whole assertion. Against the old code the broker
+    # blocked inside AddPublicKey before it could mark the session active, so the
+    # module polled until its own timeout and the login was refused — a lock in
+    # alice's home denied alice her own login, and everyone else's cleanup.
+    expect_login_ok || return 1
+    expect_audit authentication_successful
+    expect_oidc_key_for alice
+}
+
 # With no broker there is no opinion to be had: the module must report that it
 # could not reach one (PAM_AUTHINFO_UNAVAIL) and the login must be refused, at
 # once rather than after the device-flow budget.
@@ -579,6 +650,7 @@ CASES=(
     account_stack_denies
     nonroot_ipc_rejected
     rate_limit_is_per_account
+    home_lock_does_not_block_login
     broker_down
 )
 

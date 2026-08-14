@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,16 +14,59 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// withFileLock acquires an exclusive POSIX file lock on a lockfile adjacent to
-// the authorized_keys file, runs fn, then releases the lock. This serializes
-// concurrent read-then-write operations across processes.
+// DefaultLockDir is where the broker keeps the per-user lock files that serialize
+// its own authorized_keys writes.
 //
-// The lock file is opened with O_NOFOLLOW so a symlink planted at the lock path
-// (in a user-controlled .ssh directory) cannot redirect the open to another
-// file (see ensureSecureSSHDir for the surrounding symlink defenses).
-func withFileLock(lockPath string, fn func() error) error {
-	// #nosec G304 -- lockPath is under the validated .ssh dir; O_NOFOLLOW prevents
-	// following a planted symlink at the lock path.
+// (#161) The locks used to live in the user's own ~/.ssh, where the user could
+// take them: `flock ~/.ssh/authorized_keys.lock -c 'sleep infinity'` blocked the
+// broker's next write to that file forever, because the lock was acquired with a
+// blocking LOCK_EX. One unprivileged local user could therefore wedge the broker's
+// single session-expiry goroutine — after which no session expired, no key was
+// revoked for *any* user on the host, and `systemctl restart` hung on Stop() until
+// SIGKILL.
+//
+// A lock whose only job is to serialize the broker against itself has no business
+// being reachable by the account it is protecting, so it lives in the broker's own
+// state directory.
+const DefaultLockDir = "/var/lib/oidc-pam/locks"
+
+const (
+	// lockAcquireTimeout bounds how long a write waits for the per-user lock.
+	// Nothing outside the broker can hold it now, so reaching this means another
+	// broker instance, or a bug; either way the caller gets an error and the
+	// goroutine keeps running.
+	lockAcquireTimeout = 5 * time.Second
+
+	// lockRetryInterval is how often a blocked writer retries.
+	lockRetryInterval = 50 * time.Millisecond
+)
+
+// ErrLockUnavailable is returned when the per-user lock could not be taken within
+// lockAcquireTimeout. It is a distinct error so a caller can tell "someone else is
+// writing" from "the write failed".
+var ErrLockUnavailable = errors.New("authorized_keys lock unavailable")
+
+// withFileLock acquires an exclusive file lock, runs fn, then releases it. This
+// serializes concurrent read-then-write operations on one user's authorized_keys.
+//
+// The lock is taken non-blocking with a bounded retry, so no lock holder — however
+// it came to hold it — can park the calling goroutine indefinitely. That property
+// is deliberately independent of where the lock file lives: it is what makes a
+// future lock path, or a misconfigured state directory, unable to reintroduce
+// #161.
+//
+// It serializes writers within one host. Two brokers writing the same NFS home
+// from different hosts are not serialized by this, and never reliably were —
+// flock over NFS is advisory at best — which is why every write goes through
+// writeAuthorizedKeysAtomic rather than relying on the lock for integrity.
+func withFileLock(lockPath string, timeout time.Duration, fn func() error) error {
+	if err := ensureLockDir(filepath.Dir(lockPath)); err != nil {
+		return err
+	}
+
+	// #nosec G304 -- lockPath is <lockDir>/<validated username>.lock in a directory
+	// ensureLockDir has just checked is a real, broker-owned, non-group-writable
+	// directory; O_NOFOLLOW prevents following a symlink at the lock path itself.
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open lock file: %w", err)
@@ -32,11 +76,61 @@ func withFileLock(lockPath string, fn func() error) error {
 		_ = lockFile.Close()
 	}()
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("failed to acquire file lock: %w", err)
+	if err := acquireLock(lockFile, lockPath, timeout); err != nil {
+		return err
 	}
 
 	return fn()
+}
+
+// acquireLock takes an exclusive flock, retrying until timeout elapses.
+func acquireLock(lockFile *os.File, lockPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("failed to acquire file lock %q: %w", lockPath, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: %q was held by another writer for longer than %s",
+				ErrLockUnavailable, lockPath, timeout)
+		}
+		time.Sleep(lockRetryInterval)
+	}
+}
+
+// ensureLockDir creates the lock directory if it is absent and refuses to use one
+// that is not a directory the broker alone controls. A lock in a directory someone
+// else can write to is not a lock: they can plant the lock file, or hold it.
+func ensureLockDir(lockDir string) error {
+	info, err := os.Lstat(lockDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(lockDir, 0700); mkErr != nil {
+				return fmt.Errorf("failed to create lock directory %q: %w", lockDir, mkErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to stat lock directory %q: %w", lockDir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to use lock directory %q: it is a symlink", lockDir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("refusing to use lock directory %q: it is not a directory", lockDir)
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("refusing to use lock directory %q: mode %#o is writable by group or other",
+			lockDir, info.Mode().Perm())
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("refusing to use lock directory %q: it is owned by uid %d, not by this process (uid %d)",
+			lockDir, stat.Uid, os.Geteuid())
+	}
+	return nil
 }
 
 // ensureSecureSSHDir verifies that the user's .ssh directory is safe for the
@@ -133,14 +227,42 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte) error {
 
 // AuthorizedKeysManager manages authorized_keys files for users
 type AuthorizedKeysManager struct {
-	baseDir string
+	baseDir     string
+	lockDir     string
+	lockTimeout time.Duration
 }
 
-// NewAuthorizedKeysManager creates a new authorized keys manager
-func NewAuthorizedKeysManager(baseDir string) *AuthorizedKeysManager {
+// NewAuthorizedKeysManager creates a new authorized keys manager.
+//
+// baseDir is the parent of the users' home directories (production: /home).
+// lockDir is where the per-user write locks live and must be a directory only the
+// broker can write to — production passes DefaultLockDir. It is a required
+// argument rather than a default with an override because a lock directory the
+// protected user can reach is the whole of #161, and that is not something to
+// arrive at by forgetting to pass an option.
+func NewAuthorizedKeysManager(baseDir, lockDir string) *AuthorizedKeysManager {
 	return &AuthorizedKeysManager{
-		baseDir: baseDir,
+		baseDir:     baseDir,
+		lockDir:     lockDir,
+		lockTimeout: lockAcquireTimeout,
 	}
+}
+
+// LockPath returns the lock file serializing writes to one user's
+// authorized_keys. The username is validated by every caller before use, so it
+// cannot contain a separator or traverse out of lockDir.
+func (akm *AuthorizedKeysManager) LockPath(username string) string {
+	return filepath.Join(akm.lockDir, username+".lock")
+}
+
+// SetLockTimeout overrides how long a write waits for the per-user lock before
+// giving up with ErrLockUnavailable.
+//
+// This exists so tests can exercise the contended path in milliseconds instead of
+// seconds. Call it before the manager is used; it is not safe to change
+// concurrently with a write.
+func (akm *AuthorizedKeysManager) SetLockTimeout(d time.Duration) {
+	akm.lockTimeout = d
 }
 
 // AddPublicKey adds a public key to a user's authorized_keys file
@@ -156,14 +278,14 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
+	lockPath := akm.LockPath(username)
 
 	// Create/verify .ssh directory, rejecting a symlinked .ssh (C-2).
 	if err := ensureSecureSSHDir(sshDir); err != nil {
 		return err
 	}
 
-	return withFileLock(lockPath, func() error {
+	return withFileLock(lockPath, akm.lockTimeout, func() error {
 		// Read existing authorized_keys file
 		var existingKeys []string
 		if data, err := os.ReadFile(authorizedKeysPath); err == nil {
@@ -217,14 +339,14 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
+	lockPath := akm.LockPath(username)
 
 	// Check if .ssh directory exists; if not, nothing to remove
 	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
 		return nil
 	}
 
-	return withFileLock(lockPath, func() error {
+	return withFileLock(lockPath, akm.lockTimeout, func() error {
 		// Read existing authorized_keys file
 		data, err := os.ReadFile(authorizedKeysPath)
 		if err != nil {
@@ -292,14 +414,14 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 	userHomeDir := filepath.Join(akm.baseDir, username)
 	sshDir := filepath.Join(userHomeDir, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
-	lockPath := filepath.Join(sshDir, "authorized_keys.lock")
+	lockPath := akm.LockPath(username)
 
 	// Check if .ssh directory exists; if not, nothing to clean
 	if _, err := os.Stat(sshDir); os.IsNotExist(err) {
 		return nil
 	}
 
-	return withFileLock(lockPath, func() error {
+	return withFileLock(lockPath, akm.lockTimeout, func() error {
 		// Read existing authorized_keys file (O_NOFOLLOW: never follow a symlink — C-2).
 		if err := rejectIfSymlink(authorizedKeysPath); err != nil {
 			return err

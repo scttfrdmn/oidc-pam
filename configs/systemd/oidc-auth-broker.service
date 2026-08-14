@@ -21,7 +21,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth
+# /var/lib/oidc-pam holds the broker's own state: the SSH keys it issues
+# (ssh-keys/) and the per-user locks that serialize its authorized_keys writes
+# (locks/, see #161). ProtectSystem=strict makes /var read-only, so this has to be
+# listed or every key write fails.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Logging

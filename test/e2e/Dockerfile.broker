@@ -42,9 +42,11 @@ RUN mkdir -p /etc/fakeoidc /etc/oidc-auth \
 COPY --from=builder /out/oidc-auth-broker /out/oidc-admin /out/fakeoidc /usr/local/bin/
 COPY test/e2e/broker.yaml /etc/oidc-auth/broker.yaml
 
-# The broker writes SSH keys here and audit records to /harness/audit, which
-# docker-compose.yml mounts as a volume shared with the client container.
-RUN mkdir -p /var/lib/oidc-pam/ssh-keys /var/log/oidc-auth /harness/audit
+# The broker writes SSH keys and its authorized_keys write locks here (locks/ is
+# root-owned and unreachable from the client container, which is the point of
+# #161), and audit records to /harness/audit, which docker-compose.yml mounts as a
+# volume shared with the client container.
+RUN mkdir -p /var/lib/oidc-pam/ssh-keys /var/lib/oidc-pam/locks /var/log/oidc-auth /harness/audit
 
 # The same local accounts the client image has, at the same uids, without home
 # directories (the shared /home volume owns those).

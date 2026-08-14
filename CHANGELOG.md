@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **High (#161): any local user could stop session expiry and key revocation for
+  the whole host.** The broker serialized its `authorized_keys` writes on
+  `~/.ssh/authorized_keys.lock` — a path inside the home directory of the very
+  account it was protecting — and took it with a *blocking* `flock(LOCK_EX)`. So
+  `flock ~/.ssh/authorized_keys.lock -c 'sleep infinity'`, which needs no
+  privileges, parked the broker's only cleanup goroutine indefinitely: from then on
+  no session expired, no key was revoked for *any* user, and `Broker.Stop()` — which
+  waits on that goroutine — hung, so `systemctl restart` waited out
+  `TimeoutStopSec` and ended in SIGKILL. A login's `AddPublicKey` blocked the same
+  way, holding the authentication open until sshd's `LoginGraceTime` killed it.
+
+  - The lock moved out of the user's home to `/var/lib/oidc-pam/locks/<user>.lock`
+    (`ssh.DefaultLockDir`), a root-owned 0700 directory. A lock whose only job is
+    to serialize the broker against itself has no business being reachable by the
+    account it protects. The broker refuses to use a lock directory that is a
+    symlink, is not a directory, is group- or world-writable, or is owned by
+    another uid.
+  - Acquisition is now `LOCK_EX|LOCK_NB` with a bounded retry (5 s, 50 ms apart)
+    and returns `ssh.ErrLockUnavailable` instead of waiting. This is what makes the
+    fix durable: no future lock location, and no misconfigured state directory, can
+    park the daemon again. A failed acquisition skips that one user's write — the
+    sweep is best-effort and is retried on the next pass — rather than writing
+    without the lock.
+  - `NewAuthorizedKeysManager` takes the lock directory as a second argument. It is
+    required rather than defaulted, so a caller cannot arrive at a lock directory
+    inside a user's home by omission.
+  - `configs/systemd/oidc-auth-broker.service` adds `/var/lib/oidc-pam` to
+    `ReadWritePaths` (`ProtectSystem=strict` made it read-only) and
+    `scripts/install.sh` creates `ssh-keys/` and `locks/` at 0700.
 - **High (#160): one unauthenticated remote client could make a host
   unloginnable.** The IPC rate limit was documented and named as per-UID, but the
   UID it was keyed on can only ever be 0 — `verifyPeerCredentials` rejects every
