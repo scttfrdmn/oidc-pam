@@ -112,10 +112,41 @@ into your boot/login automation.
 
 #### Minimum Requirements
 - Linux server with PAM support
+- **OpenSSH 7.7 or newer** on every host the broker provisions keys on
 - 2 CPU cores
 - 4 GB RAM
 - 20 GB storage
 - Network connectivity to OIDC provider
+
+##### Why OpenSSH 7.7 is a hard requirement
+
+The broker writes each login's key into `~/.ssh/authorized_keys` with an
+`expiry-time="…"` option in front of it, so that **sshd** stops honouring the key
+once it is stale. That is deliberate: the broker holds its sessions in memory, so
+before this every key it had issued outlived the process that was meant to revoke
+it (#171), and an expiry only the broker knows about is an expiry a restart
+forgets.
+
+`expiry-time=` was added in OpenSSH 7.7. An sshd that does not recognise an
+authorized_keys option refuses the whole entry, so on anything older **every key
+the broker installs is rejected**: the login is authenticated, the file looks
+correct, and SSH still says `Permission denied (publickey)`. Check with:
+
+```bash
+ssh -V   # OpenSSH_8.4p1 …  -> fine
+```
+
+Versions the common platforms ship: RHEL/CentOS Stream 8 `8.0p1`, RHEL 9 `8.7p1`,
+Debian 11 `8.4p1`, Debian 12 `9.2p1`, Ubuntu 20.04 `8.2p1`, Ubuntu 22.04 `8.9p1`,
+Ubuntu 24.04 `9.6p1` — all fine. **Amazon Linux 2 and RHEL/CentOS 7 ship `7.4p1`
+and cannot run this**; check any other platform with the command above before
+deploying. The broker does not currently detect the local sshd version
+([#199](https://github.com/scttfrdmn/oidc-pam/issues/199)); it writes the option
+unconditionally.
+
+The timespec itself is written in the host's local time zone, not UTC, because the
+`Z` suffix that means UTC was only added in OpenSSH 9.1 and older versions reject
+a timespec carrying it.
 
 #### Recommended Requirements
 - 4+ CPU cores
@@ -125,12 +156,19 @@ into your boot/login automation.
 - Load balancer for multiple instances
 
 #### Supported Operating Systems
-- Ubuntu 20.04 LTS or later
-- CentOS 8 or later
-- RHEL 8 or later
-- Debian 11 or later
-- Amazon Linux 2
-- SUSE Linux Enterprise Server 15+
+- Ubuntu 20.04 LTS or later (OpenSSH 8.2p1+)
+- CentOS Stream 8 or later (8.0p1+)
+- RHEL 8 or later (8.0p1+)
+- Debian 11 or later (8.4p1+)
+- SUSE Linux Enterprise Server 15+ — check `ssh -V` first; the older service packs
+  predate OpenSSH 7.7
+- **Not Amazon Linux 2, and not RHEL/CentOS 7**: both ship OpenSSH 7.4p1, which does
+  not know `expiry-time=` and therefore refuses every key the broker installs. See
+  the OpenSSH requirement above.
+
+Which distribution has actually been tested, and on what, is in
+[README.md](README.md#-supported-platforms) — the list above is what the broker's
+dependencies allow, not a claim that a login has been run on each one.
 
 ### Network Requirements
 
@@ -456,8 +494,10 @@ ProtectHome=false
 # ProtectSystem=strict makes everything read-only, so every path the broker
 # writes is listed: its runtime socket, its logs, its state directory (issued keys
 # and per-user locks), and the home directories it provisions keys into. Add your
-# own home path here if homes are not under /home.
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam /home
+# own home path here if homes are not under /home. The "-" prefix makes a missing
+# path non-fatal: without it systemd refuses to start the unit at all on a host
+# that has no /home, which is exactly the host whose homes are somewhere else.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
 StateDirectory=oidc-pam
 StateDirectoryMode=0700
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID

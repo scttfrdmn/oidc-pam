@@ -33,7 +33,12 @@ ProtectHome=false
 #
 # Sites whose home directories are not under /home (autofs, NFS, /home/<domain>/…
 # is fine, but /export/home is not) must add that path here as well.
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam /home
+#
+# /home carries a "-" prefix so that a host which has no /home at all — the same
+# site that keeps homes on /export/home — still starts. Without it systemd fails
+# the unit outright when a listed path is missing, which would turn a misconfigured
+# home path into a broker that never runs.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
 # Creates /var/lib/oidc-pam (0700, root) before ExecStart, so a first start on a
 # host installed by hand does not fail on a missing state directory.
 StateDirectory=oidc-pam
