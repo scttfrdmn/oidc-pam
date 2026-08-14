@@ -86,6 +86,44 @@ func TestNewAuditLogger(t *testing.T) {
 	}
 }
 
+// TestAuditingOnWithNowhereToWriteIsRefused covers #210. audit.enabled defaults
+// to true and audit.outputs has no default, so the configuration this asserts on
+// is the one an operator produces by omitting the audit block: a logger that
+// accepted every event and wrote it nowhere. Nothing reported it, because the
+// only two signals of a broken audit pipeline — DroppedEvents and FailedWrites —
+// count events the code decided not to write and writes that returned an error,
+// and a nil output list produces neither. Both stayed at zero, `oidc-admin
+// status` reported a healthy broker, and "there are no audit records" was
+// indistinguishable from "nothing happened".
+//
+// The assertion is on both halves: the configuration is refused, and it is
+// refused before any output is opened, since ValidateAuditConfig is what
+// cmd/broker's fatal error comes from and what the shipped-configuration gate in
+// pkg/config calls without touching /var/log.
+func TestAuditingOnWithNowhereToWriteIsRefused(t *testing.T) {
+	cfg := config.AuditConfig{Enabled: true}
+
+	if err := ValidateAuditConfig(cfg); err == nil {
+		t.Error("ValidateAuditConfig accepted auditing enabled with no outputs")
+	} else if !strings.Contains(err.Error(), "audit.outputs") {
+		t.Errorf("error does not name the setting to fix: %v", err)
+	}
+
+	logger, err := NewAuditLogger(cfg)
+	if err == nil {
+		t.Fatal("NewAuditLogger built a logger with no destinations")
+	}
+	if logger != nil {
+		t.Error("NewAuditLogger returned a logger alongside an error")
+	}
+
+	// Disabled auditing is a deliberate choice and stays legal: the refusal is
+	// about a configuration that claims to audit and does not.
+	if err := ValidateAuditConfig(config.AuditConfig{Enabled: false}); err != nil {
+		t.Errorf("disabled auditing was refused: %v", err)
+	}
+}
+
 func TestAuditEvent(t *testing.T) {
 	event := &AuditEvent{
 		EventType:  "authentication",
@@ -498,6 +536,10 @@ func TestAuditLoggerDropCounter(t *testing.T) {
 		Enabled:          true,
 		BufferSize:       2,
 		OverflowStrategy: "drop",
+		// An enabled logger must name an output or NewAuditLogger refuses the
+		// configuration (#210); the capture output below replaces it, so which
+		// type is named here does not matter.
+		Outputs: []config.AuditOutput{{Type: "stdout"}},
 	}
 	logger, err := NewAuditLogger(cfg)
 	if err != nil {
@@ -529,6 +571,7 @@ func TestAuditLoggerDefaultDoesNotDrop(t *testing.T) {
 		Enabled:          true,
 		BufferSize:       4,
 		OverflowStrategy: "", // empty → block (default)
+		Outputs:          []config.AuditOutput{{Type: "stdout"}},
 	}
 	logger, err := NewAuditLogger(cfg)
 	if err != nil {
@@ -560,6 +603,7 @@ func TestAuditLoggerSyncStrategy(t *testing.T) {
 		Enabled:          true,
 		BufferSize:       1,
 		OverflowStrategy: "sync",
+		Outputs:          []config.AuditOutput{{Type: "stdout"}},
 	}
 	logger, err := NewAuditLogger(cfg)
 	if err != nil {
@@ -590,6 +634,7 @@ func TestAuditLoggerBlockStrategy(t *testing.T) {
 		Enabled:          true,
 		BufferSize:       4,
 		OverflowStrategy: "block",
+		Outputs:          []config.AuditOutput{{Type: "stdout"}},
 	}
 	logger, err := NewAuditLogger(cfg)
 	if err != nil {

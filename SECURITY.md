@@ -94,7 +94,7 @@ OIDC PAM includes several security features:
 
 - **Encrypted Token Storage**: AES-256-GCM authenticated encryption (base64 32-byte key; no passphrase stretching)
 - **Identity Binding**: The authenticated OIDC identity is bound to the requested local username, and `require_groups` is enforced
-- **Comprehensive Audit Logging**: All authentication events logged
+- **Comprehensive Audit Logging**: All authentication events logged, and a broker told to audit with no `audit.outputs` refuses to start rather than accepting events and discarding them
 - **Risk-Based Policy Engine**: Geographic and temporal access controls
 - **Automatic Key Rotation**: SSH key lifecycle management
 - **Session Management**: Automatic token expiration and cleanup

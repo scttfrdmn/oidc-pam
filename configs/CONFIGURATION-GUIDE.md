@@ -427,7 +427,19 @@ audit:
     - "token_validation"
     - "session_management"
     - "policy_violations"
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
 ```
+
+`audit.outputs` is the one key here that has no default, and auditing is on
+unless you turn it off, so a configuration that enables auditing without naming
+an output is **refused at startup** (#210). Before that refusal existed such a
+broker started, accepted every event and wrote it nowhere, and reported nothing
+wrong: `oidc_audit_events_dropped_total` and the failed-write count both stay at
+zero when there is no output to drop an event from or fail to write to. A host
+with no audit trail looked exactly like a host where nothing had happened. If you
+genuinely want no audit trail, write `audit.enabled: false` and mean it.
 
 ### 6. How Far the Provider Is Trusted
 
@@ -562,6 +574,7 @@ absent.
 | `audit.buffer_size` | `1000` | Capacity of the in-memory audit event channel. |
 | `audit.overflow_strategy` | `block` | What happens when that channel is full: `block` (backpressure), `sync` (write inline), or `drop` (discard and count). `drop` loses audit records and must be chosen deliberately. |
 | `audit.outputs[].type` | — | `file`, `stdout`, `syslog` or `http`. Any other value is refused at startup. |
+| `audit.enabled` | `true` | Whether to audit at all. With no `audit.outputs` alongside it the broker refuses to start, rather than accepting events and discarding them (#210). |
 
 ## Authentication Policies
 
