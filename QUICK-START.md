@@ -151,22 +151,32 @@ security:
 
 ### 2. PAM Configuration
 
-For SSH authentication, edit `/etc/pam.d/ssh`:
+For SSH authentication, edit `/etc/pam.d/ssh` — that one service's file, not
+`/etc/pam.d/common-auth` or `/etc/pam.d/system-auth`, which every service on the
+host `@includes`:
 
 ```
-# OIDC authentication
+# OIDC authentication. This is OIDC-only: nothing may follow `requisite
+# pam_deny.so`, which returns to sshd immediately, so a pam_unix.so line here
+# would never be reached. Keep SSH public-key access as the break-glass path,
+# or drop pam_deny.so -- see configs/pam/README.md.
 auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
 
-# Account management
-account required    pam_oidc.so
+# Account management. pam_oidc.so returns PAM_IGNORE here and decides nothing;
+# it must be `optional`, never `sufficient`, and a real account module has to
+# follow it.
+account optional    pam_oidc.so
 account required    pam_unix.so
 
 # Session management
 session required    pam_unix.so
 session optional    pam_oidc.so
 ```
+
+The device flow needs a terminal to print the verification URL on and a user
+waiting in front of it, so `pam_oidc.so` belongs only in the stack of a service
+that has both. `sshd` is the only one CI exercises end-to-end.
 
 ### 3. SSH Configuration
 

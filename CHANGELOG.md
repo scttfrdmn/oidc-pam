@@ -8,6 +8,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Medium (#172): `configs/pam/common-auth` put a 90-second interactive device
+  flow in the auth stack of every service on the host.** `common-auth` is the file
+  every Debian/Ubuntu PAM service `@include`s, so an operator who followed the
+  install instructions in `configs/pam/README.md` got `pam_oidc.so` at the front of
+  `su`, `sudo`, `gdm`/`sddm`, `polkit`, `login` and `cron` as well as `sshd`. Each
+  of those then waited up to `timeout` seconds — 90 by default — for a human with a
+  phone before falling through, and several of them can never satisfy a device flow
+  at all: no controlling terminal, a conversation function that discards
+  `PAM_TEXT_INFO`, or a graphical prompt that renders the QR code as a block of
+  ASCII art. Nothing was admitted that should not have been, since the stacks fail
+  closed on `pam_deny.so`; what broke was the machine's usability, and with no
+  password fallback in the shipped stacks (#160) an auth stack that cannot complete
+  is an operator locked out of their own host.
+
+  - `configs/pam/common-auth` is deleted. The per-service files — `ssh`, `login`,
+    `su`, `sudo` — are what this project ships, and each now says in its header
+    that it belongs in that one service's `/etc/pam.d` file and not in the
+    host-wide stack.
+  - `scripts/install.sh` no longer inserts `@include common-auth` at the top of
+    `/etc/pam.d/sshd`. That line both duplicated the distribution's own include
+    further down the same file and, on a host that had taken the old `common-auth`
+    advice, ran the device flow twice. It also no longer runs `sed` against an
+    `/etc/pam.d/sshd` that does not exist, which aborted the install.
+  - `configs/pam/README.md` loses its "for system-wide (be careful!)" install
+    command and gains a section on why no host-wide stack is shipped;
+    `DEPLOYMENT.md` and `QUICK-START.md` say the same where they tell an operator
+    to edit a PAM file. The `QUICK-START.md` example also still carried defects
+    fixed elsewhere long ago — an unreachable `pam_unix.so` line after `requisite
+    pam_deny.so`, and `account required pam_oidc.so` — and now matches
+    `configs/pam/ssh`.
+  - The `su` and `sudo` headers claimed they maintained "traditional authentication
+    for emergency access". They do not: the `requisite pam_deny.so` in both refuses
+    anything OIDC did not accept, and a comment that misstates a stack's semantics
+    is part of the same defect.
+  - `README.md`'s platform table claimed Console and GUI support as **Stable** on
+    five distributions. CI exercises `sshd` on one image — Debian 12, via
+    `test/e2e` — so the table now says which cell that is, marks the console, `su`
+    and `sudo` stacks as untested examples, and marks display managers
+    unsupported, since no `gdm`/`sddm`/`lightdm` stack is shipped. The "Subsequent
+    access uses cached SSH key" line is gone: `pam_oidc.so` sends no session ID
+    with its request, so the broker has nothing to match a login against and every
+    login runs a fresh device flow.
+
+  Coverage: four tests in `cmd/pam-module/configs_test.go` that read the shipped
+  files rather than describing them. A stack file must be named after a service
+  that can complete a device flow and must not point at a host-wide stack;
+  `pam_oidc.so` must carry a documented control flag for its phase (`auth
+  sufficient` or `required`, every other phase `optional`) and never a bracketed
+  skip count like the `[success=2 default=ignore]` that `common-auth` used; no
+  `scripts/*.sh` may touch `common-auth` or `system-auth`; and every
+  `configs/pam/<file>` a document or script names must exist, so a deleted stack
+  cannot leave install instructions pointing at it.
 - **High (#168): the shipped PAM stacks logged every login's broker response to
   syslog, and a service with no PAM conversation crashed the login outright.** Five
   defects in the C module, grouped because they are one PR's worth of work.

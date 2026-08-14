@@ -348,6 +348,21 @@ monitoring:
 
 ### 3. PAM Configuration
 
+**Wire `pam_oidc.so` into one service's file at a time, and never into
+`/etc/pam.d/common-auth` (Debian/Ubuntu) or `/etc/pam.d/system-auth` (RHEL,
+Fedora, SUSE).** Those are `@include`d by every PAM service on the host, so a
+module there runs for `su`, `sudo`, `gdm`/`sddm`, `polkit`, `login`, `cron` and
+everything else linked against libpam. Each would then wait up to `timeout`
+seconds (90 by default) for a human with a phone, and several can never satisfy a
+device flow at all: no controlling terminal, a conversation function that discards
+`PAM_TEXT_INFO`, or a graphical prompt that renders the QR code as ASCII art. The
+stacks fail closed, so nothing is admitted that should not be — but the host
+becomes unusable, and these stacks have no password fallback.
+
+Only `sshd` is exercised end-to-end by CI (`test/e2e`). The `login`, `su` and
+`sudo` files in `configs/pam/` are examples: deploy them one at a time, from a
+host you can still get back into.
+
 #### SSH Configuration (`/etc/pam.d/ssh`)
 ```bash
 # Production SSH PAM configuration.

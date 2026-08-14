@@ -1,11 +1,18 @@
 # PAM Configuration for SU (Switch User) with OIDC Authentication
-# This file should be placed at /etc/pam.d/su
-# 
-# This configuration enables OIDC authentication for user switching while
-# maintaining traditional authentication for emergency access.
+# This file should be placed at /etc/pam.d/su -- that one service's file, and
+# never the host-wide common-auth or system-auth stack, which every PAM service on
+# the machine includes.
+#
+# This configuration enables OIDC authentication for user switching.
 #
 # IMPORTANT: Be extremely careful with su configuration!
-# Test thoroughly and maintain root access for emergency recovery.
+# Test thoroughly and maintain root access for emergency recovery. This stack is
+# OIDC-only past pam_rootok.so: the requisite pam_deny.so below refuses anything
+# OIDC did not accept, so there is no Unix-password fallback here.
+#
+# CI does not exercise this stack -- only configs/pam/ssh, via test/e2e. Note that
+# every su will wait for a device flow to be completed on another device, up to
+# 'timeout' seconds (90 by default), before it fails.
 
 # Authentication stack
 auth    sufficient  pam_rootok.so

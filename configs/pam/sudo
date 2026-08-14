@@ -1,11 +1,19 @@
 # PAM Configuration for SUDO with OIDC Authentication
-# This file should be placed at /etc/pam.d/sudo
-# 
-# This configuration enables OIDC authentication for sudo operations while
-# maintaining traditional authentication for emergency access.
+# This file should be placed at /etc/pam.d/sudo -- that one service's file, and
+# never the host-wide common-auth or system-auth stack, which every PAM service on
+# the machine includes.
+#
+# This configuration enables OIDC authentication for sudo operations. It is
+# OIDC-only: the requisite pam_deny.so below refuses anything OIDC did not accept,
+# so there is no Unix-password fallback here.
 #
 # IMPORTANT: Test sudo configuration very carefully!
 # Keep a root session open and test with non-privileged users first.
+#
+# CI does not exercise this stack -- only configs/pam/ssh, via test/e2e. Note that
+# every sudo will wait for a device flow to be completed on another device, up to
+# 'timeout' seconds (90 by default), before it fails. That is a deliberate choice
+# to make per invocation, not something to switch on host-wide.
 
 # Authentication stack
 auth    sufficient  pam_oidc.so

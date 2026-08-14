@@ -1,6 +1,14 @@
 # PAM Configuration for SSH with OIDC Authentication
-# This file should be placed at /etc/pam.d/ssh (or /etc/pam.d/sshd on some systems)
-# 
+# This file should be placed at /etc/pam.d/ssh (or /etc/pam.d/sshd on some
+# systems) -- that one service's file, and never the host-wide common-auth or
+# system-auth stack. Those are included by every PAM service on the machine, and
+# a device flow in one of them makes su, sudo, the display manager, polkit and
+# cron each wait up to 'timeout' seconds for a human with a phone, several of
+# them with no way to show that human the verification URL.
+#
+# This is the one stack CI exercises end to end: test/e2e logs in over real SSH
+# against the built module using this auth stack.
+#
 # This configuration is OIDC-ONLY: if OIDC authentication fails, the login is
 # refused. It does not fall back to Unix passwords -- see EMERGENCY ACCESS below
 # for how to keep a way in, and AUTHENTICATION FALLBACK for how to enable one.
