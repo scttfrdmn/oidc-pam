@@ -417,6 +417,169 @@ func TestPerformAuthenticationRequiresABooleanSuccess(t *testing.T) {
 	}
 }
 
+// The other half of the same trap, and the dangerous half: requires_device was
+// read with json_object_get_boolean and no type check, so anything that was not a
+// JSON boolean was silently read as *false* — "no device authorization needed" —
+// and success=true was then honored on its own (#201).
+//
+// That is the grant the comment in classify_response says must be impossible:
+// `{"success":true,"requires_device":null}` returned PAM_SUCCESS for an arbitrary
+// user_id with no device flow, no identity binding and no require_groups check,
+// and with the shipped `auth sufficient pam_oidc.so` a grant is a login. JSON null
+// is the worst of them, because json_object_object_get_ex answers TRUE with a NULL
+// object for it, so it took the "absent" path rather than looking like a value at
+// all.
+//
+// A requires_device that is present but not a boolean is therefore a response the
+// module cannot interpret, not a false. The real broker emits a JSON bool
+// (internal/ipc.Response, no omitempty), so nothing is given up by insisting on
+// one.
+func TestPerformAuthenticationRequiresABooleanRequiresDevice(t *testing.T) {
+	t.Parallel()
+
+	// success is a real JSON bool in every one of these: the point is what the
+	// module does *after* it has honored success, which is where the device step
+	// either survives or vanishes. Written verbatim, so the JSON type is the test.
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"null", `{"success":true,"session_id":"s","requires_device":null}` + "\n"},
+		{"an empty object", `{"success":true,"session_id":"s","requires_device":{}}` + "\n"},
+		{"an empty array", `{"success":true,"session_id":"s","requires_device":[]}` + "\n"},
+		{"the empty string", `{"success":true,"session_id":"s","requires_device":""}` + "\n"},
+		{"the string false", `{"success":true,"session_id":"s","requires_device":"false"}` + "\n"},
+		{"the string true", `{"success":true,"session_id":"s","requires_device":"true"}` + "\n"},
+		{"the number 0", `{"success":true,"session_id":"s","requires_device":0}` + "\n"},
+		{"the number 1", `{"success":true,"session_id":"s","requires_device":1}` + "\n"},
+		{"the float 0.0", `{"success":true,"session_id":"s","requires_device":0.0}` + "\n"},
+	}
+
+	for _, tt := range replies {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+				return tt.reply
+			})
+
+			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+			if got == pam.PAMSuccess {
+				t.Fatalf("requires_device=%s was read as 'no device step' and success=true was "+
+					"honored on its own: PAM_SUCCESS from `auth sufficient pam_oidc.so` is a "+
+					"login, with no device flow and no group check", tt.name)
+			}
+			if got != pam.PAMAuthInfoUnavail {
+				t.Fatalf("requires_device=%s: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)",
+					tt.name, got, pam.PAMAuthInfoUnavail)
+			}
+			// An uninterpretable response is not something to keep polling on.
+			if n := len(broker.received()); n != 1 {
+				t.Errorf("expected exactly 1 request, got %d", n)
+			}
+		})
+	}
+}
+
+// json_object_get_string does not read a string, it renders whatever it is given:
+// a session_id of 12345 came back as the text "12345", and one of {"a":1} as
+// `{ "a": 1 }` — a session the module then sent back to the broker as the one to
+// poll. The broker's session ids are strings, so a session_id of another type is a
+// response that cannot be interpreted (#201).
+func TestPerformAuthenticationRequiresAStringSessionID(t *testing.T) {
+	t.Parallel()
+
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"a number", `{"success":true,"requires_device":true,"session_id":12345}` + "\n"},
+		{"a bool", `{"success":true,"requires_device":true,"session_id":true}` + "\n"},
+		{"an object", `{"success":true,"requires_device":true,"session_id":{"id":"s"}}` + "\n"},
+		{"an array", `{"success":true,"requires_device":true,"session_id":["s"]}` + "\n"},
+		{"null", `{"success":true,"requires_device":true,"session_id":null}` + "\n"},
+	}
+
+	for _, tt := range replies {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+				return tt.reply
+			})
+
+			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+			if got != pam.PAMAuthInfoUnavail {
+				t.Fatalf("session_id=%s: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)",
+					tt.name, got, pam.PAMAuthInfoUnavail)
+			}
+			if n := len(broker.received()); n != 1 {
+				t.Errorf("a session_id the module cannot read must not be polled: got %d requests", n)
+			}
+		})
+	}
+}
+
+// error_code is read with the same strictness, and a refusal whose error_code is
+// not a string stays a refusal: it maps as an unrecognized code (PAM_AUTH_ERR)
+// rather than being rendered into text that map_error_code might match, and never
+// becomes "I could not reach an opinion".
+func TestPerformAuthenticationDeniesWithANonStringErrorCode(t *testing.T) {
+	t.Parallel()
+
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"a number", `{"success":false,"error_code":404,"error_message":"nope"}` + "\n"},
+		{"an array", `{"success":false,"error_code":["POLICY_DENIED"],"error_message":{"m":1}}` + "\n"},
+		{"null", `{"success":false,"error_code":null,"error_message":null}` + "\n"},
+	}
+
+	for _, tt := range replies {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+				return tt.reply
+			})
+
+			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
+			if got != pam.PAMAuthError {
+				t.Fatalf("error_code=%s: got PAM result %d, want pam.PAMAuthError (%d)",
+					tt.name, got, pam.PAMAuthError)
+			}
+		})
+	}
+}
+
+// metadata.polling_interval is read with json_object_get_int, which parses a JSON
+// *string* too, so a broker could set the module's poll rate with a value that is
+// not a number. It is now ignored unless it really is a JSON number, which leaves
+// DEFAULT_POLL_INTERVAL in force.
+//
+// The count is what shows it: a 2-second budget with the default 5-second interval
+// leaves time for exactly one poll, where a honored "1" would have allowed two.
+func TestPerformAuthenticationIgnoresANonNumericPollInterval(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+		if n == 1 {
+			return `{"success":true,"session_id":"sess-pi","requires_device":true,` +
+				`"metadata":{"polling_interval":"1"}}` + "\n"
+		}
+		return devicePending("sess-pi")
+	})
+
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 2); got != pam.PAMAuthError {
+		t.Fatalf("unfinished device flow: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	}
+	if n := len(broker.received()); n != 2 {
+		t.Errorf("expected authenticate + 1 poll in a 2s budget at the default 5s interval, got %d "+
+			"requests: a non-numeric polling_interval is being read as a number", n)
+	}
+}
+
 // A service can hand the module a PAM_CONV item with no conversation function in
 // it. display_message called through it without looking, so showing the device-flow
 // instructions dereferenced NULL and killed the process — and under sshd that

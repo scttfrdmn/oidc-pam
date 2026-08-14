@@ -539,25 +539,25 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
 // value cannot collide with one.
 #define BROKER_PENDING (-1)
 
-// Read a string field, or NULL if it is absent or JSON null. The result points
-// into obj and is only valid while obj is alive.
+// Read a string field, or NULL if it is absent, JSON null, or not a JSON string.
+// The result points into obj and is only valid while obj is alive.
+//
+// The type is checked for the same reason it is checked on `success` (#201):
+// json_object_get_string does not read a string, it *renders* whatever it is
+// given, so `"session_id":{"a":1}` came back as the literal text `{ "a": 1 }` and
+// `"error_code":404` as `"404"`. A value of the wrong type is not a value the
+// broker's contract can express, and inventing one from it — then sending it back
+// as the session to poll — is worse than reporting that the field is missing.
+// json_object_is_type answers false for the NULL that json_object_object_get_ex
+// hands back for a JSON null, so that case needs no separate test.
 static const char *json_get_string(json_object *obj, const char *key) {
     json_object *field = NULL;
 
-    if (!json_object_object_get_ex(obj, key, &field) || field == NULL) {
+    if (!json_object_object_get_ex(obj, key, &field) ||
+        !json_object_is_type(field, json_type_string)) {
         return NULL;
     }
     return json_object_get_string(field);
-}
-
-// Read a boolean field, or fallback if it is absent.
-static int json_get_bool(json_object *obj, const char *key, int fallback) {
-    json_object *field = NULL;
-
-    if (!json_object_object_get_ex(obj, key, &field) || field == NULL) {
-        return fallback;
-    }
-    return json_object_get_boolean(field);
 }
 
 // Read the poll interval the broker asked for, clamped into a sane range. An
@@ -570,7 +570,16 @@ static int response_poll_interval(json_object *obj) {
     if (!json_object_object_get_ex(obj, "metadata", &metadata) || metadata == NULL) {
         return DEFAULT_POLL_INTERVAL;
     }
-    if (!json_object_object_get_ex(metadata, "polling_interval", &field) || field == NULL) {
+    if (!json_object_object_get_ex(metadata, "polling_interval", &field)) {
+        return DEFAULT_POLL_INTERVAL;
+    }
+    // A JSON number, and not something rendered into one: json_object_get_int
+    // parses a JSON *string* ("30"), and answers 1 for `true`. Both int and
+    // double are accepted, which is what internal/brokerclient's pollInterval
+    // accepts; the broker sends an int. json_object_is_type answers false for the
+    // NULL a JSON null produces, so that case needs no separate test.
+    if (!json_object_is_type(field, json_type_int) &&
+        !json_object_is_type(field, json_type_double)) {
         return DEFAULT_POLL_INTERVAL;
     }
 
@@ -613,6 +622,7 @@ static int map_error_code(const char *error_code) {
 // the device flow is still in progress.
 static int classify_response(json_object *obj) {
     json_object *success_obj = NULL;
+    json_object *requires_device_obj = NULL;
 
     // A response we cannot interpret is not a grant.
     //
@@ -643,8 +653,32 @@ static int classify_response(json_object *obj) {
     // requires_device must therefore be tested before success is honored, or
     // `auth sufficient pam_oidc.so` short-circuits the auth stack and grants
     // login to anyone who can reach the broker.
-    if (json_get_bool(obj, "requires_device", 0)) {
-        return BROKER_PENDING;
+    //
+    // This read used to go through json_object_get_boolean with no type check, so
+    // a `requires_device` that was not a boolean was silently read as false and
+    // the device step vanished: `{"success":true,"requires_device":null}` — or
+    // `{}`, `[]`, `""` — returned PAM_SUCCESS for an arbitrary user_id, with no
+    // device flow, no identity binding and no require_groups check (#201). It is
+    // the exact grant the paragraph above says must be impossible, so a
+    // requires_device that is present but not a boolean is treated as a response
+    // that cannot be interpreted, not as false. Fail closed, as with `success`.
+    //
+    // Absent is still read as "no device step": internal/ipc.Response declares
+    // `json:"requires_device"` with no omitempty, so the broker emits the field on
+    // every response and only a *different* producer can omit it.
+    if (json_object_object_get_ex(obj, "requires_device", &requires_device_obj)) {
+        // json_object_object_get_ex answers TRUE with a NULL object for a JSON
+        // null, which is how a null used to reach the "absent" path; here it is a
+        // present field of the wrong type, and json_object_is_type answers false
+        // for NULL unless the type asked for is json_type_null.
+        if (!json_object_is_type(requires_device_obj, json_type_boolean)) {
+            log_pam_message(LOG_ERR, "Broker response has a non-boolean requires_device field; "
+                                     "refusing to read it as 'no device authorization needed'");
+            return PAM_AUTHINFO_UNAVAIL;
+        }
+        if (json_object_get_boolean(requires_device_obj)) {
+            return BROKER_PENDING;
+        }
     }
 
     return PAM_SUCCESS;
