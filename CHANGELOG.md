@@ -53,6 +53,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inheriting the first's `debug`, and `success` as the string `"false"`, the string
   `"true"`, `1` and `null` each refused rather than granted. A fourth test reads
   `configs/pam` and fails if a shipped stack passes `debug`.
+- **Medium (#167): a token response with no `id_token` was accepted with nothing
+  verified at all, an unsigned `/userinfo` body outranked the signed token where the
+  two disagreed, and two of the three endpoints the broker sends credentials to were
+  never checked.** The whole verification block in `PollDeviceAuthorization` —
+  signature, `iss`, `aud`, `exp`, the nonce replay check and `validateIDTokenClaims`
+  — sat behind `if tokenResp.IDToken != ""`, so a provider that simply omitted the
+  field got an identity read out of `/userinfo` and vouched for by nothing but TLS
+  and the bearer token. Where an ID token *was* present, the merge that decides which
+  claim authorizes the login preferred `/userinfo` anyway. The endpoint gap is the
+  sharpest of the three and needs no misbehaving provider: `validateEndpoint` ran on
+  the device authorization endpoint only, while the token and userinfo endpoints were
+  taken from the discovery document unvalidated, so a discovery response naming
+  `http://` had the broker post the device code to, and carry the access token to, a
+  plaintext endpoint — with `trusted_ca_bundle`, `skip_tls_verify` and the
+  certificate pins all bypassed, because none of them apply to a connection that
+  never negotiates TLS.
+
+  - `require_id_token`, per provider, defaults to **on**: a granted authorization
+    with no `id_token` is refused, leaves no session and no SSH key, and is audited
+    as `ID_TOKEN_MISSING` naming the key that would permit it. The field is a
+    `*bool`, so unset means required in configs built in Go as well as in loaded
+    YAML — the fail-closed direction for every deployment that has never heard of
+    the key. An operator whose provider genuinely does not issue an ID token for the
+    device grant sets it to false and gets the old behaviour, deliberately.
+  - The ID token now wins over `/userinfo` wherever the two disagree. Claims only
+    `/userinfo` returns are still used, since the signed token says nothing about
+    them, so this changes which value is believed in a conflict and not how much of
+    the identity is available.
+  - The token, userinfo and device authorization endpoints are all checked when the
+    provider is built, which refuses a provider like this at broker startup rather
+    than one login at a time. Only the scheme is enforced there, deliberately: a
+    token endpoint on a host other than the issuer's is ordinary — Google's issuer
+    is `accounts.google.com` and its token endpoint is on `oauth2.googleapis.com` —
+    so extending the issuer-host match that the device endpoint has always demanded
+    would refuse real providers outright. What an endpoint cannot be is plaintext.
+  - Loopback is still exempt from that check, for local development and the test
+    issuer, but is matched exactly now rather than by prefix: the old
+    `strings.HasPrefix(u.Host, "localhost")` took `localhost.attacker.example` for
+    the local machine and allowed plaintext to it.
+  - Out of scope, and both left alone on purpose: refresh responses, where RFC 6749
+    §6 makes `id_token` optional and the refresh path derives no identity from
+    claims; and `security.tls_verification.pin_certificates` as documented in
+    `CONFIGURATION-GUIDE.md`, which matches no config field and so pins nothing
+    (#170).
+
+  Coverage: five tests in `pkg/auth/provider_trust_test.go`. Three drive the real
+  poll loop against the in-process issuer — a grant with the `id_token` withheld
+  refused and audited as `ID_TOKEN_MISSING`; the same grant admitted under
+  `require_id_token: false`, so the escape hatch is known to work; and an ID token
+  and a `/userinfo` body naming different users, asserted in both directions, so
+  that the signed claim is the one that binds *and* the unsigned one cannot
+  authorize a login the signature contradicts. The other two go through
+  `NewOIDCProvider` against a discovery document naming `http://` for each endpoint
+  in turn, and against configured endpoints under `skip_discovery`, including the
+  `localhost.…` host and a legitimate cross-host HTTPS token endpoint that must
+  still be accepted. Reintroducing any one of the three defects fails the
+  corresponding test.
 - **Low (#166): `allowed_groups` and `allowed_roles` denied nothing.** Both were
   applied while claims were being read, where the only thing they could do was drop
   the group and role names that were not in the list. A user in **none** of the

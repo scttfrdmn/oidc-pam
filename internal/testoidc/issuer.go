@@ -51,8 +51,11 @@ type Issuer struct {
 	script      []Outcome
 	polls       int
 	claims      map[string]any
+	userInfo    map[string]any    // what /userinfo returns, when it differs; see SetUserInfoClaims
 	devices     map[string]string // device_code -> nonce received at the device endpoint
 	uriPadBytes int               // extra bytes in verification_uri, see SetVerificationURIPadding
+	omitIDToken bool              // grant without an id_token, see SetOmitIDToken
+	endpoints   map[string]string // discovery overrides, see SetEndpointOverride
 }
 
 // DefaultClaims is the claim set a fresh Issuer puts in ID tokens and returns
@@ -140,6 +143,47 @@ func (i *Issuer) Claims() map[string]any {
 	return i.claims
 }
 
+// SetUserInfoClaims makes /userinfo answer with its own claim set instead of the
+// one the ID token carries, so the two can disagree.
+//
+// Real providers differ between the two endpoints all the time — different scopes
+// are reflected in each, and some claims are only ever returned by /userinfo — and
+// an issuer whose two answers are identical cannot show which of them a client
+// believes. That is what #167 was: /userinfo took precedence, so the value that
+// authorized the login came from an unsigned JSON body even when a signed ID token
+// said something else. Pass nil to go back to serving the ID token's claims.
+func (i *Issuer) SetUserInfoClaims(claims map[string]any) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.userInfo = claims
+}
+
+// SetOmitIDToken makes a granting token response leave out id_token, as a provider
+// that does not implement OIDC on the device grant does. Everything a client can
+// verify is in that token, so an identity built from such a response is asserted by
+// nothing but TLS and the bearer token (#167).
+func (i *Issuer) SetOmitIDToken(omit bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.omitIDToken = omit
+}
+
+// SetEndpointOverride makes the discovery document advertise url for the named
+// endpoint ("token_endpoint", "userinfo_endpoint", ...) instead of this issuer's
+// own. An empty url drops the key from the document entirely.
+//
+// Both a legitimate and a hostile provider do this: Google's token endpoint is on
+// a different host from its issuer, while a tampered discovery response naming
+// http:// is how a client ends up posting an access token in cleartext (#167).
+func (i *Issuer) SetEndpointOverride(name, url string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.endpoints == nil {
+		i.endpoints = make(map[string]string)
+	}
+	i.endpoints[name] = url
+}
+
 // Polls is the number of token-endpoint requests received since the issuer was
 // created or last Reset.
 func (i *Issuer) Polls() int {
@@ -186,8 +230,11 @@ func (i *Issuer) Reset() {
 	defer i.mu.Unlock()
 	i.polls = 0
 	i.claims = DefaultClaims()
+	i.userInfo = nil
 	i.devices = make(map[string]string)
 	i.uriPadBytes = 0
+	i.omitIDToken = false
+	i.endpoints = nil
 }
 
 // Handler serves the OIDC endpoints. The paths are also what the discovery
@@ -204,8 +251,15 @@ func (i *Issuer) Handler() http.Handler {
 }
 
 func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
-	base := i.IssuerURL()
-	writeJSON(w, http.StatusOK, map[string]any{
+	i.mu.Lock()
+	base := i.issuerURL
+	overrides := make(map[string]string, len(i.endpoints))
+	for name, url := range i.endpoints {
+		overrides[name] = url
+	}
+	i.mu.Unlock()
+
+	doc := map[string]any{
 		"issuer":                                base,
 		"authorization_endpoint":                base + "/authorize",
 		"token_endpoint":                        base + "/token",
@@ -217,7 +271,15 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 			"authorization_code",
 			"urn:ietf:params:oauth:grant-type:device_code",
 		},
-	})
+	}
+	for name, url := range overrides {
+		if url == "" {
+			delete(doc, name)
+			continue
+		}
+		doc[name] = url
+	}
+	writeJSON(w, http.StatusOK, doc)
 }
 
 func (i *Issuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
@@ -289,6 +351,7 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	outcome := i.script[min(i.polls, len(i.script)-1)]
 	i.polls++
 	claims := i.claims
+	omitIDToken := i.omitIDToken
 	i.mu.Unlock()
 
 	if !known {
@@ -306,18 +369,21 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idToken, err := i.signIDToken(claims, nonce)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "server_error"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	grant := map[string]any{
 		"access_token":  "access-" + randomString(),
 		"refresh_token": "refresh-" + randomString(),
-		"id_token":      idToken,
 		"token_type":    "Bearer",
 		"expires_in":    3600,
-	})
+	}
+	if !omitIDToken {
+		idToken, err := i.signIDToken(claims, nonce)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "server_error"})
+			return
+		}
+		grant["id_token"] = idToken
+	}
+	writeJSON(w, http.StatusOK, grant)
 }
 
 // checkClient rejects a request that does not identify itself as the client this
@@ -341,7 +407,13 @@ func (i *Issuer) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid_token"})
 		return
 	}
-	writeJSON(w, http.StatusOK, i.Claims())
+	i.mu.Lock()
+	claims := i.userInfo
+	if claims == nil {
+		claims = i.claims
+	}
+	i.mu.Unlock()
+	writeJSON(w, http.StatusOK, claims)
 }
 
 // signIDToken builds an RS256 JWT over claims, with the registered claims the

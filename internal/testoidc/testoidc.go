@@ -64,5 +64,17 @@ func (s *Server) Script(outcomes ...Outcome) { s.iss.Script(outcomes...) }
 // See Issuer.SetClaims.
 func (s *Server) SetClaims(claims map[string]any) { s.iss.SetClaims(claims) }
 
+// SetUserInfoClaims makes /userinfo answer with its own claim set, so it can
+// disagree with the ID token. See Issuer.SetUserInfoClaims.
+func (s *Server) SetUserInfoClaims(claims map[string]any) { s.iss.SetUserInfoClaims(claims) }
+
+// SetOmitIDToken makes a granting token response leave out id_token. See
+// Issuer.SetOmitIDToken.
+func (s *Server) SetOmitIDToken(omit bool) { s.iss.SetOmitIDToken(omit) }
+
+// SetEndpointOverride changes what the discovery document advertises for one
+// endpoint. See Issuer.SetEndpointOverride.
+func (s *Server) SetEndpointOverride(name, url string) { s.iss.SetEndpointOverride(name, url) }
+
 // Polls is the number of token-endpoint requests received so far.
 func (s *Server) Polls() int { return s.iss.Polls() }

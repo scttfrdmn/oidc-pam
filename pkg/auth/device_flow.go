@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -231,6 +232,20 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		}
 	}
 
+	// Every endpoint the broker is about to send credentials to has to be checked,
+	// not just the device authorization endpoint (#167). The token endpoint and
+	// /userinfo come straight out of the discovery document, and a discovery
+	// response naming http:// meant the access token went over the wire in
+	// cleartext — with the CA bundle, the skip-verify flag and the certificate pins
+	// above all bypassed, since none of them apply to a plaintext connection.
+	//
+	// Load time is the place for it: all three URLs are fixed when the provider is
+	// built, so checking here refuses at broker startup rather than mid-login, and
+	// there is no later moment at which they can change.
+	if err := validateProviderEndpoints(providerCfg.Name, provider); err != nil {
+		return nil, err
+	}
+
 	return &OIDCProvider{
 		Name:           providerCfg.Name,
 		Config:         providerCfg,
@@ -293,6 +308,77 @@ func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
 	}
 
 	return tlsCfg, nil
+}
+
+// validateProviderEndpoints refuses a provider whose token, userinfo or device
+// authorization endpoint is not reachable over TLS. The three URLs are whatever
+// discovery returned (or, under skip_discovery, whatever was configured), and each
+// one receives either the device code, the client's credentials or the access
+// token.
+//
+// Only the scheme is checked, deliberately, and not the host: a token endpoint on
+// a different host from the issuer is normal rather than suspicious — Google's
+// issuer is accounts.google.com and its token endpoint is on
+// oauth2.googleapis.com, and Cognito's userinfo lives on a different domain again.
+// Requiring an issuer-host match here (as the device authorization endpoint does,
+// where it has always held) would refuse those providers outright. What it cannot
+// be is plaintext, because that is what silently disables every TLS control the
+// operator configured.
+func validateProviderEndpoints(name string, provider *oidc.Provider) error {
+	if provider == nil {
+		return fmt.Errorf("provider %q was not initialized", name)
+	}
+	endpoints := []struct {
+		label string
+		url   string
+	}{
+		{"token_endpoint", provider.Endpoint().TokenURL},
+		{"userinfo_endpoint", provider.UserInfoEndpoint()},
+		{"device_authorization_endpoint", provider.Endpoint().DeviceAuthURL},
+	}
+	for _, e := range endpoints {
+		// An absent endpoint is a different problem, handled where it is needed:
+		// a missing userinfo endpoint falls back to the ID token's claims, and a
+		// missing device endpoint is rediscovered by StartDeviceFlow.
+		if e.url == "" {
+			continue
+		}
+		if err := requireTLSEndpoint(e.url); err != nil {
+			return fmt.Errorf("provider %q: %s %w", name, e.label, err)
+		}
+	}
+	return nil
+}
+
+// requireTLSEndpoint reports whether an endpoint URL can be spoken to without
+// giving up the transport. Loopback is exempt so the test issuer (and a local
+// development provider) can be served over plain HTTP without a certificate;
+// nothing else is, in any mode.
+func requireTLSEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid URL: %w", endpoint, err)
+	}
+	if u.Scheme == "https" || isLoopbackHost(u.Host) {
+		return nil
+	}
+	return fmt.Errorf("%q must use HTTPS, got scheme %q", endpoint, u.Scheme)
+}
+
+// isLoopbackHost reports whether a URL host (which may carry a port) is the local
+// machine. Matched exactly rather than by prefix: "localhost.attacker.example" is
+// not loopback.
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 // StartDeviceFlow initiates the OAuth2 device authorization flow
@@ -443,6 +529,21 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 		return nil, fmt.Errorf("no access token in response")
 	}
 
+	// (#167) No ID token used to mean no verification of any kind: the whole block
+	// below — signature, issuer, audience, expiry, the nonce replay check and
+	// validateIDTokenClaims — is conditional on there being one, so a response
+	// without an id_token produced an identity read out of /userinfo and vouched
+	// for by nothing but TLS and the bearer token. Refuse it by default instead,
+	// and let an operator whose provider really does not issue ID tokens for the
+	// device grant say so explicitly.
+	if tokenResp.IDToken == "" && p.Config.IDTokenRequired() {
+		return nil, fmt.Errorf("provider %q granted the device authorization but returned no id_token, "+
+			"so this authorization cannot be verified at all — the signature, audience, expiry and "+
+			"replay check all live in the ID token. Request the openid scope, or set "+
+			"require_id_token: false on this provider to accept an identity asserted only by /userinfo",
+			p.Name)
+	}
+
 	// Parse and verify ID token if present
 	var claims map[string]interface{}
 	if tokenResp.IDToken != "" {
@@ -544,13 +645,16 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 		return nil, fmt.Errorf("failed to decode userinfo response: %w", err)
 	}
 
-	// Merge with ID token claims if available
-	if token.Claims != nil {
-		for key, value := range token.Claims {
-			if _, exists := userInfoClaims[key]; !exists {
-				userInfoClaims[key] = value
-			}
-		}
+	// Merge the two claim sets, with the ID token winning wherever they disagree
+	// (#167). It used to be the other way round — /userinfo filled gaps *and* took
+	// precedence — which meant the value that authorizes the login, username_claim,
+	// could come from this unsigned JSON body even when a signed ID token said
+	// something else. The ID token is the assertion the provider actually signed
+	// and the verifier checked; /userinfo is authenticated by TLS and a bearer
+	// token, and is often the richer of the two, so claims it alone carries are
+	// still kept.
+	for key, value := range token.Claims {
+		userInfoClaims[key] = value
 	}
 
 	return p.extractUserInfoFromClaims(userInfoClaims)
@@ -702,16 +806,17 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 		return "", fmt.Errorf("invalid issuer URL: %w", err)
 	}
 
-	// validateEndpoint ensures the endpoint uses HTTPS (or localhost/127.0.0.1 for testing)
-	// and that its host matches the issuer host.
+	// validateEndpoint ensures the endpoint uses HTTPS (or loopback for testing)
+	// and that its host matches the issuer host. The scheme half is shared with the
+	// token and userinfo endpoints, which are checked when the provider is built
+	// (#167); the issuer-host half is specific to this endpoint.
 	validateEndpoint := func(endpoint string) error {
+		if err := requireTLSEndpoint(endpoint); err != nil {
+			return fmt.Errorf("endpoint %w", err)
+		}
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return fmt.Errorf("invalid endpoint URL: %w", err)
-		}
-		isLocalhost := strings.HasPrefix(u.Host, "localhost") || strings.HasPrefix(u.Host, "127.0.0.1")
-		if u.Scheme != "https" && !isLocalhost {
-			return fmt.Errorf("endpoint must use HTTPS, got %q", u.Scheme)
 		}
 		if u.Host != issuerURL.Host {
 			return fmt.Errorf("endpoint host %q does not match issuer host %q", u.Host, issuerURL.Host)
