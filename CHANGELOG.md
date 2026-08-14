@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Low (#166): `allowed_groups` and `allowed_roles` denied nothing.** Both were
+  applied while claims were being read, where the only thing they could do was drop
+  the group and role names that were not in the list. A user in **none** of the
+  `allowed_groups` therefore reached the login decision with an empty group list and
+  was authenticated normally — the option that reads as an authorization gate was a
+  projection. The only thing that would have caught it is the global
+  `authentication.require_groups`, which is empty in every shipped config and, until
+  #158, was the only group key enforced at all. The severity is Low only because the
+  keys appear in no shipped YAML and in no document, so no deployment relies on
+  them; the exposure was to the first operator who found the struct field and
+  assumed the obvious meaning.
+
+  - Both are now login gates, enforced on the device-flow poll path in
+    `Broker.verifyGroupAuthorization`: a non-empty list the identity satisfies
+    nothing in refuses the authentication, leaving no session and no SSH key. An
+    empty list still means no restriction, which is what every existing deployment
+    depends on.
+  - They no longer touch the group or role list. `extractUserInfoFromClaims`
+    reports the identity as the IdP asserted it (`group_prefix` and
+    `group_mappings` are still projections), so the session, the audit record and
+    `require_groups` all see the same groups. Under the old code an identity that
+    *did* satisfy `require_groups` could be refused by it, because the allowlist had
+    already removed the group it was being required to have.
+  - `require_groups` and the allowlists meet in one function rather than becoming
+    two competing checks, because they ask different questions and cannot be one
+    list: `require_groups` demands *every* group it names, an allowlist demands *at
+    least one*. Refusals are audited apart — `GROUP_NOT_ALLOWED` against
+    `GROUP_DENIED` — since they send an operator to different config keys.
+    Case-insensitive matching for the allowlists is kept as it was, so this changes
+    what a non-match does and not what matches.
+
+  Coverage: five cases in `device_poll_test.go`, all through the real poll loop as
+  #158's are — refusal with no session, no key and no success record; a member
+  admitted with *all* of its groups; an empty list restricting nothing;
+  `allowed_roles` on its own; and the three-way composition with `require_groups`.
+  Re-applying the filter makes four of them fail, one of them (`required but not
+  allowed`) by demonstrating the interaction above.
 - **High (#164): if the identity provider stopped returning the configured
   `username_claim`, the authorization decision moved silently to `sub`.** An absent
   `preferred_username` or `sub` claim was substituted with `userInfo.Subject`, and an

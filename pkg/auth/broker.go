@@ -968,14 +968,28 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			// the form QUICK-START.md and DEPLOYMENT.md both tell operators to use —
 			// was collected into PolicyResult.RequiredGroups and then never read by
 			// anything, so the documented config enforced no groups at all.
-			if err := b.verifyRequiredGroups(requiredGroups, userInfo.Groups); err != nil {
+			//
+			// (#166) The provider's allowed_groups/allowed_roles are decided here too,
+			// so there is one group-authorization decision on the login path rather
+			// than a second, weaker one buried in claim extraction.
+			if err := b.verifyGroupAuthorization(provider.Config.UserMapping, requiredGroups, userInfo); err != nil {
+				// The two refusals point at different config keys and at opposite
+				// mistakes — "missing a mandatory group" against "in none of the
+				// permitted ones" — so they are audited apart (#166).
+				errCode := "GROUP_DENIED"
+				message := "Rejected authentication: required group membership not satisfied"
+				if errors.Is(err, ErrGroupNotAllowed) {
+					errCode = "GROUP_NOT_ALLOWED"
+					message = "Rejected authentication: identity is in none of the allowed groups or roles"
+				}
 				log.Warn().
 					Err(err).
 					Str("session_id", session.ID).
 					Str("requested_user", session.UserID).
-					Msg("Rejected authentication: required group membership not satisfied")
+					Str("error_code", errCode).
+					Msg(message)
 				if b.metrics != nil {
-					b.metrics.RecordAuth(provider.Name, "failure", "GROUP_DENIED")
+					b.metrics.RecordAuth(provider.Name, "failure", errCode)
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "authentication_denied",
@@ -984,7 +998,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					Groups:       userInfo.Groups,
 					SessionID:    session.ID,
 					Success:      false,
-					ErrorCode:    "GROUP_DENIED",
+					ErrorCode:    errCode,
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -1596,6 +1610,69 @@ func classifyPollError(err error) string {
 	default:
 		return "POLL_FAILED"
 	}
+}
+
+// ErrGroupNotAllowed marks a refusal by a provider's allowed_groups or
+// allowed_roles, as opposed to one by require_groups. The caller audits the two
+// with different error codes because they send an operator to different config
+// keys (#166).
+var ErrGroupNotAllowed = errors.New("identity is in none of the allowed groups or roles")
+
+// verifyGroupAuthorization is the single point at which a login is accepted or
+// refused on group membership. Two independently configured lists meet here, and
+// they are not the same gate:
+//
+//   - required — authentication.require_groups plus the require_groups of every
+//     matching per-resource policy, as resolved by the policy engine — is a
+//     conjunction: the user must be in all of them.
+//   - mapping.AllowedGroups / AllowedRoles, set per provider under user_mapping,
+//     is a disjunction: the user must be in at least one.
+//
+// In both cases an empty list means no restriction, and a non-empty list the
+// identity satisfies nothing in means the login is refused. They cannot be folded
+// into one list — "all of these" and "at least one of these" are different
+// questions, and an operator who writes both means both — so they are enforced
+// side by side rather than in two places. #166 was exactly the cost of the second
+// arrangement: allowed_groups was applied during claim extraction, where the only
+// thing it could do was shrink the group list, so a user in none of the allowed
+// groups logged in with no groups at all.
+//
+// The one asymmetry left is case: require_groups compares exactly, the allowlists
+// case-insensitively. Each keeps the comparison it already had, so this fix changes
+// no operator's matching, only what a non-match does.
+func (b *Broker) verifyGroupAuthorization(mapping config.UserMapping, required []string, userInfo *UserInfo) error {
+	if err := b.verifyRequiredGroups(required, userInfo.Groups); err != nil {
+		return err
+	}
+	if err := verifyGroupAllowlist("group", mapping.AllowedGroups, userInfo.Groups); err != nil {
+		return err
+	}
+	return verifyGroupAllowlist("role", mapping.AllowedRoles, userInfo.Roles)
+}
+
+// verifyGroupAllowlist refuses an identity that holds none of the allowed names.
+// An empty allowlist permits everything: that is the shipped default, and every
+// deployment that has never heard of the key depends on it.
+//
+// Matching is case-insensitive, which is what the old projection did. Only the
+// consequence of a non-match changes here; changing the comparison rule at the
+// same time would be a second, silent behaviour change for anyone who did set the
+// key.
+func verifyGroupAllowlist(kind string, allowed, have []string) error {
+	if len(allowed) == 0 {
+		return nil
+	}
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		permitted[strings.ToLower(a)] = struct{}{}
+	}
+	for _, h := range have {
+		if _, ok := permitted[strings.ToLower(h)]; ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: user is in none of the allowed %ss: %s",
+		ErrGroupNotAllowed, kind, strings.Join(allowed, ", "))
 }
 
 // verifyRequiredGroups enforces that the authenticated user is a member of every

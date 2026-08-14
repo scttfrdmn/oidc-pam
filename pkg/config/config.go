@@ -92,8 +92,19 @@ type UserMapping struct {
 	DisplayNameTemplate string            `mapstructure:"display_name_template"`
 	GroupPrefix         string            `mapstructure:"group_prefix"`
 	GroupMappings       map[string]string `mapstructure:"group_mappings"`
-	AllowedGroups       []string          `mapstructure:"allowed_groups"`
-	AllowedRoles        []string          `mapstructure:"allowed_roles"`
+
+	// AllowedGroups and AllowedRoles gate the login: when either is non-empty the
+	// identity must hold at least one of the names in it, or the authentication is
+	// refused with GROUP_NOT_ALLOWED. Empty means no restriction. Matching is
+	// case-insensitive, and both are enforced in addition to — not instead of —
+	// authentication.require_groups, which demands *every* group it names.
+	//
+	// Until #166 these filtered the group and role lists instead of deciding the
+	// login, so an identity in none of the allowed groups authenticated with an
+	// empty group list. They no longer alter what the session or the audit trail
+	// records the identity as holding; see Broker.verifyGroupAuthorization.
+	AllowedGroups []string `mapstructure:"allowed_groups"`
+	AllowedRoles  []string `mapstructure:"allowed_roles"`
 }
 
 // ResearchPolicies contains research computing specific policies
