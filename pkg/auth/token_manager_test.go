@@ -124,6 +124,83 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 	}
 }
 
+// TestStoredCiphertextDoesNotOpenInAnotherRecord covers #232: an encrypted token
+// is bound to the account, session and field it was stored for, so a ciphertext
+// moved into another record no longer decrypts.
+//
+// The scenario is an attacker with write access to the store but not the key. It
+// used to succeed in silence: GCM validated the tag, GetToken returned the
+// plaintext, and the broker refreshed one user's credentials while attributing
+// everything it then did — policy, audit, key provisioning — to the other. A
+// failure to decrypt is the outcome that leaves a trace.
+func TestStoredCiphertextDoesNotOpenInAnotherRecord(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+		},
+	}
+	tm, err := NewTokenManager(cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+
+	const aliceRefresh = "alices-refresh-token"
+	aliceID, err := tm.StoreToken(&Token{
+		AccessToken:  "alices-access-token",
+		RefreshToken: aliceRefresh,
+		ExpiresAt:    time.Now().Add(time.Hour),
+		Fingerprint:  "alice-fp",
+	}, "alice", "session-alice")
+	if err != nil {
+		t.Fatalf("StoreToken(alice): %v", err)
+	}
+
+	bobID, err := tm.StoreToken(&Token{
+		AccessToken:  "bobs-access-token",
+		RefreshToken: "bobs-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		Fingerprint:  "bob-fp",
+	}, "bob", "session-bob")
+	if err != nil {
+		t.Fatalf("StoreToken(bob): %v", err)
+	}
+
+	tm.tokenStore.mutex.Lock()
+	alicesCiphertext := tm.tokenStore.tokens[aliceID].RefreshToken
+	alicesAccessCiphertext := tm.tokenStore.tokens[aliceID].AccessToken
+	// The attack: alice's refresh token, verbatim, in bob's record.
+	tm.tokenStore.tokens[bobID].RefreshToken = alicesCiphertext
+	tm.tokenStore.mutex.Unlock()
+
+	if alicesCiphertext == aliceRefresh {
+		t.Fatal("the refresh token was stored in plaintext; this test would prove nothing")
+	}
+
+	token, err := tm.GetToken(bobID)
+	if err == nil {
+		t.Errorf("bob's record opened alice's refresh token: got %q", token.RefreshToken)
+	}
+
+	// Alice's own record is untouched and must still work: the binding may not
+	// cost the legitimate read.
+	if token, err := tm.GetToken(aliceID); err != nil {
+		t.Errorf("GetToken(alice): %v", err)
+	} else if token.RefreshToken != aliceRefresh {
+		t.Errorf("alice's refresh token = %q, want %q", token.RefreshToken, aliceRefresh)
+	}
+
+	// A ciphertext is also bound to the field it was written to, so an access
+	// token cannot be promoted into the refresh_token slot of its own record and
+	// then presented to the provider as one.
+	tm.tokenStore.mutex.Lock()
+	tm.tokenStore.tokens[aliceID].RefreshToken = alicesAccessCiphertext
+	tm.tokenStore.mutex.Unlock()
+
+	if token, err := tm.GetToken(aliceID); err == nil {
+		t.Errorf("an access token opened in the refresh_token field: got %q", token.RefreshToken)
+	}
+}
+
 func TestTokenManagerRevocation(t *testing.T) {
 	// Test token revocation functionality
 

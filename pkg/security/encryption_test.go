@@ -329,6 +329,53 @@ func TestEncryptionWithDifferentKeys(t *testing.T) {
 	}
 }
 
+// TestAADBindsCiphertextToItsContext covers #232: a ciphertext must only open
+// under the additional authenticated data it was sealed with. GCM's tag proves
+// the ciphertext was not modified and says nothing about where it belongs, so
+// without this the same bytes decrypt in any record that has the key.
+func TestAADBindsCiphertextToItsContext(t *testing.T) {
+	enc, err := NewEncryption(testKey1)
+	if err != nil {
+		t.Fatalf("NewEncryption: %v", err)
+	}
+
+	const secret = "refresh-token-belonging-to-alice"
+	alice := []byte("user=alice|session=s1")
+	bob := []byte("user=bob|session=s2")
+
+	ciphertext, err := enc.EncryptWithAAD(secret, alice)
+	if err != nil {
+		t.Fatalf("EncryptWithAAD: %v", err)
+	}
+
+	plaintext, err := enc.DecryptWithAAD(ciphertext, alice)
+	if err != nil {
+		t.Fatalf("DecryptWithAAD with the sealing AAD: %v", err)
+	}
+	if plaintext != secret {
+		t.Errorf("round trip returned %q, want %q", plaintext, secret)
+	}
+
+	// The whole point: the same key, the same ciphertext, a different record.
+	if _, err := enc.DecryptWithAAD(ciphertext, bob); err == nil {
+		t.Error("a ciphertext sealed for one identity opened under another")
+	}
+	// And no AAD at all must not be a way around it, which is what a caller
+	// still using Decrypt would be doing.
+	if _, err := enc.Decrypt(ciphertext); err == nil {
+		t.Error("a ciphertext sealed with AAD opened with none")
+	}
+	// Nor the reverse: nothing sealed without AAD may be opened as though it had
+	// been bound to something.
+	unbound, err := enc.Encrypt(secret)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := enc.DecryptWithAAD(unbound, alice); err == nil {
+		t.Error("a ciphertext sealed with no AAD opened under one")
+	}
+}
+
 func TestEncryptionConsistency(t *testing.T) {
 	enc, err := NewEncryption(testKey1)
 	if err != nil {

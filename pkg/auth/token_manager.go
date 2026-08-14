@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,48 @@ type StoredToken struct {
 	Metadata     map[string]interface{}
 	CreatedAt    time.Time
 	LastUsed     time.Time
+}
+
+// The three encrypted fields of a stored token. They are named in the additional
+// authenticated data so that a ciphertext cannot be moved between fields of the
+// same record either: an access token pasted into the refresh_token slot would
+// otherwise decrypt, and the broker would present it to the provider as a refresh
+// token.
+const (
+	tokenFieldAccess  = "access_token"
+	tokenFieldRefresh = "refresh_token"
+	tokenFieldID      = "id_token"
+)
+
+// tokenAADVersion prefixes every AAD so a future change to what is bound can be
+// told from this one rather than silently producing ciphertexts that will not
+// open. There is nothing to migrate today — the token store is an in-memory map
+// that lives and dies with the process, so no ciphertext ever outlives the code
+// that wrote it — which is why the record format needs no version field of its
+// own. If the store is ever persisted, that stops being true and this constant is
+// where the compatibility break becomes visible.
+const tokenAADVersion = "oidc-pam/stored-token/v1"
+
+// tokenAAD returns the additional authenticated data binding one encrypted field
+// of a stored token to the identity it was stored for (#232).
+//
+// AES-GCM already proves a ciphertext was not modified, but it says nothing about
+// where the ciphertext belongs: without AAD, a refresh token lifted out of user
+// A's record and written into user B's decrypts cleanly, the tag validates, and
+// the broker then refreshes A's credentials while every downstream decision —
+// policy, audit attribution, key provisioning — is made for B. With the record's
+// user, session and field name bound in, such a ciphertext fails to open.
+//
+// The parts are length-prefixed rather than joined by a separator, so no
+// combination of user and session IDs can produce the same AAD as a different
+// pair.
+func tokenAAD(field, userID, sessionID string) []byte {
+	var b strings.Builder
+	b.WriteString(tokenAADVersion)
+	for _, part := range []string{field, userID, sessionID} {
+		fmt.Fprintf(&b, "|%d:%s", len(part), part)
+	}
+	return []byte(b.String())
 }
 
 // NewTokenManager creates a new token manager
@@ -106,20 +149,22 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) (stri
 
 	if tm.encryption != nil {
 		var err error
-		accessToken, err = tm.encryption.Encrypt(token.AccessToken)
+		// Each field is bound to the account and session it is being stored for,
+		// so the ciphertext is only usable in this record (#232).
+		accessToken, err = tm.encryption.EncryptWithAAD(token.AccessToken, tokenAAD(tokenFieldAccess, userID, sessionID))
 		if err != nil {
 			return "", fmt.Errorf("failed to encrypt access token: %w", err)
 		}
 
 		if token.RefreshToken != "" {
-			refreshToken, err = tm.encryption.Encrypt(token.RefreshToken)
+			refreshToken, err = tm.encryption.EncryptWithAAD(token.RefreshToken, tokenAAD(tokenFieldRefresh, userID, sessionID))
 			if err != nil {
 				return "", fmt.Errorf("failed to encrypt refresh token: %w", err)
 			}
 		}
 
 		if token.IDToken != "" {
-			idToken, err = tm.encryption.Encrypt(token.IDToken)
+			idToken, err = tm.encryption.EncryptWithAAD(token.IDToken, tokenAAD(tokenFieldID, userID, sessionID))
 			if err != nil {
 				return "", fmt.Errorf("failed to encrypt ID token: %w", err)
 			}
@@ -192,20 +237,24 @@ func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
 
 	if storedToken.Encrypted && tm.encryption != nil {
 		var err error
-		accessToken, err = tm.encryption.Decrypt(storedToken.AccessToken)
+		// The AAD comes from the record being read, so a ciphertext that was
+		// written for a different account, session or field does not open here
+		// (#232).
+		user, session := storedToken.UserID, storedToken.SessionID
+		accessToken, err = tm.encryption.DecryptWithAAD(storedToken.AccessToken, tokenAAD(tokenFieldAccess, user, session))
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt access token: %w", err)
 		}
 
 		if storedToken.RefreshToken != "" {
-			refreshToken, err = tm.encryption.Decrypt(storedToken.RefreshToken)
+			refreshToken, err = tm.encryption.DecryptWithAAD(storedToken.RefreshToken, tokenAAD(tokenFieldRefresh, user, session))
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt refresh token: %w", err)
 			}
 		}
 
 		if storedToken.IDToken != "" {
-			idToken, err = tm.encryption.Decrypt(storedToken.IDToken)
+			idToken, err = tm.encryption.DecryptWithAAD(storedToken.IDToken, tokenAAD(tokenFieldID, user, session))
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt ID token: %w", err)
 			}
