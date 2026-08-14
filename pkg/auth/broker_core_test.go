@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
+	"github.com/scttfrdmn/oidc-pam/pkg/security"
 )
 
 // Test core broker functionality with minimal mocking
@@ -38,11 +39,20 @@ func TestBrokerCoreAuthenticate(t *testing.T) {
 		t.Fatalf("Failed to create policy engine: %v", err)
 	}
 
+	// An audit logger, because every branch that refuses a login now records it
+	// (#218) and NewBroker always builds one — a hand-assembled broker without one
+	// only tests a shape the running broker never has.
+	auditLogger, err := security.NewAuditLogger(config.AuditConfig{Enabled: false})
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+
 	broker := &Broker{
 		config:       cfg,
 		providers:    make(map[string]*OIDCProvider),
 		sessions:     make(map[string]*Session),
 		policyEngine: policyEngine,
+		auditLogger:  auditLogger,
 	}
 
 	// Skip nil test - function doesn't handle nil requests gracefully
@@ -105,7 +115,7 @@ func TestPolicyEngineEvaluateCore(t *testing.T) {
 	}
 
 	// Test evaluation with nil request
-	result, err := policyEngine.EvaluateRequest(nil)
+	result, err := policyEngine.EvaluateRequest(nil, "")
 	if err != nil {
 		t.Logf("EvaluateRequest returned error for nil request: %v", err)
 	}
@@ -115,7 +125,7 @@ func TestPolicyEngineEvaluateCore(t *testing.T) {
 
 	// Test evaluation with empty request
 	emptyRequest := &AuthRequest{}
-	result, err = policyEngine.EvaluateRequest(emptyRequest)
+	result, err = policyEngine.EvaluateRequest(emptyRequest, "")
 	if err != nil {
 		t.Logf("EvaluateRequest returned error for empty request: %v", err)
 	}
@@ -131,7 +141,7 @@ func TestPolicyEngineEvaluateCore(t *testing.T) {
 		LoginType:  "ssh",
 		Timestamp:  time.Now(),
 	}
-	result, err = policyEngine.EvaluateRequest(validRequest)
+	result, err = policyEngine.EvaluateRequest(validRequest, "")
 	if err != nil {
 		t.Logf("EvaluateRequest returned error for valid request: %v", err)
 	}

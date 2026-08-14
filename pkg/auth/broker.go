@@ -100,7 +100,24 @@ type Session struct {
 	IsActive      bool
 	RiskScore     int
 	DeviceTrusted bool
-	Metadata      map[string]interface{}
+
+	// MaxDuration is the longest this session may live, from CreatedAt, as the
+	// policy that admitted it required. Zero means the policies set no limit and
+	// token_lifetime alone bounds the session.
+	//
+	// (#212) It is stored on the session rather than looked up again on refresh
+	// because a refresh must be bounded by the policy that admitted the login, and
+	// re-deriving it would silently extend every live session when an operator
+	// relaxed max_session_duration.
+	MaxDuration time.Duration
+
+	// RequireDeviceTrust records that a matching policy required a trusted device,
+	// so the check can be made once the identity — and with it the amr claim
+	// DeviceTrusted comes from — is actually known. Policy is evaluated before the
+	// device flow starts, when it is not.
+	RequireDeviceTrust bool
+
+	Metadata map[string]interface{}
 }
 
 // AuthRequest represents an authentication request
@@ -377,11 +394,86 @@ func (b *Broker) Stop() error {
 	return nil
 }
 
+// denialEvent is the audit record for a login this broker refused.
+//
+// (#218) Every branch of Authenticate that answers with a failure records one, and
+// records the same error_code it puts on the wire. A refusal used to be reported to
+// the client and then forgotten: a user with a valid IdP account but no group
+// membership could be denied on every host on the network and leave nothing behind
+// to count, because sshd's log does not know which OIDC identity was refused. It is
+// also what an operator debugging a policy lockout reads instead of reproducing the
+// denial with debug logging on.
+//
+// The caller adds whatever else it knows — provider, risk, the policy that decided
+// — before logging it.
+func (b *Broker) denialEvent(req *AuthRequest, errorCode, reason string) security.AuditEvent {
+	return security.AuditEvent{
+		EventType:    "authentication_denied",
+		UserID:       req.UserID,
+		SourceIP:     req.SourceIP,
+		UserAgent:    req.UserAgent,
+		TargetHost:   req.TargetHost,
+		DeviceID:     req.DeviceID,
+		Success:      false,
+		ErrorCode:    errorCode,
+		ErrorMessage: reason,
+		Metadata:     map[string]interface{}{"login_type": req.LoginType},
+		Timestamp:    time.Now(),
+	}
+}
+
+// auditCrossUserAttempt records an attempt to check, refresh or revoke a session
+// that belongs to somebody else.
+//
+// (#218) The three verbs already refuse this, and refused it silently: a caller
+// probing session IDs against another account got FORBIDDEN and left no trace at
+// all, so the one thing here that is unambiguously an attack — nobody reaches
+// another user's session ID by accident — was the least visible thing the broker
+// did. The record names both accounts, since "who asked" and "whose session" are
+// the two halves an investigation needs.
+func (b *Broker) auditCrossUserAttempt(verb, sessionID, requestedBy, owner string) {
+	log.Warn().
+		Str("verb", verb).
+		Str("session_id", sessionID).
+		Str("requested_by", requestedBy).
+		Msg("Refusing a session operation requested by someone other than the session's owner")
+
+	b.auditLogger.LogAuthEvent(security.AuditEvent{
+		EventType:    "session_access_denied",
+		UserID:       requestedBy,
+		SessionID:    sessionID,
+		Success:      false,
+		ErrorCode:    "FORBIDDEN",
+		ErrorMessage: "session does not belong to requesting user",
+		Metadata: map[string]interface{}{
+			"request_type":  verb,
+			"session_owner": owner,
+		},
+		Timestamp: time.Now(),
+	})
+}
+
 // Authenticate handles authentication requests
 func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	// Validate field lengths to prevent log flooding and memory exhaustion.
 	if len(req.UserID) > 256 || len(req.SourceIP) > 45 ||
 		len(req.TargetHost) > 253 || len(req.LoginType) > 16 {
+		// Audited by length rather than by value: this branch exists to stop a
+		// client flooding the log with megabyte fields, so writing them into the
+		// audit trail would hand it the same amplification through another file.
+		b.auditLogger.LogAuthEvent(security.AuditEvent{
+			EventType:    "authentication_denied",
+			Success:      false,
+			ErrorCode:    "INVALID_REQUEST",
+			ErrorMessage: "request field exceeds maximum length",
+			Metadata: map[string]interface{}{
+				"user_id_len":     len(req.UserID),
+				"source_ip_len":   len(req.SourceIP),
+				"target_host_len": len(req.TargetHost),
+				"login_type_len":  len(req.LoginType),
+			},
+			Timestamp: time.Now(),
+		})
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "INVALID_REQUEST",
@@ -409,6 +501,12 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 			Str("user_id", req.UserID).
 			Int("max_sessions", maxSessions).
 			Msg("Maximum concurrent sessions reached for user")
+		// A capacity refusal is still a login that did not happen, and one an
+		// operator has to be able to tell apart from a policy denial — this is the
+		// host being full, not a decision about the identity.
+		event := b.denialEvent(req, "TOO_MANY_SESSIONS", "maximum concurrent sessions reached for this user")
+		event.Metadata["max_sessions"] = maxSessions
+		b.auditLogger.LogAuthEvent(event)
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "TOO_MANY_SESSIONS",
@@ -416,8 +514,31 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		}, nil
 	}
 
+	// Select the provider before evaluating policy: a provider-scoped time or
+	// geographic restriction cannot be applied without knowing which provider will
+	// serve the login, and taking the name from the request instead would let a
+	// client scope itself out of its own restrictions (#213). Selection depends on
+	// nothing in the policy result, so the order is free.
+	provider := b.selectProvider()
+	if provider == nil {
+		// Every login on the host fails this way, so the operator needs it in the
+		// trail alongside the refusals it looks nothing like: no provider is
+		// enabled_for_login, which is a configuration fault and not anything the
+		// user did.
+		log.Error().
+			Str("user_id", req.UserID).
+			Msg("No provider is enabled for login; refusing every authentication request")
+		b.auditLogger.LogAuthEvent(b.denialEvent(req, "NO_PROVIDER",
+			"no provider is enabled_for_login"))
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "NO_PROVIDER",
+			ErrorMessage: "No suitable authentication provider found",
+		}, nil
+	}
+
 	// Apply policy checks
-	policyResult, err := b.policyEngine.EvaluateRequest(req)
+	policyResult, err := b.policyEngine.EvaluateRequest(req, provider.Name)
 	if err != nil {
 		return nil, fmt.Errorf("policy evaluation failed: %w", err)
 	}
@@ -426,15 +547,17 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		if b.metrics != nil {
 			b.metrics.RecordAuth("", "policy_denied", "POLICY_DENIED")
 		}
-		b.auditLogger.LogAuthEvent(security.AuditEvent{
-			EventType:    "authentication_denied",
-			UserID:       req.UserID,
-			SourceIP:     req.SourceIP,
-			TargetHost:   req.TargetHost,
-			Success:      false,
-			ErrorMessage: policyResult.Reason,
-			Timestamp:    time.Now(),
-		})
+		// (#218) The record carries the code the client was given, the reason the
+		// engine gave, and the risk the decision was made on. The client is told
+		// only "Access denied by policy" — deliberately, since the reason names
+		// configuration — so this event is the only place the answer to "why was
+		// this login refused" exists.
+		event := b.denialEvent(req, "POLICY_DENIED", policyResult.Reason)
+		event.Provider = provider.Name
+		event.RiskScore = policyResult.RiskScore
+		event.RiskFactors = policyResult.RiskFactors
+		event.PolicyViolations = []string{policyResult.Reason}
+		b.auditLogger.LogAuthEvent(event)
 
 		log.Warn().
 			Str("user_id", req.UserID).
@@ -465,16 +588,6 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 			Metadata:     map[string]interface{}{"login_type": req.LoginType},
 			Timestamp:    time.Now(),
 		})
-	}
-
-	// Select appropriate provider
-	provider := b.selectProvider()
-	if provider == nil {
-		return &AuthResponse{
-			Success:      false,
-			ErrorCode:    "NO_PROVIDER",
-			ErrorMessage: "No suitable authentication provider found",
-		}, nil
 	}
 
 	// Initiate device flow
@@ -510,21 +623,28 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate session ID: %w", err)
 	}
+	createdAt := time.Now()
 	session := &Session{
-		ID:               sessionID,
-		UserID:           req.UserID,
-		Provider:         provider.Name,
-		LoginType:        req.LoginType,
-		DeviceID:         req.DeviceID,
-		CreatedAt:        time.Now(),
-		ExpiresAt:        time.Now().Add(b.config.Authentication.TokenLifetime),
-		LastAccessed:     time.Now(),
-		SourceIP:         req.SourceIP,
-		UserAgent:        req.UserAgent,
-		TokenFingerprint: deviceFlow.DeviceCode,
-		IsActive:         false,
-		RiskScore:        policyResult.RiskScore,
-		Metadata:         req.Metadata,
+		ID:        sessionID,
+		UserID:    req.UserID,
+		Provider:  provider.Name,
+		LoginType: req.LoginType,
+		DeviceID:  req.DeviceID,
+		CreatedAt: createdAt,
+		// (#212) sessionExpiry applies policyResult.MaxDuration — the minimum
+		// max_session_duration across every matching policy. It was computed on
+		// every login and then discarded, so `max_session_duration: 30m` on a sudo
+		// policy produced a session that lived for the full token_lifetime.
+		ExpiresAt:          b.sessionExpiry(createdAt, createdAt, policyResult.MaxDuration),
+		MaxDuration:        policyResult.MaxDuration,
+		LastAccessed:       createdAt,
+		SourceIP:           req.SourceIP,
+		UserAgent:          req.UserAgent,
+		TokenFingerprint:   deviceFlow.DeviceCode,
+		IsActive:           false,
+		RequireDeviceTrust: policyResult.Metadata[MetadataRequireDeviceTrust] == true,
+		RiskScore:          policyResult.RiskScore,
+		Metadata:           req.Metadata,
 	}
 
 	b.setSession(session)
@@ -534,6 +654,14 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 	if atomic.AddInt64(&b.pendingFlows, 1) > maxPendingFlows {
 		atomic.AddInt64(&b.pendingFlows, -1)
 		b.removeSession(session.ID)
+		// The host, not this user: without the record there is nothing to alert on
+		// when a flood of unfinished flows starts refusing everyone's logins, which
+		// is the condition this cap exists to survive (#163).
+		event := b.denialEvent(req, "RATE_LIMITED", "too many pending device authorization flows on this host")
+		event.SessionID = session.ID
+		event.Provider = provider.Name
+		event.Metadata["max_pending_flows"] = maxPendingFlows
+		b.auditLogger.LogAuthEvent(event)
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "RATE_LIMITED",
@@ -579,6 +707,7 @@ func (b *Broker) CheckSession(sessionID, userID string) (*AuthResponse, error) {
 	}
 
 	if session.UserID != userID {
+		b.auditCrossUserAttempt("check_session", sessionID, userID, session.UserID)
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "FORBIDDEN",
@@ -611,11 +740,25 @@ func (b *Broker) CheckSession(sessionID, userID string) (*AuthResponse, error) {
 	// Clone before mutation to avoid a data race: getSession returns the raw
 	// pointer stored in the map, so writing to it without a lock races with
 	// any concurrent reader that also holds that pointer.
+	//
+	// The store is conditional. If the session was revoked or swept between the
+	// checks above and here, replaceSession refuses the write rather than putting
+	// a revoked session back into the map (#217).
 	updated := *session
 	updated.LastAccessed = time.Now()
-	b.setSession(&updated)
+	if !b.replaceSession(session, &updated) {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "SESSION_NOT_FOUND",
+			ErrorMessage: "Session not found",
+		}, nil
+	}
 
-	return b.createSuccessResponse(session), nil
+	// The response is built from the clone, not from the pointer that was read.
+	// Reading `session` here handed the caller a last_accessed from before this
+	// check, and would read whatever a future in-place mutation happened to leave
+	// there (#215).
+	return b.createSuccessResponse(&updated), nil
 }
 
 // RefreshSession refreshes an authentication session.
@@ -631,11 +774,65 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 	}
 
 	if session.UserID != userID {
+		b.auditCrossUserAttempt("refresh_session", sessionID, userID, session.UserID)
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "FORBIDDEN",
 			ErrorMessage: "session does not belong to requesting user",
 		}, nil
+	}
+
+	// (#215) A session that was never authorized is not refreshable, and this is
+	// checked before anything else that could answer with a success response.
+	//
+	// A device-flow session is stored with IsActive: false and an ExpiresAt one
+	// token lifetime out, and is only flipped active when the flow completes. Every
+	// check this function used to make was satisfied by such a session, so the
+	// "close to expiry" branch below returned createSuccessResponse for a login
+	// nobody had approved — a `success: true` for an identity that had not
+	// authenticated. CheckSession has always reported these as pending; refresh
+	// reported them as authorized.
+	if !session.IsActive {
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "SESSION_NOT_ACTIVE",
+			ErrorMessage: "session has not completed authentication",
+		}, nil
+	}
+
+	// An expired session is not refreshed back to life. Without this, ExpiresAt in
+	// the past made time.Until negative, the early return below was skipped, and
+	// the session was renewed — so expiry bounded nothing for a client that kept
+	// calling, and neither did max_session_duration.
+	if session.ExpiresAt.Before(time.Now()) {
+		b.removeSession(sessionID)
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "SESSION_EXPIRED",
+			ErrorMessage: "Session has expired",
+		}, nil
+	}
+
+	// (#212) The session may not outlive the max_session_duration of the policy that
+	// admitted it. Once that point is reached the session ends; the user
+	// re-authenticates, which is the moment policy — group membership, network
+	// requirements, risk — is evaluated again from scratch.
+	if session.MaxDuration > 0 && !time.Now().Before(session.CreatedAt.Add(session.MaxDuration)) {
+		b.removeSession(sessionID)
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "SESSION_EXPIRED",
+			ErrorMessage: "Session has reached its maximum duration and must be re-authenticated",
+		}, nil
+	}
+
+	// (#215) Re-evaluate policy before extending. Policy used to be evaluated only
+	// when a login started, so removing a user from a required group, tightening an
+	// IP whitelist or adding a deny policy had no effect on a live session for as
+	// long as its client kept refreshing — and the SSH key's expiry-time= is derived
+	// from the same ExpiresAt, so the credential was extended too.
+	if response := b.denyIfPolicyNoLongerAllows(session); response != nil {
+		return response, nil
 	}
 
 	// Check if session is close to expiry
@@ -722,13 +919,35 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 
 	previousTokenID := session.TokenID
 
-	// Update session with new token data
-	session.TokenFingerprint = newToken.Fingerprint
-	session.TokenID = newTokenID
-	session.ExpiresAt = time.Now().Add(b.config.Authentication.TokenLifetime)
-	session.LastAccessed = time.Now()
+	// Clone before mutation, and store conditionally. Writing through the stored
+	// pointer raced every concurrent reader holding it, and an unconditional store
+	// would resurrect a session revoked while the provider round-trip above was in
+	// flight — the refresh takes up to 30 seconds, which is ample (#217).
+	now := time.Now()
+	updated := *session
+	updated.TokenFingerprint = newToken.Fingerprint
+	updated.TokenID = newTokenID
+	updated.ExpiresAt = b.sessionExpiry(session.CreatedAt, now, session.MaxDuration)
+	updated.LastAccessed = now
 
-	b.setSession(session)
+	if !b.replaceSession(session, &updated) {
+		// The session went away or was replaced while the provider was being called.
+		// The token that was just stored belongs to a session that no longer exists,
+		// so it is revoked rather than left in the store as usable credential
+		// material for a session nobody can reach.
+		if err := b.tokenManager.RevokeToken(newTokenID); err != nil {
+			log.Warn().
+				Err(err).
+				Str("session_id", sessionID).
+				Msg("Could not revoke the token stored for a session that was revoked mid-refresh")
+		}
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "SESSION_NOT_FOUND",
+			ErrorMessage: "Session not found",
+		}, nil
+	}
+	session = &updated
 
 	if previousTokenID != "" && previousTokenID != newTokenID {
 		if err := b.tokenManager.RevokeToken(previousTokenID); err != nil {
@@ -750,6 +969,108 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 	return b.createSuccessResponse(session), nil
 }
 
+// denyIfPolicyNoLongerAllows re-runs policy against a live session and returns a
+// denial response if the session would not be admitted today. It returns nil when
+// the session may continue.
+//
+// (#215) Policy used to be evaluated exactly once, when a login started. Every
+// control an operator can change afterwards — group membership, ip_whitelist,
+// allowed_hours, a country list, a risk denial — therefore had no effect on a
+// session already running, and a client that kept refreshing kept the session and
+// its SSH key alive indefinitely. Revocation worked only by an operator finding and
+// revoking the session by hand.
+//
+// The request is reconstructed from what the session recorded at login, because
+// that is what the broker knows: the same account, source address, device and
+// login type. What has changed since is the configuration, and that is the point.
+func (b *Broker) denyIfPolicyNoLongerAllows(session *Session) *AuthResponse {
+	if b.policyEngine == nil {
+		// NewBroker always builds an engine, so this is unreachable in a running
+		// broker. It is still a denial rather than a pass: "there is nothing to
+		// check against" and "the checks passed" are different answers, and only
+		// one of them is safe to give a caller asking to extend live access.
+		log.Error().
+			Str("session_id", session.ID).
+			Msg("Refresh requested on a broker with no policy engine; refusing")
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "POLICY_DENIED",
+			ErrorMessage: "Access denied by policy",
+		}
+	}
+
+	req := &AuthRequest{
+		UserID:    session.UserID,
+		SourceIP:  session.SourceIP,
+		UserAgent: session.UserAgent,
+		LoginType: session.LoginType,
+		DeviceID:  session.DeviceID,
+		SessionID: session.ID,
+		Timestamp: time.Now(),
+		Metadata:  session.Metadata,
+	}
+
+	policyResult, err := b.policyEngine.EvaluateRequest(req, session.Provider)
+	if err != nil {
+		// A policy engine that cannot answer is not permission to continue.
+		log.Error().
+			Err(err).
+			Str("session_id", session.ID).
+			Msg("Could not re-evaluate policy for a session being refreshed; refusing the refresh")
+		return &AuthResponse{
+			Success:      false,
+			ErrorCode:    "POLICY_DENIED",
+			ErrorMessage: "Access denied by policy",
+		}
+	}
+
+	denial := ""
+	switch {
+	case !policyResult.Allowed:
+		denial = policyResult.Reason
+	default:
+		// Group membership is checked against the groups the identity had at login:
+		// re-reading them would need a fresh token exchange, which is what the next
+		// login does. A group *requirement* added since the login is enforced here
+		// and now, which is the case an operator tightening access is relying on.
+		if err := b.verifyRequiredGroups(policyResult.RequiredGroups, session.Groups); err != nil {
+			denial = err.Error()
+		}
+	}
+	if denial == "" {
+		return nil
+	}
+
+	b.auditLogger.LogAuthEvent(security.AuditEvent{
+		EventType:    "session_refresh_denied",
+		UserID:       session.UserID,
+		SessionID:    session.ID,
+		SourceIP:     session.SourceIP,
+		Success:      false,
+		ErrorCode:    "POLICY_DENIED",
+		ErrorMessage: denial,
+		RiskScore:    policyResult.RiskScore,
+		RiskFactors:  policyResult.RiskFactors,
+		Timestamp:    time.Now(),
+	})
+	log.Warn().
+		Str("user_id", session.UserID).
+		Str("session_id", session.ID).
+		Str("reason", denial).
+		Msg("Refusing to refresh a session that policy no longer allows")
+
+	// The session is dropped, not merely refused a renewal: policy says this
+	// identity may not have this access, and leaving the session live until its own
+	// expiry would leave the SSH key installed for that whole window.
+	b.removeSession(session.ID)
+
+	return &AuthResponse{
+		Success:      false,
+		ErrorCode:    "POLICY_DENIED",
+		ErrorMessage: "Access denied by policy",
+	}
+}
+
 // RevokeSession revokes an authentication session.
 // userID must match the session owner — cross-user revocation is rejected.
 func (b *Broker) RevokeSession(sessionID, userID string) error {
@@ -759,6 +1080,7 @@ func (b *Broker) RevokeSession(sessionID, userID string) error {
 	}
 
 	if session.UserID != userID {
+		b.auditCrossUserAttempt("revoke_session", sessionID, userID, session.UserID)
 		return fmt.Errorf("session does not belong to requesting user")
 	}
 
@@ -832,6 +1154,55 @@ func (b *Broker) setSession(session *Session) {
 	b.sessionMutex.Lock()
 	defer b.sessionMutex.Unlock()
 	b.sessions[session.ID] = session
+}
+
+// replaceSession stores updated only if sessionID still maps to the exact session
+// that was read, and reports whether it did.
+//
+// (#217) Pointer identity is the comparison, deliberately. Every path that
+// invalidates a session either deletes it from the map — RevokeSession,
+// removeSession, expireSessions — or replaces it with a fresh copy, because no
+// path mutates a stored session in place any more. So "the pointer I read is still
+// the pointer stored" is exactly "nothing has happened to this session since I
+// read it", which is the condition a read-modify-write needs and which re-reading
+// the fields cannot establish.
+//
+// The device-flow completion path is why this exists. It read the session when the
+// login started, worked for up to the whole device-flow lifetime, and then wrote
+// IsActive: true unconditionally — so a session an operator had revoked, or one the
+// sweep had expired, came back as a fully active session, and the SSH key was
+// installed for it. Last writer won, and the late writer was the one asserting
+// authorization.
+func (b *Broker) replaceSession(previous, updated *Session) bool {
+	b.sessionMutex.Lock()
+	defer b.sessionMutex.Unlock()
+	if b.sessions[updated.ID] != previous {
+		return false
+	}
+	b.sessions[updated.ID] = updated
+	return true
+}
+
+// sessionExpiry is when a session created at createdAt and being (re)issued at now
+// must expire.
+//
+// It is the earlier of one token lifetime from now and maxDuration from the
+// session's creation. The second term is what makes max_session_duration a limit
+// rather than a suggestion (#212): without it a client that keeps refreshing
+// extends a session forever, so a 30-minute cap on a sudo policy bounded nothing,
+// and neither did the removal of a user from a group — the session simply never
+// reached an expiry at which the removal could take effect.
+//
+// A zero maxDuration means the policies set no limit.
+func (b *Broker) sessionExpiry(createdAt, now time.Time, maxDuration time.Duration) time.Time {
+	expiry := now.Add(b.config.Authentication.TokenLifetime)
+	if maxDuration <= 0 {
+		return expiry
+	}
+	if hardLimit := createdAt.Add(maxDuration); hardLimit.Before(expiry) {
+		return hardLimit
+	}
+	return expiry
 }
 
 func (b *Broker) removeSession(sessionID string) {
@@ -1119,6 +1490,38 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				return
 			}
 
+			// (#212) require_device_trust, enforced. A matching policy asked for a
+			// trusted device; DeviceTrusted is set from the token's amr claim
+			// containing a hardware-key or FIDO method, and this is the first point in
+			// the login where that claim exists. The setting used to write a metadata
+			// key nothing read, so `require_device_trust: true` — present in every
+			// shipped provider configuration — admitted any device.
+			if session.RequireDeviceTrust && !userInfo.DeviceTrusted {
+				log.Warn().
+					Str("session_id", session.ID).
+					Str("requested_user", session.UserID).
+					Msg("Rejected authentication: a matching policy requires a trusted device and this " +
+						"identity did not authenticate with a hardware-backed method")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "DEVICE_NOT_TRUSTED")
+				}
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType: "authentication_denied",
+					UserID:    session.UserID,
+					Email:     userInfo.Email,
+					Groups:    userInfo.Groups,
+					SessionID: session.ID,
+					Provider:  provider.Name,
+					Success:   false,
+					ErrorCode: "DEVICE_NOT_TRUSTED",
+					ErrorMessage: "require_device_trust is set for this host and the token's amr claim " +
+						"reports no hardware-backed or FIDO authentication method",
+					Timestamp: time.Now(),
+				})
+				b.removeSession(session.ID)
+				return
+			}
+
 			// Hand the tokens to the token manager, which encrypts them with
 			// AES-256-GCM, and keep only its ID on the session. The session must
 			// never carry the refresh token itself: it is a long-lived credential,
@@ -1200,7 +1603,55 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				updated.SSHPublicKey = sshKey.PublicKey
 			}
 
-			b.setSession(&updated)
+			// (#217) Store only if this session is still the session that was read.
+			// The device flow can run for its whole lifetime before reaching here, and
+			// during that time the session can be revoked by an operator or swept for
+			// expiry — after which writing IsActive: true unconditionally brought it
+			// back as a fully active session, with an SSH key installed for it, and
+			// the operator who revoked it had no way to know.
+			if !b.replaceSession(session, &updated) {
+				log.Warn().
+					Str("session_id", updated.ID).
+					Str("user_id", updated.UserID).
+					Msg("Device authorization completed for a session that was revoked or expired " +
+						"in the meantime; refusing to activate it")
+				if b.metrics != nil {
+					b.metrics.RecordAuth(provider.Name, "failure", "SESSION_GONE")
+				}
+				// Undo what completing the flow just created. The SSH key was installed
+				// in the account's authorized_keys a few lines above, so leaving it would
+				// leave a usable credential for a session that will never exist — the
+				// exact shape of #171.
+				if updated.SSHKeyID != "" {
+					if err := b.revokeSSHKey(&updated); err != nil {
+						log.Error().
+							Err(err).
+							Str("session_id", updated.ID).
+							Str("ssh_key_id", updated.SSHKeyID).
+							Msg("Failed to revoke the SSH key issued to a session that was revoked mid-flow")
+					}
+				}
+				if err := b.tokenManager.RevokeSessionTokens(updated.ID); err != nil {
+					log.Error().
+						Err(err).
+						Str("session_id", updated.ID).
+						Msg("Failed to revoke tokens stored for a session that was revoked mid-flow")
+				}
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType: "authentication_denied",
+					UserID:    updated.UserID,
+					Email:     updated.Email,
+					Groups:    updated.Groups,
+					SessionID: updated.ID,
+					Provider:  provider.Name,
+					Success:   false,
+					ErrorCode: "SESSION_GONE",
+					ErrorMessage: "the session was revoked or expired before device authorization " +
+						"completed; the issued key and tokens were withdrawn",
+					Timestamp: time.Now(),
+				})
+				return
+			}
 
 			if b.metrics != nil {
 				b.metrics.RecordAuth(provider.Name, "success", "")
