@@ -242,10 +242,18 @@ systemctl status oidc-auth-broker
 ```
 
 The bundled `install.sh` places `oidc-auth-broker`, `oidc-pam-helper`, and
-`oidc-admin` in `/usr/local/bin`, `pam_oidc.so` in `/lib/security`, an example
-config in `/etc/oidc-auth/broker.yaml`, and the systemd unit in
-`/etc/systemd/system`. It does **not** start the broker or modify PAM unless
-`--configure-pam` is supplied, so it cannot lock you out on its own.
+`oidc-admin` in `/usr/local/bin`, `pam_oidc.so` in whichever directory *this
+host's* libpam loads modules from, an example config in
+`/etc/oidc-auth/broker.yaml` (mode `0600`, `root:root` — the broker refuses to
+start otherwise), and the systemd unit in `/etc/systemd/system`. It does **not**
+start the broker or modify PAM unless `--configure-pam` is supplied, so it cannot
+lock you out on its own.
+
+The module directory is detected, not assumed: it is `/lib/<triplet>/security` on
+Debian/Ubuntu and `/lib64/security` on RHEL-family systems, and there is no
+`/lib/security` on either, which is where every release up to v0.4.2 wrote it
+(#208). Set `PAM_MODULE_DIR` if detection gets it wrong; the installer refuses
+rather than guessing, because a module outside that path never loads at all.
 
 ### Method 3: Source Compilation
 
@@ -260,6 +268,11 @@ cd oidc-pam
 make build
 sudo make install
 ```
+
+`make install` detects libpam's module directory the same way the installers do
+and refuses if it cannot find it; set `PAM_MODULE_DIR` to override. It installs no
+PAM configuration at all — use `sudo ./scripts/install.sh --configure-pam` if you
+want `/etc/pam.d/sshd` wired for you, and read "PAM Integration" below first.
 
 ## Configuration
 
@@ -542,19 +555,45 @@ reason is recorded as an `ssh_key_provisioning_failed` audit event.
 
 ### 1. File Permissions
 
+Everything the broker reads or writes is root-owned, because the broker runs as
+root. There is no `oidc-auth` service account — nothing runs as one, and earlier
+versions of this guide and of `scripts/install.sh` created one and gave it the
+socket and log directories. That was a privilege boundary pointing the wrong way:
+write access to the directory holding the socket is enough to unlink the socket and
+bind an impostor at the same path, which every PAM login then talks to (#200), and
+a log file an unprivileged account owns is one it can replace with a symlink for a
+root process to append through. If you installed an earlier version, re-run the
+installer or apply the commands below; the broker now refuses to serve from a
+directory anyone else can write to.
+
 ```bash
-# Set secure permissions
-sudo chown -R oidc-auth:oidc-auth /etc/oidc-auth
+# Configuration: read by the root broker, and holds the OIDC client secret
+sudo chown -R root:root /etc/oidc-auth
 sudo chmod 750 /etc/oidc-auth
 sudo chmod 640 /etc/oidc-auth/broker.yaml
 
-# Log directory permissions
-sudo chown -R oidc-auth:oidc-auth /var/log/oidc-auth
+# Log directory
+sudo chown -R root:root /var/log/oidc-auth
 sudo chmod 750 /var/log/oidc-auth
 
-# PAM module permissions
-sudo chown root:root /lib/security/pam_oidc.so
-sudo chmod 644 /lib/security/pam_oidc.so
+# Socket directory. systemd's RuntimeDirectory= reasserts this on every start;
+# these are the values a hand-built host needs before the first one.
+sudo chown root:root /run/oidc-auth
+sudo chmod 750 /run/oidc-auth
+
+# Broker state: the SSH keys it issues and the locks serializing its
+# authorized_keys writes. Created by StateDirectory= in the unit.
+sudo chown -R root:root /var/lib/oidc-pam
+sudo chmod 700 /var/lib/oidc-pam
+
+# PAM module. Install it in the directory libpam itself loads from, which differs
+# by distribution -- /lib/<triplet>/security on Debian/Ubuntu, /lib64/security on
+# RHEL-family. `scripts/install.sh` detects it; if you place the module by hand,
+# find it with the directory holding pam_permit.so. A module outside that path
+# never loads at all (#208).
+PAM_DIR="$(dirname "$(find /lib /usr/lib -name pam_permit.so -print -quit)")"
+sudo chown root:root "$PAM_DIR/pam_oidc.so"
+sudo chmod 644 "$PAM_DIR/pam_oidc.so"
 ```
 
 ### 2. Network Security

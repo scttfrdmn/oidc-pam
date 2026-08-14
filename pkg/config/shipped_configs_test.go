@@ -67,6 +67,11 @@ func TestShippedConfigsLoad(t *testing.T) {
 			if !isWholeConfig(t, file) {
 				path = wrapProviderFragment(t, file)
 			}
+			// LoadConfig refuses a configuration anyone but root can read (#209),
+			// and a file in the repository is 0644. What this gate is about is the
+			// content, so it is read from a copy with the mode the installers now
+			// give it; TestLoadConfigRejectsWorldReadableFile covers the mode.
+			path = copyAt0600(t, path)
 
 			cfg, err := config.LoadConfig(path)
 			if err != nil {
@@ -194,6 +199,22 @@ func TestNoMisspelledCertificatePinningKey(t *testing.T) {
 // unknown key is always reported first and tolerating this cannot hide one.
 func isUnresolvableSecret(err error) bool {
 	return strings.Contains(err.Error(), "failed to resolve secret references")
+}
+
+// copyAt0600 copies a configuration to a temporary file the broker will accept,
+// i.e. one only its owner can read.
+func copyAt0600(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	dst := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.WriteFile(dst, data, 0600); err != nil {
+		t.Fatalf("failed to write %s: %v", dst, err)
+	}
+	return dst
 }
 
 func yamlFilesUnder(t *testing.T, root string) []string {

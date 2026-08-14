@@ -276,6 +276,18 @@ func TestShippedPAMStacksUseDocumentedControlFlags(t *testing.T) {
 	}
 }
 
+// printsAdvice matches a shell line whose only effect is to put text on the
+// operator's terminal: one of this repo's print_* helpers, or echo/printf, with no
+// redirection or pipe that could send the text into a file instead.
+//
+// Such a line may name a host-wide stack. Telling an operator to put `@include
+// common-auth` back into /etc/pam.d/sshd — which is what scripts/uninstall.sh does
+// when it has no pre-install backup to restore — is the correct instruction, and it
+// is the opposite of the defect TestInstallScriptsDoNotTouchAggregatePAMStacks
+// exists to catch: it restores the distribution's own include in a *service* file
+// rather than editing the aggregate one.
+var printsAdvice = regexp.MustCompile(`^\s*(print_(info|warn|error|success|step)|echo|printf)\b[^|>]*$`)
+
 // No install path may wire pam_oidc.so into a host-wide stack.
 //
 // scripts/install.sh used to insert `@include common-auth` at the top of
@@ -299,6 +311,12 @@ func TestInstallScriptsDoNotTouchAggregatePAMStacks(t *testing.T) {
 		}
 		for i, line := range strings.Split(string(content), "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			// A line that only prints is guidance, not an edit. Anything that
+			// redirects, pipes, or calls sed/cp/tee still trips this, because those
+			// are the shapes that can write to a file.
+			if printsAdvice.MatchString(line) {
 				continue
 			}
 			for name, distro := range aggregatePAMStacks {

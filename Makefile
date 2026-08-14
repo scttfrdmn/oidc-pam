@@ -31,6 +31,28 @@ endif
 # CI Lint job, the verification container and a local `make lint` cannot disagree.
 GOLANGCI_LINT_VERSION := $(shell tr -d '[:space:]' < .golangci-version)
 
+# Resolve the directory this host's libpam loads modules from, into $$pamdir.
+#
+# `make install` used to copy the module to /lib/security, which exists on neither
+# Debian/Ubuntu (/lib/<triplet>/security) nor RHEL-family (/lib64/security)
+# systems (#208) -- so the copy failed, or, once an operator created the directory
+# to get past that, put the module somewhere PAM never looks and every login on
+# the shipped stack was refused by pam_deny.so instead.
+#
+# scripts/install.sh's detect_pam_dir is the one implementation of the probe;
+# sourcing that script defines its functions and runs nothing. Override with
+# PAM_MODULE_DIR, exactly as the installers do.
+define resolve_pam_dir
+pamdir="$${PAM_MODULE_DIR:-$$(bash -c 'source ./scripts/install.sh; detect_pam_dir' || true)}"; \
+if [ -z "$$pamdir" ]; then \
+	echo "Could not find the directory libpam loads modules from. Install your" >&2; \
+	echo "distribution's PAM modules (libpam-modules on Debian/Ubuntu, pam on" >&2; \
+	echo "RHEL-family), or set PAM_MODULE_DIR to the directory holding pam_unix.so." >&2; \
+	exit 1; \
+fi; \
+echo "  PAM module directory: $$pamdir"
+endef
+
 # Default target
 all: build
 
@@ -119,10 +141,11 @@ verify-linux:
 ## Install binaries to system locations
 install: build
 	@echo "Installing binaries..."
-	sudo cp $(BINARY_DIR)/$(PAM_MODULE) /lib/security/
-	sudo cp $(BINARY_DIR)/$(BROKER_BINARY) /usr/local/bin/
-	sudo cp $(BINARY_DIR)/$(HELPER_BINARY) /usr/local/bin/
-	sudo cp $(BINARY_DIR)/$(ADMIN_BINARY) /usr/local/bin/
+	@set -e; $(resolve_pam_dir); \
+	sudo install -m 0644 $(BINARY_DIR)/$(PAM_MODULE) "$$pamdir/$(PAM_MODULE)"
+	sudo install -m 0755 $(BINARY_DIR)/$(BROKER_BINARY) /usr/local/bin/$(BROKER_BINARY)
+	sudo install -m 0755 $(BINARY_DIR)/$(HELPER_BINARY) /usr/local/bin/$(HELPER_BINARY)
+	sudo install -m 0755 $(BINARY_DIR)/$(ADMIN_BINARY) /usr/local/bin/$(ADMIN_BINARY)
 	sudo cp configs/systemd/oidc-auth-broker.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl enable oidc-auth-broker
@@ -130,12 +153,15 @@ install: build
 ## Install development version
 install-dev: build
 	@echo "Installing development version..."
-	sudo cp $(BINARY_DIR)/$(PAM_MODULE) /lib/security/
-	sudo cp $(BINARY_DIR)/$(BROKER_BINARY) /usr/local/bin/
-	sudo cp $(BINARY_DIR)/$(HELPER_BINARY) /usr/local/bin/
-	sudo cp $(BINARY_DIR)/$(ADMIN_BINARY) /usr/local/bin/
-	sudo mkdir -p /etc/oidc-auth
-	sudo cp configs/examples/broker.yaml /etc/oidc-auth/
+	@set -e; $(resolve_pam_dir); \
+	sudo install -m 0644 $(BINARY_DIR)/$(PAM_MODULE) "$$pamdir/$(PAM_MODULE)"
+	sudo install -m 0755 $(BINARY_DIR)/$(BROKER_BINARY) /usr/local/bin/$(BROKER_BINARY)
+	sudo install -m 0755 $(BINARY_DIR)/$(HELPER_BINARY) /usr/local/bin/$(HELPER_BINARY)
+	sudo install -m 0755 $(BINARY_DIR)/$(ADMIN_BINARY) /usr/local/bin/$(ADMIN_BINARY)
+	sudo install -d -m 0750 -o root -g root /etc/oidc-auth
+	# 0600 root:root: this file holds the token encryption key and every client
+	# secret, and the broker refuses to start if anyone else can read it (#209).
+	sudo install -m 0600 -o root -g root configs/examples/broker.yaml /etc/oidc-auth/broker.yaml
 	sudo cp configs/systemd/oidc-auth-broker.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 

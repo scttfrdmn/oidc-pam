@@ -371,11 +371,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetEnvPrefix("OIDC_AUTH")
 	bindSafeEnvironmentVariables(v)
 
-	// Check config file permissions
-	if info, err := os.Stat(configPath); err == nil {
-		if mode := info.Mode().Perm(); mode&0137 != 0 {
-			log.Printf("WARNING: config file %s has permissions %04o, which are more permissive than recommended 0640", configPath, mode)
-		}
+	if err := checkConfigFilePermissions(configPath); err != nil {
+		return nil, err
 	}
 
 	// Try to read config file
@@ -401,6 +398,46 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// configFilePermissionMask is the set of permission bits that must be clear on
+// the broker configuration: every group and other bit, plus owner-execute.
+//
+// (#209) The mask used to be 0137, which permits group-read — on a host whose
+// config is chown'd to a service group, that is the whole file readable by that
+// group. 0177 leaves exactly 0600 (and 0400) acceptable.
+const configFilePermissionMask = 0177
+
+// checkConfigFilePermissions refuses a configuration file that anyone but root
+// can read.
+//
+// This file holds the AES-256 token encryption key and every client secret, and
+// the multi-user host is the host this product exists for. Both installers used
+// to write it 0644, and this check only logged a WARNING to stderr and let the
+// broker serve — validating the key for strength and then publishing it to every
+// local user. A file mode is not something the operator can be warned about
+// once at startup and expected to notice, so it is fatal.
+//
+// A missing file is not an error here: LoadConfig falls back to defaults and the
+// environment, and ReadInConfig reports it.
+func checkConfigFilePermissions(configPath string) error {
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return nil
+	}
+
+	mode := info.Mode().Perm()
+	if mode&configFilePermissionMask == 0 {
+		return nil
+	}
+
+	if isDevelopmentMode() {
+		log.Printf("WARNING: config file %s has permissions %04o, which let processes other than root read the token encryption key and every client secret (development mode)", configPath, mode)
+		return nil
+	}
+
+	return fmt.Errorf("config file %s has permissions %04o: it holds the token encryption key and every client secret, so it must not be readable by anyone but root (chown root:root %s && chmod 600 %s); set OIDC_AUTH_DEV=true to override for development",
+		configPath, mode, configPath, configPath)
 }
 
 // AllowUnknownKeysEnv names the environment variable that turns the unknown-key

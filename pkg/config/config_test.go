@@ -33,7 +33,7 @@ authentication:
   max_concurrent_sessions: 10
 `
 
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
 
@@ -79,7 +79,7 @@ authentication:
   refresh_threshold: "5m"
   max_concurrent_sessions: 5
 `
-	if err := os.WriteFile(validConfigPath, []byte(validContent), 0644); err != nil {
+	if err := os.WriteFile(validConfigPath, []byte(validContent), 0600); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
@@ -405,7 +405,7 @@ oidc:
       client_id: "test-client"
       scopes: ["openid"]
 `
-	if err := os.WriteFile(configPath, []byte(minimalContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(minimalContent), 0600); err != nil {
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
@@ -567,7 +567,7 @@ authentication:
   refresh_threshold: "5m"
   max_concurrent_sessions: 10
 `
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
 
@@ -630,6 +630,66 @@ authentication:
 			t.Error("require_pkce should be overridden by env var in dev mode")
 		}
 	})
+}
+
+// TestLoadConfigRejectsWorldReadableFile is the gate for #209.
+//
+// Both installers wrote /etc/oidc-auth/broker.yaml at mode 0644 -- the AES-256
+// token encryption key and every client secret, readable by every local user on
+// exactly the kind of multi-user host this product exists for -- and this check
+// only logged one WARNING line to stderr and then served. Group-read was not even
+// caught: the mask was 0137.
+func TestLoadConfigRejectsWorldReadableFile(t *testing.T) {
+	const content = `
+oidc:
+  providers:
+    - name: "test"
+      issuer: "https://test.example.com"
+      client_id: "test-client"
+`
+
+	cases := []struct {
+		name      string
+		mode      os.FileMode
+		devMode   string
+		wantError bool
+	}{
+		{name: "world readable", mode: 0644, wantError: true},
+		{name: "group readable", mode: 0640, wantError: true},
+		{name: "world writable", mode: 0666, wantError: true},
+		{name: "owner only", mode: 0600, wantError: false},
+		{name: "owner read only", mode: 0400, wantError: false},
+		{name: "world readable in development mode", mode: 0644, devMode: "true", wantError: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OIDC_AUTH_DEV", tc.devMode)
+
+			path := filepath.Join(t.TempDir(), "broker.yaml")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			// Written 0600 then chmod'd, because the umask applies to WriteFile.
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatalf("failed to chmod config: %v", err)
+			}
+
+			_, err := LoadConfig(path)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("LoadConfig accepted a config at mode %04o; it must refuse anything readable by more than its owner", tc.mode)
+				}
+				if !strings.Contains(err.Error(), "permissions") {
+					t.Errorf("error should name the permissions problem, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig rejected a config at mode %04o: %v", tc.mode, err)
+			}
+		})
+	}
 }
 
 func TestResolveSecretReferences(t *testing.T) {

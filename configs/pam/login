@@ -4,7 +4,16 @@
 # on the machine includes.
 #
 # This configuration enables OIDC authentication for console login (tty) while
-# maintaining fallback authentication for emergency access.
+# keeping local Unix authentication ahead of it, because the console is the
+# documented recovery path for every other stack here (see configs/pam/ssh,
+# EMERGENCY ACCESS) and it has to keep working when the broker does not.
+#
+# NEITHER INSTALLER WIRES THIS FILE. scripts/install.sh and
+# scripts/install-release.sh touch /etc/pam.d/sshd and nothing else, deliberately
+# (#220): a console login that goes through the broker first is a console login
+# that fails when the broker is down, which is precisely when it is needed.
+# Install this one by hand, from a host you can still reach another way, and only
+# if you have decided you want OIDC on the console.
 #
 # IMPORTANT: Test this configuration thoroughly on a non-production system first!
 # Always maintain console or SSH access for emergency recovery.
@@ -14,11 +23,33 @@
 # for the verification URL is a property of the service, so verify it from a host
 # you can still reach another way before relying on it.
 
-# Authentication stack
-auth    sufficient  pam_oidc.so
+# Authentication stack.
+#
+# Order is the whole content of this stack, because a 'sufficient' module that
+# succeeds ends the auth phase then and there:
+#
+#  - pam_nologin.so is first, or /etc/nologin is silently ignored for every user
+#    the module admits. It was below pam_oidc.so before, and so was.
+#  - pam_group.so is next, above the deciding modules rather than below them.
+#    Nothing it does depends on the outcome of authentication -- it assigns
+#    supplementary groups from /etc/security/group.conf and returns PAM_IGNORE --
+#    and below a 'sufficient' line it would never run at all, which is what
+#    happened here for as long as this file shipped.
+#  - pam_unix.so before pam_oidc.so, so that a local password still gets you a
+#    console session when the broker is unreachable. A wrong password falls
+#    through to the device flow rather than ending the stack.
+#  - pam_deny.so last, so a login that satisfied neither is refused rather than
+#    reaching the end of the stack with nothing having decided.
+#
+# No numeric jumps ([success=N default=ignore]). They are how Debian's common-auth
+# is written, but N is a count of lines, and this file is one people edit: adding
+# a module silently changes which line a success skips to. Plain flags say what
+# they mean at every line.
 auth    requisite   pam_nologin.so
-auth    required    pam_unix.so try_first_pass nullok_secure
 auth    optional    pam_group.so
+auth    sufficient  pam_unix.so try_first_pass nullok_secure
+auth    sufficient  pam_oidc.so
+auth    required    pam_deny.so
 
 # Account management
 account optional    pam_oidc.so
@@ -42,9 +73,15 @@ password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 # CONFIGURATION NOTES:
 # 1. Console login typically shows device flow instructions to the user
 # 2. The user must complete authentication on another device/browser
-# 3. pam_nologin.so prevents login if /etc/nologin exists
-# 4. pam_time.so can restrict login hours (configure in /etc/security/time.conf)
-# 5. pam_access.so provides additional access controls (configure in /etc/security/access.conf)
+# 3. pam_nologin.so prevents login if /etc/nologin exists -- it must stay above
+#    pam_oidc.so, or an OIDC user's success ends the auth phase before it runs
+# 4. A user with a local password authenticates without OIDC here, and so without
+#    any OIDC policy (group requirements, risk rules, session limits). That is the
+#    trade this file makes on purpose: the console is the way back in. If you do
+#    not want it, take the pam_unix.so line out -- and make sure something else
+#    (SSH public keys, a rescue image) is your break-glass path instead
+# 5. pam_time.so can restrict login hours (configure in /etc/security/time.conf)
+# 6. pam_access.so provides additional access controls (configure in /etc/security/access.conf)
 
 # CONSOLE CONFIGURATION:
 # The getty service configuration may need adjustment:
@@ -89,9 +126,13 @@ password required   pam_unix.so sha512 shadow nullok try_first_pass use_authtok
 # 5. Consider using pam_limits.so for resource restrictions
 
 # EMERGENCY ACCESS:
-# If OIDC authentication fails, maintain emergency access via:
-# 1. Root account with traditional authentication
-# 2. Emergency user account with Unix password
-# 3. Single-user mode boot
-# 4. SSH access with public key authentication
-# 5. Console access with traditional authentication (if configured)
+# With the stack above, a console login with a local Unix password works whether
+# or not the broker is running -- that is the point of the ordering, and it is the
+# recovery path configs/pam/ssh points at. Keep it working:
+# 1. A local account with a password that is not managed by the IdP (root, or an
+#    emergency admin), tested from the console before you rely on it
+# 2. SSH public key authentication (sshd's pubkey path consults no PAM auth stack)
+# 3. Single-user mode boot, or a rescue image
+#
+# If you remove the pam_unix.so line above, this file no longer provides any of
+# that, and the console stops being a recovery path.

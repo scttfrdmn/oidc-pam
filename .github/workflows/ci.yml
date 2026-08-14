@@ -271,3 +271,16 @@ jobs:
             exit 1
           fi
           echo "release.yml's build job is gated on the CI workflow."
+
+      # The installer and uninstaller decide, in shell, whether a host stays
+      # loggable-in: #207 was an uninstaller that reduced /etc/pam.d/sshd to
+      # `auth requisite pam_deny.so` and reported success. This exercises that
+      # logic against a throwaway /etc/pam.d — no root, no PAM headers, nothing
+      # installed — so the guard is not left to a reviewer's reading.
+      - name: Check the installer PAM wiring
+        run: ./test/scripts/test-pam-wiring.sh
+
+      - name: Shellcheck the install scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/*.sh test/scripts/*.sh
