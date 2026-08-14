@@ -6,6 +6,7 @@
 #include <security/pam_ext.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <arpa/inet.h>
 #include <syslog.h>
 #include <string.h>
 #include <errno.h>
@@ -48,6 +49,14 @@
 // Longest session ID the module will accept from the broker, matching
 // maxSessionIDLen in internal/ipc/validate.go (plus the NUL).
 #define MAX_SESSION_ID_SIZE 129
+
+// Bounds the wire protocol (version 1) sets on the two fields that say where a
+// login came from and where it is going: 45 bytes is an IPv6 literal with a zone,
+// 253 a DNS name. The broker refuses anything longer
+// (maxSourceIPLen/maxTargetHostLen in internal/ipc/validate.go), so the module
+// declines to send it rather than having the login refused as INVALID_REQUEST.
+#define MAX_SOURCE_IP_LEN 45
+#define MAX_TARGET_HOST_LEN 253
 
 // Default socket path for the OIDC broker. Must match the default of
 // server.socket_path in pkg/config/config.go; override per-service with the

@@ -916,3 +916,117 @@ func TestShippedConfigsPinTheirDomains(t *testing.T) {
 		}
 	}
 }
+
+// (#169) A network requirement is checked against source_ip, and some logins
+// legitimately have none — one at the physical console, or one whose PAM_RHOST is a
+// hostname rather than an address. The broker used to answer that on its own, via
+// isPrivateIP("") being false, and the answer was "deny", so require_private_network
+// refused every login on the host. So the operator has to say, and has to say it
+// before the broker starts rather than at the first login that hits it.
+func TestNetworkRequirementNeedsAnAnswerForAnUnknownSourceIP(t *testing.T) {
+	withNetwork := func(nr NetworkRequirements) *Config {
+		return &Config{
+			Server: ServerConfig{SocketPath: "/tmp/test.sock"},
+			OIDC: OIDCConfig{Providers: []OIDCProvider{{
+				Name:     "test",
+				Issuer:   "https://test.example.com",
+				ClientID: "test-client",
+				Scopes:   []string{"openid"},
+			}}},
+			Authentication: AuthenticationConfig{
+				TokenLifetime:         time.Hour,
+				RefreshThreshold:      time.Minute,
+				MaxConcurrentSessions: 5,
+				NetworkRequirements:   nr,
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		network NetworkRequirements
+		wantErr string
+	}{
+		{
+			name:    "no requirement, nothing to answer",
+			network: NetworkRequirements{},
+		},
+		{
+			name:    "private network with an explicit deny",
+			network: NetworkRequirements{RequirePrivateNetwork: true, UnknownSourceIP: UnknownSourceIPDeny},
+		},
+		{
+			name:    "private network with an explicit allow",
+			network: NetworkRequirements{RequirePrivateNetwork: true, UnknownSourceIP: UnknownSourceIPAllow},
+		},
+		{
+			// The shape of the defect: the requirement on, and nothing said about the
+			// logins that cannot satisfy it.
+			name:    "private network with no answer",
+			network: NetworkRequirements{RequirePrivateNetwork: true},
+			wantErr: "unknown_source_ip must be",
+		},
+		{
+			name:    "tailscale with no answer",
+			network: NetworkRequirements{RequireTailscale: true},
+			wantErr: "unknown_source_ip must be",
+		},
+		{
+			name:    "a typo is not a decision",
+			network: NetworkRequirements{RequirePrivateNetwork: true, UnknownSourceIP: "denied"},
+			wantErr: `unknown_source_ip is "denied"`,
+		},
+		{
+			// Answered but unused is inert, not an error: an operator staging the
+			// decision before enabling the requirement is not misconfigured.
+			name:    "an answer with no requirement is allowed",
+			network: NetworkRequirements{UnknownSourceIP: UnknownSourceIPDeny},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := withNetwork(tc.network).Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Validate() = %v, want an error mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// The shipped configs have to satisfy the rule above or the broker refuses to
+// start with them. configs/production/broker-enterprise.yaml enables both
+// requirements, which is how #169 shipped a config that denied every login.
+func TestShippedConfigsAnswerForAnUnknownSourceIP(t *testing.T) {
+	paths, err := filepath.Glob("../../configs/**/*.yaml")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	more, _ := filepath.Glob("../../configs/*.yaml")
+	paths = append(paths, more...)
+	if len(paths) == 0 {
+		t.Skip("no shipped configs found from this working directory")
+	}
+
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("read %s: %v", path, err)
+			continue
+		}
+		text := string(data)
+		if !strings.Contains(text, "require_private_network: true") &&
+			!strings.Contains(text, "require_tailscale: true") {
+			continue
+		}
+		if !strings.Contains(text, "unknown_source_ip:") {
+			t.Errorf("%s enables a network requirement without unknown_source_ip, so the broker "+
+				"will refuse to start with it", path)
+		}
+	}
+}

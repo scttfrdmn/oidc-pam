@@ -468,3 +468,45 @@ func TestAuthenticateAndWaitDoesNotOvershootTheBudget(t *testing.T) {
 		t.Errorf("waited %s, want exactly the 30s budget", elapsed)
 	}
 }
+
+// (#169) source_ip is where the login came from, and it carries an address or
+// nothing. A hostname — what PAM_RHOST holds when sshd runs with UseDNS on — is
+// dropped rather than passed through, because the broker's network policies, IP
+// allowlists and location history all treat what is in this field as a location
+// and nothing re-resolves it.
+func TestSourceIPFromRHost(t *testing.T) {
+	tests := []struct {
+		name  string
+		rhost string
+		want  string
+	}{
+		{"IPv4", "10.0.0.1", "10.0.0.1"},
+		{"IPv6", "2001:db8::1", "2001:db8::1"},
+		{"IPv6 with zone", "fe80::1%eth0", "fe80::1%eth0"},
+		{"loopback", "127.0.0.1", "127.0.0.1"},
+		{"a resolved hostname is not an address", "client.example.com", ""},
+		{"the module's old stand-in for a local login", "localhost", ""},
+		{"a local login has no peer", "", ""},
+		{"longer than the contract allows", "1234567890123456789012345678901234567890123456", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SourceIPFromRHost(tt.rhost); got != tt.want {
+				t.Errorf("SourceIPFromRHost(%q) = %q, want %q", tt.rhost, got, tt.want)
+			}
+		})
+	}
+}
+
+// target_host is the host being logged into, which is this one — not the client's
+// address, which is what both clients used to send.
+func TestThisHostIsThisHost(t *testing.T) {
+	want, err := os.Hostname()
+	if err != nil {
+		t.Skipf("no hostname on this machine: %v", err)
+	}
+	if got := ThisHost(); got != want {
+		t.Errorf("ThisHost() = %q, want this machine's name %q", got, want)
+	}
+}

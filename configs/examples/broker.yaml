@@ -83,10 +83,18 @@ authentication:
   require_groups: ["linux-users"]
   
   # Network requirements
+  #
+  # require_tailscale and require_private_network are checked against the login's
+  # source_ip. A login can legitimately have none — one at the physical console,
+  # or one whose PAM_RHOST is a resolved hostname rather than an address — so
+  # enabling either of them requires unknown_source_ip as well, saying what
+  # happens to those: "deny" (fail closed) or "allow" (permitted, and audited as
+  # network_requirement_waived). The broker refuses to start without it.
   network_requirements:
     require_tailscale: false
     validate_device_trust: false
     require_private_network: false
+    # unknown_source_ip: "deny"
     
   # Resource-specific policies
   # A policy is selected by its NAME: "default" applies to every host, any other

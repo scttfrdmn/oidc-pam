@@ -149,6 +149,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `broker.yaml`. Proven against the defect: restoring the old files fails seven
   of the config cases and five of the document cases, naming `cloud`, `logging`,
   `policy`, `ssh`, `format` and `pin_certificates` by path.
+- **High (#169): the network access controls could not work, and every audit record
+  named the client as the host being logged into.** Neither client ever sent
+  `source_ip`, and both sent `PAM_RHOST` — the address the login comes *from* — as
+  `target_host`, so the two ends of the connection were swapped on the wire. Every
+  policy that reads `source_ip` was therefore evaluating the empty string:
+  `require_private_network` and `require_tailscale` ask `net.ParseIP` about it, which
+  answers no, so enabling either refused **every login on the host** including the
+  ones it was configured to admit — and `configs/production/broker-enterprise.yaml`
+  ships with both on. `ip_allowlist`/`ip_denylist` and the geo checks matched nothing
+  for the same reason, the location history recorded an entry with an empty subnet
+  that made every subsequent login for that user score as an unusual location, and
+  the audit trail recorded the client's address in `target_host` — so an
+  investigation could not tell which machine a login reached.
+
+  - Both clients now send `source_ip` from `PAM_RHOST` and `target_host` from this
+    host's own name, per the **oauth2-pam wire protocol (version 1)**: `source_ip` is
+    "the client address, if the login has one and it really is an address" and
+    `target_host` is "the host being logged **into** — this host". That project owns
+    the contract and this one consumes it (#179), so the field meanings, the 45- and
+    253-byte bounds and the decision to leave `source_ip` optional are taken from
+    there rather than settled here.
+  - A resolved hostname is not an address, so an `rhost` that is a name (what sshd
+    supplies with `UseDNS yes`) yields no `source_ip` rather than a string no policy
+    can evaluate. The unabridged `rhost` reaches the broker in `metadata.rhost`, as
+    audit context that nothing consults for a decision.
+  - **An absent `source_ip` is now a third answer — "origin unknown" — and what it
+    means is the operator's, not the zero value's.** A console login legitimately has
+    no address, so a network requirement now needs
+    `authentication.network_requirements.unknown_source_ip: deny|allow` alongside it;
+    the broker refuses to start with the requirement enabled and the question
+    unanswered, rather than reaching the old implicit answer (deny everything) at the
+    first login. `allow` is audited per login as `network_requirement_waived`: a
+    requirement that was configured and then not applied must not be invisible. Risk
+    scoring counts an unknown origin the same 25 as a public one — it is not evidence
+    of safety — but names it "Unknown network origin" so the score can be read.
+  - A login with no location is no longer recorded in the location history at all,
+    which is what turned one unrecordable first login into a permanent "unusual
+    location" verdict for that user.
+  - `internal/ipc` now bounds `source_ip` at 45 bytes and `target_host` at 253 at the
+    boundary, and accepts a zoned IPv6 literal (`fe80::1%eth0`), which `net.ParseIP`
+    rejects on its own.
+  - Coverage on both sides of the boundary, since the defect was identical in each: a
+    cgo test asserting what the C module puts on the wire, a Go test doing the same
+    against a fake broker, policy tests that a private source address is now
+    distinguishable from a public one (impossible to write against the defect — both
+    cases were the empty string and both were denied), a config test that every
+    shipped config answers the unknown-origin question, and an e2e case asserting the
+    login came from `127.0.0.1` and arrived at this host. Each was proven to fail with
+    the defect reintroduced.
 - **High (#168): the shipped PAM stacks logged every login's broker response to
   syslog, and a service with no PAM conversation crashed the login outright.** Five
   defects in the C module, grouped because they are one PR's worth of work.

@@ -211,9 +211,39 @@ func (pe *PolicyEngine) applyGlobalPolicies(req *AuthRequest, result *PolicyResu
 	return nil
 }
 
+// MetadataSourceIPUnknown marks a result the network requirements let through
+// only because the operator chose unknown_source_ip: allow. The broker audits
+// it: a waived requirement is a security-relevant event, not a detail.
+const MetadataSourceIPUnknown = "source_ip_unknown"
+
 // applyNetworkPolicies applies network-related policies
 func (pe *PolicyEngine) applyNetworkPolicies(req *AuthRequest, result *PolicyResult) error {
 	netReq := pe.config.Authentication.NetworkRequirements
+
+	if !netReq.RequireTailscale && !netReq.RequirePrivateNetwork {
+		return nil
+	}
+
+	// (#169) An absent source_ip means the broker does not know where this login
+	// came from — not that it came from somewhere bad. Both checks below ask
+	// net.ParseIP a question about a string, and both answer "no" for "", so an
+	// unknown origin used to be reported as a public one and every login on the
+	// host was refused. What happens instead is the operator's decision, made in
+	// config and validated at startup (validateNetworkRequirements).
+	if req.SourceIP == "" {
+		if netReq.UnknownSourceIP == config.UnknownSourceIPAllow {
+			result.RiskFactors = append(result.RiskFactors, "Network requirement waived: origin unknown")
+			result.Metadata[MetadataSourceIPUnknown] = true
+			log.Warn().
+				Str("user_id", req.UserID).
+				Str("login_type", req.LoginType).
+				Msg("Login reported no source_ip; network requirements waived by unknown_source_ip: allow")
+			return nil
+		}
+		result.Allowed = false
+		result.Reason = "Access requires a known network origin; this login reported no source IP"
+		return nil
+	}
 
 	// Check if Tailscale is required
 	if netReq.RequireTailscale {
@@ -528,8 +558,15 @@ func (pe *PolicyEngine) calculateRiskScore(req *AuthRequest, result *PolicyResul
 		result.RiskFactors = append(result.RiskFactors, "Unknown device")
 	}
 
-	// Network-based risk
-	if !pe.isPrivateIP(req.SourceIP) {
+	// Network-based risk. (#169) An unknown origin scores the same as a public one
+	// — it is not evidence of safety — but it is named for what it is, because the
+	// risk factors are what an operator reads out of the audit trail to work out
+	// why a login scored what it did.
+	switch {
+	case req.SourceIP == "":
+		score += 25
+		result.RiskFactors = append(result.RiskFactors, "Unknown network origin")
+	case !pe.isPrivateIP(req.SourceIP):
 		score += 25
 		result.RiskFactors = append(result.RiskFactors, "Public network access")
 	}

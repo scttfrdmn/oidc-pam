@@ -160,22 +160,80 @@ const char *classify_login_type(const char *service, const char *tty) {
     return "unknown";
 }
 
+// Derive the request's source_ip from PAM_RHOST: where the login is coming from.
+//
+// (#169) Returns NULL unless rhost really is an address. source_ip carries an
+// address or nothing, and sshd hands PAM a resolved hostname when UseDNS is on;
+// passing that through would be worse than omitting it, because the broker's
+// network policies and IP allowlists would then evaluate a string that is not a
+// location and nothing downstream re-resolves it. The unabridged rhost still goes
+// out in metadata.rhost, which is audit context and decides nothing.
+static const char *source_ip_from_rhost(const char *rhost) {
+    char addr[MAX_SOURCE_IP_LEN + 1];
+    struct in_addr v4;
+    struct in6_addr v6;
+    char *zone;
+    size_t len;
+
+    if (rhost == NULL) {
+        return NULL;
+    }
+    len = strlen(rhost);
+    if (len == 0 || len > MAX_SOURCE_IP_LEN) {
+        return NULL;
+    }
+
+    // A zone ("fe80::1%eth0") names an interface on the sending host, which
+    // inet_pton will not parse, so it is validated without and sent with.
+    memcpy(addr, rhost, len);
+    addr[len] = '\0';
+    zone = strchr(addr, '%');
+    if (zone != NULL) {
+        *zone = '\0';
+    }
+
+    if (inet_pton(AF_INET, addr, &v4) == 1 || inet_pton(AF_INET6, addr, &v6) == 1) {
+        return rhost;
+    }
+    return NULL;
+}
+
+// The request's target_host: the host being logged *into*, which is this one.
+//
+// (#169) Returns NULL rather than a guess when the name cannot be had or does not
+// fit, since a wrong target_host selects the wrong per-resource policy.
+static const char *this_host(char *buf, size_t size) {
+    if (gethostname(buf, size) != 0) {
+        return NULL; // includes ENAMETOOLONG: a truncated hostname is a wrong one
+    }
+    buf[size - 1] = '\0'; // POSIX does not promise termination on truncation
+    if (buf[0] == '\0') {
+        return NULL;
+    }
+    return buf;
+}
+
 // Send authentication request to broker
 int send_auth_request(int sock, const char *username, const char *service, const char *rhost, const char *tty) {
     json_object *request = json_object_new_object();
     json_object *type = json_object_new_string("authenticate");
     json_object *user_id = json_object_new_string(username);
-    json_object *target_host = json_object_new_string(rhost);
     json_object *metadata = json_object_new_object();
     json_object *service_obj = json_object_new_string(service);
     json_object *tty_obj = json_object_new_string(tty);
 
     const char *login_type_str = classify_login_type(service, tty);
+    const char *source_ip = source_ip_from_rhost(rhost);
+    char host_buf[MAX_TARGET_HOST_LEN + 1];
+    const char *target_host = this_host(host_buf, sizeof(host_buf));
 
     // Add metadata
     json_object_object_add(metadata, "service", service_obj);
     json_object_object_add(metadata, "tty", tty_obj);
     json_object_object_add(metadata, "pid", json_object_new_int(getpid()));
+    if (rhost != NULL && rhost[0] != '\0') {
+        json_object_object_add(metadata, "rhost", json_object_new_string(rhost));
+    }
 
     // Build request. Each value is added exactly once and owned by the tree, so
     // a single json_object_put(request) frees everything (L-11: previously the
@@ -183,9 +241,18 @@ int send_auth_request(int sock, const char *username, const char *service, const
     json_object_object_add(request, "type", type);
     json_object_object_add(request, "user_id", user_id);
     json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
-    json_object_object_add(request, "target_host", target_host);
+    // (#169) Both fields are omitted rather than sent empty when unknown: absent
+    // and empty mean the same thing to the broker, and an omitted field is the one
+    // the wire protocol describes. This used to send rhost as target_host and no
+    // source_ip at all, which inverted the two ends of the connection.
+    if (source_ip != NULL) {
+        json_object_object_add(request, "source_ip", json_object_new_string(source_ip));
+    }
+    if (target_host != NULL) {
+        json_object_object_add(request, "target_host", json_object_new_string(target_host));
+    }
     json_object_object_add(request, "metadata", metadata);
-    
+
     // Convert to string
     const char *request_str = json_object_to_json_string(request);
     size_t request_len = strlen(request_str);
