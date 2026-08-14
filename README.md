@@ -199,12 +199,12 @@ sudo make install-dev
 # Unit tests
 make test
 
-# Integration tests
-make test-integration
-
-# End-to-end tests
+# End-to-end: real sshd, real PAM stack, real broker, in Docker
 make test-e2e
 ```
+
+`make test-e2e` is the one that exercises the module as PAM sees it — every case
+is an actual SSH login. See [test/e2e/README.md](test/e2e/README.md).
 
 ## 🤝 Contributing
 

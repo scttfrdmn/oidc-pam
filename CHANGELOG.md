@@ -80,6 +80,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Added** below.
 
 ### Added
+- **(#129) `test/e2e`, an end-to-end harness: real `sshd`, real PAM stack, real
+  `pam_oidc.so`, real broker, and a scripted fake identity provider, in Docker.**
+  `make test-e2e` runs it; it needs nothing but Docker — no credentials, no
+  network egress, no Keycloak. Every case is an actual SSH login that either
+  happens or does not, because the thing under test is what PAM makes of the
+  module's return code in the context of a real stack, and that is where every
+  serious defect this project has shipped has lived: #120 (`PAM_SUCCESS` returned
+  while the user was still deciding, which `auth sufficient` turns into a
+  bypass), #140 (a `.so` containing no `pam_sm_*` symbols at all), #150 (every
+  device flow abandoned on its first poll). Each of those passed every unit test
+  on both sides of the boundary it broke.
+
+  Nine cases: the login waits while nothing is approved (the #120 gate), an
+  approval completes it and installs exactly one key, a flow nobody approves is
+  refused after the module's whole budget, a provider refusal is terminal, an ID
+  token for another user cannot log in as this one (#90), `require_groups` is
+  enforced (#92), an `account required` module below `pam_oidc.so` can still
+  refuse a login whose auth phase succeeded (#122), a non-root peer is refused on
+  the IPC socket, and an absent broker is reported at once rather than after the
+  device-flow budget. Verified against a deliberately reintroduced #120: the two
+  bypass cases fail, naming it.
+
+  It found #152 and #153 on its first run, both of which had survived eleven
+  releases and the whole unit suite.
+- `test/e2e/fakeoidc`, the scripted issuer it authenticates against: discovery,
+  JWKS, RS256-signed ID tokens with a real `nonce`/`aud`/`iss`, the device
+  authorization and token endpoints, and a `/control/*` API so a case can decide
+  *when* the user approves, deny, expire, or change which identity the token
+  carries. Approving before the broker is really polling would test a race rather
+  than a device flow, so `/control/state` reports the poll count.
+- A CI job running the harness on `ubuntu-latest`. It builds everything inside
+  its own images, so unlike the other jobs it needs neither Go nor PAM headers on
+  the runner.
 - `internal/testoidc`, an in-process OpenID Connect issuer for tests: discovery,
   JWKS, RS256-signed ID tokens (real signatures, real `aud`/`iss`/`exp`/`nonce`,
   so go-oidc's verifier is exercised rather than bypassed), the device
@@ -95,6 +128,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expiry bounds the loop, and stopping the broker abandons it. `Broker` gained an
   unexported `pollIntervalUnit` so those tests do not have to wait out RFC 8628's
   5-second interval floor.
+
+### Removed
+- **(#129) The Keycloak integration harness, which `test/e2e` replaces and which
+  no CI job ran.** `test/integration` (a `package main` behind a build tag that
+  `./...` skips), `docker-compose.test.yml`, `test/Dockerfile.integration`,
+  `test/config/integration-test.yaml`, `test/keycloak`,
+  `scripts/{start,run}-integration-tests.sh` and the `test-projects/ssh-server`
+  shell harness are gone, along with the `test-integration` and
+  `test-integration-run` make targets. What they promised — a real login through
+  a real PAM stack — is what `make test-e2e` now delivers, in a form that runs in
+  CI and needs no external identity provider. The QUICK-START section that told a
+  reader to bring up the deleted Keycloak compose file points at the harness
+  instead.
+- `make test-e2e` no longer runs `go test ./test/e2e/...`, which matched no
+  packages and therefore passed unconditionally. It runs the harness.
 
 ### Security
 - Bumped the Go toolchain pin from 1.25.12 to 1.25.13. govulncheck reported four

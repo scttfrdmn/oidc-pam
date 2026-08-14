@@ -87,22 +87,12 @@ test-unit:
 	@echo "Running unit tests..."
 	go test $(GO_TEST_FLAGS) ./pkg/... ./internal/...
 
-## Compile-check the Keycloak integration harness (see test-integration-run)
-test-integration:
-	@# test/integration is the harness `docker-compose.test.yml` runs against a
-	@# live Keycloak, not a `go test` package: it is a `package main` behind the
-	@# `integration` build tag, so ./... skips it and nothing else type-checks it.
-	@echo "Vetting the integration harness..."
-	go vet -tags integration ./test/integration/...
-
-## Run the Keycloak integration harness in Docker (needs Docker + docker-compose)
-test-integration-run:
-	./scripts/start-integration-tests.sh
-
-## Run end-to-end tests
+## Run the end-to-end harness: real sshd, real PAM stack, real broker (needs Docker)
 test-e2e:
-	@echo "Running end-to-end tests..."
-	go test $(GO_TEST_FLAGS) ./test/e2e/...
+	@# Not a `go test` package. Every case is an actual SSH login against the
+	@# built pam_oidc.so, which is the only way to exercise what PAM makes of the
+	@# module's return codes. See test/e2e/README.md.
+	./test/e2e/run-tests.sh
 
 ## Verify everything (vet + test + lint, all packages) in a Linux container.
 ## The cgo/PAM packages cannot be built on macOS, so this is the only way to
@@ -244,9 +234,7 @@ help:
 	@echo "  build-admin     Build admin CLI tool"
 	@echo "  test            Run all tests"
 	@echo "  test-unit       Run unit tests only"
-	@echo "  test-integration Vet the Keycloak integration harness"
-	@echo "  test-integration-run Run that harness in Docker"
-	@echo "  test-e2e        Run end-to-end tests"
+	@echo "  test-e2e        Run the end-to-end SSH/PAM harness in Docker"
 	@echo "  verify-linux    Run vet+test+lint for ALL packages (incl. cgo/PAM) in Docker"
 	@echo "  install         Install binaries to system"
 	@echo "  install-dev     Install development version"
