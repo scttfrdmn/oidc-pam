@@ -270,6 +270,13 @@ func sshdVersionBanner(path string) (string, error) {
 
 	// #nosec G204 -- path is one of sshdSearchPaths, a fixed list of absolute paths in
 	// this file (a test hook, not configuration), and the only argument is a literal.
+	// Semgrep flags the variable in argument position and cannot see that
+	// sshdVersionBanner's only caller is probeLocalSSHD's loop over that list: no
+	// config value, no claim, and no PATH lookup reaches here, deliberately, because
+	// this runs as root. The suppression has to be the line immediately above the
+	// call — semgrep does not look further back, so a comment block between the two
+	// silently stops suppressing.
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.CommandContext(ctx, path, "-V")
 	cmd.Env = []string{"LC_ALL=C", "PATH=/usr/bin:/bin"}
 	// As in lookupViaGetent: cancelling the context kills the process but does not
