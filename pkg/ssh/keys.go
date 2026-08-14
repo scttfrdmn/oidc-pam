@@ -41,22 +41,45 @@ type SSHKey struct {
 	ExpiresAt  time.Time
 }
 
-// usernamePattern is a strict allowlist for POSIX-style login names: a leading
-// lowercase letter or underscore, followed by lowercase letters, digits,
-// underscores, or hyphens, with an optional trailing '$'. Anchored and length
-// bounded. This is a positive allowlist (M-7) rather than a denylist, so it also
-// rejects "..", path separators, leading dots, and other traversal tricks.
-var usernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}\$?$`)
+// usernamePattern is the allowlist for a login name. It is anchored and length
+// bounded, and it is still a positive allowlist (M-7) rather than a denylist, so it
+// rejects "..", path separators, leading dots and other traversal tricks by
+// construction: the first character may only be a letter, a digit or an underscore.
+//
+// (#229) It used to be `^[a-z_][a-z0-9_-]{0,31}\$?$` — lowercase POSIX login names
+// and nothing else — which is not the population this product is deployed into. SSSD
+// presents an Active Directory account as `DOMAIN\user` or `user@realm` depending on
+// use_fully_qualified_names, both of which that pattern refused, along with every
+// `first.last`, every machine account with a `$`, and every name with a capital
+// letter in it. A site running the modal enterprise Linux identity stack therefore
+// had *every* username rejected before any authentication was attempted, and the
+// failure surfaced as a broker error rather than as a username-format policy.
+//
+// What the check is actually for is the two places a name reaches the filesystem or
+// an argument list: it is joined into a filename, and it is passed to getent(1) as
+// argv. So the characters that stay refused are the ones that matter there —
+// anything outside this set, which excludes `/`, NUL, every control character and
+// every kind of whitespace, and a leading `-` that getent would read as an option.
+// Whether the name exists is NSS's answer to give, not this pattern's.
+//
+// Whitespace is refused for a third reason worth naming: the broker stamps each key
+// it issues with a `<username>@oidc-pam-<unix>` comment and recognises its own
+// entries by parsing that single field back out. A name with a space in it would
+// split the comment, and an entry the sweep cannot recognise is a credential that
+// never expires.
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._@\\$-]{0,127}$`)
 
-// validateUsername rejects usernames that are not valid POSIX login names,
-// which also prevents path-traversal when usernames are joined into filesystem
-// paths under the broker's base directory.
+// validateUsername rejects names that cannot be used safely as a path element or as
+// an argument to the account-database lookup. It is not an assertion that the account
+// exists: LookupAccount asks NSS that, and the resolved uid and home directory are
+// what every subsequent operation uses.
 func validateUsername(username string) error {
 	if username == "" {
 		return fmt.Errorf("username cannot be empty")
 	}
 	if !usernamePattern.MatchString(username) {
-		return fmt.Errorf("username %q is not a valid POSIX login name", username)
+		return fmt.Errorf("username %q contains characters that are not safe in a path "+
+			"or an argument list", username)
 	}
 	return nil
 }

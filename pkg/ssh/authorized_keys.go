@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +40,27 @@ const (
 
 	// lockRetryInterval is how often a blocked writer retries.
 	lockRetryInterval = 50 * time.Millisecond
+
+	// maxAuthorizedKeysBytes bounds how much of a user's authorized_keys the broker
+	// will read into memory.
+	//
+	// (#206) There was no bound. io.ReadAll was pointed at a file in the user's own
+	// directory, so `truncate -s 200G ~/.ssh/authorized_keys` — sparse, instant, no
+	// quota cost — followed by a login grew a 200 GB slice and the root broker was
+	// OOM-killed. Every other account's authentication fails while it is down, systemd
+	// restarts it ten seconds later (Restart=always, no MemoryMax), startup reconcile
+	// reads the same file for any user with a stored key, and it is killed again: a
+	// host-wide authentication outage that persists until an operator finds the file.
+	//
+	// 1 MiB is the bound because of what the file legitimately holds. The largest
+	// entry anyone writes is an options list plus a 16384-bit RSA key — about 2.8 KB
+	// of base64 — plus a comment, so under 3 KB; a 4096-bit RSA entry is about 750
+	// bytes and an ed25519 entry about 100. 1 MiB is therefore roughly 350 of the
+	// largest entries that exist, 1,300 ordinary RSA ones, or 10,000 ed25519 ones, for
+	// a single account. Nothing legitimate is near that, and a file that exceeds it is
+	// refused rather than truncated: silently dropping the tail of a key list would
+	// mean writing back a file with keys missing.
+	maxAuthorizedKeysBytes = 1 << 20
 )
 
 // ErrLockUnavailable is returned when the per-user lock could not be taken within
@@ -105,29 +128,37 @@ func acquireLock(lockFile *os.File, lockPath string, timeout time.Duration) erro
 // that is not a directory the broker alone controls. A lock in a directory someone
 // else can write to is not a lock: they can plant the lock file, or hold it.
 func ensureLockDir(lockDir string) error {
-	info, err := os.Lstat(lockDir)
+	return ensureBrokerOwnedDir("lock directory", lockDir)
+}
+
+// ensureBrokerOwnedDir creates one of the broker's own state directories if it is
+// absent, and refuses one that anybody else could have interfered with. Both the
+// locks (#161) and the authorized_keys backups (#228) depend on living somewhere the
+// account they concern cannot reach.
+func ensureBrokerOwnedDir(what, dir string) error {
+	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(lockDir, 0700); mkErr != nil {
-				return fmt.Errorf("failed to create lock directory %q: %w", lockDir, mkErr)
+			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+				return fmt.Errorf("failed to create %s %q: %w", what, dir, mkErr)
 			}
 			return nil
 		}
-		return fmt.Errorf("failed to stat lock directory %q: %w", lockDir, err)
+		return fmt.Errorf("failed to stat %s %q: %w", what, dir, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to use lock directory %q: it is a symlink", lockDir)
+		return fmt.Errorf("refusing to use %s %q: it is a symlink", what, dir)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("refusing to use lock directory %q: it is not a directory", lockDir)
+		return fmt.Errorf("refusing to use %s %q: it is not a directory", what, dir)
 	}
 	if info.Mode().Perm()&0022 != 0 {
-		return fmt.Errorf("refusing to use lock directory %q: mode %#o is writable by group or other",
-			lockDir, info.Mode().Perm())
+		return fmt.Errorf("refusing to use %s %q: mode %#o is writable by group or other",
+			what, dir, info.Mode().Perm())
 	}
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != os.Geteuid() {
-		return fmt.Errorf("refusing to use lock directory %q: it is owned by uid %d, not by this process (uid %d)",
-			lockDir, stat.Uid, os.Geteuid())
+		return fmt.Errorf("refusing to use %s %q: it is owned by uid %d, not by this process (uid %d)",
+			what, dir, stat.Uid, os.Geteuid())
 	}
 	return nil
 }
@@ -147,23 +178,60 @@ func ensureLockDir(lockDir string) error {
 // their own keys in it; a root-owned 0700 .ssh takes that away with no way for
 // them to get it back.
 func ensureSecureSSHDir(sshDir string, account Account) error {
+	exists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if mkErr := os.MkdirAll(sshDir, 0700); mkErr != nil {
+		return fmt.Errorf("failed to create .ssh directory: %w", mkErr)
+	}
+	return chownDirToAccount(sshDir, account)
+}
+
+// checkSSHDir is the half of ensureSecureSSHDir that creates nothing: it reports
+// whether .ssh exists, and refuses one that is a symlink, is not a directory, or
+// belongs to a third account. A .ssh that is simply absent is not an error — the
+// account has never had a key — so callers that only remove or read return early
+// rather than bringing a directory into existence on a cleanup pass.
+//
+// (#204) Every entry point goes through this now, and four of them went through
+// nothing. RemovePublicKey and RemoveExpiredKeys used os.Stat(sshDir) purely to ask
+// whether it existed — os.Stat *follows* symlinks, so `ln -s /root/.ssh ~/.ssh`
+// answered yes — and KeyIsAuthorized and ListOIDCKeys did not look at .ssh at all.
+// Nothing further stopped them: authorized_keys inside the linked directory is not
+// itself a symlink, so rejectIfSymlink passes it, O_NOFOLLOW constrains only the
+// final component, and the descriptor's owner is root, which checkOwner accepts
+// because sshd's StrictModes accepts it. So RemoveExpiredKeys and RemovePublicKey
+// rewrote root's key list through a bob-owned temp file, and ListOIDCKeys and
+// KeyIsAuthorized read it out — with no race to win, because the link can be planted
+// before the call and nothing looked.
+//
+// This closes the no-race half. It does not make the check race-free: it is a name
+// being validated and then used, and the fix for that is to hold the home open and
+// perform every subsequent operation with openat(2) relative to a verified .ssh
+// descriptor, which is a larger change than this. What is left is a window an
+// attacker must win, rather than a door standing open.
+func checkSSHDir(sshDir string, account Account) (bool, error) {
 	info, err := os.Lstat(sshDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(sshDir, 0700); mkErr != nil {
-				return fmt.Errorf("failed to create .ssh directory: %w", mkErr)
-			}
-			return chownDirToAccount(sshDir, account)
+			return false, nil
 		}
-		return fmt.Errorf("failed to stat .ssh directory: %w", err)
+		return false, fmt.Errorf("failed to stat .ssh directory: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to use .ssh: %q is a symlink", sshDir)
+		return false, fmt.Errorf("refusing to use .ssh: %q is a symlink", sshDir)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("refusing to use .ssh: %q is not a directory", sshDir)
+		return false, fmt.Errorf("refusing to use .ssh: %q is not a directory", sshDir)
 	}
-	return checkOwner(".ssh directory", sshDir, info, account)
+	if err := checkOwner(".ssh directory", sshDir, info, account); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // rejectIfSymlink returns an error if path exists and is a symbolic link. Used
@@ -193,37 +261,105 @@ func rejectIfSymlink(path string) error {
 // is writable by the user, so between a stat and an open the name can be made to
 // point somewhere else. What is verified has to be the thing that was opened.
 func readAuthorizedKeysLines(path string, account Account) ([]string, error) {
-	if err := rejectIfSymlink(path); err != nil {
+	file, info, err := openRegularFileForRead(path, "authorized_keys")
+	if err != nil {
 		return nil, err
 	}
-	// #nosec G304 -- path is <resolved home>/.ssh/authorized_keys for a validated
-	// login name; symlink-checked above, opened O_NOFOLLOW, and the descriptor's
-	// ownership is verified below.
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to open authorized_keys file: %w", err)
+	if file == nil {
+		return nil, nil // no file, so no keys: the normal case for a new account
 	}
 	defer func() { _ = file.Close() }()
 
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat the open authorized_keys file: %w", err)
-	}
 	if err := checkOwner("authorized_keys", path, info, account); err != nil {
 		return nil, err
 	}
-
-	data, err := io.ReadAll(file)
+	data, err := readAtMost(file, path, "authorized_keys", info.Size())
 	if err != nil {
-		return nil, fmt.Errorf("failed to read authorized_keys file: %w", err)
+		return nil, err
 	}
 	if len(data) == 0 {
 		return nil, nil
 	}
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n"), nil
+}
+
+// openRegularFileForRead opens a file the broker is about to read out of a directory
+// the target account controls, and returns it only if what was opened is a regular
+// file. A missing file yields (nil, nil, nil), because for authorized_keys and for a
+// backup that is an answer rather than a failure.
+//
+// (#205) Two things here, and the order of them is the point.
+//
+// O_NONBLOCK: the open used to be plain O_RDONLY|O_NOFOLLOW, and open(2) on a FIFO
+// opened for reading blocks until a writer appears. `rm ~/.ssh/authorized_keys &&
+// mkfifo ~/.ssh/authorized_keys` therefore parked the caller in the kernel forever —
+// measured on this host: an os.OpenFile with those exact flags on a FIFO had not
+// returned after two seconds, while the same open with O_NONBLOCK returned
+// immediately. That block happens inside withFileLock, so the per-user lock is held
+// for the duration, and it happens on the broker's single session-cleanup goroutine,
+// so no session expires and no key is revoked *for any account on the host* again,
+// and Stop() hangs on wg.Wait() until systemd's TimeoutStopSec fires. It is #161
+// reached through a different door: the lock is safe now, but the critical section
+// could still be blocked from inside it.
+//
+// The fstat is on the descriptor, not the path: rejectIfSymlink only tells us what
+// the name pointed at a moment ago, and it tests os.ModeSymlink alone, so a FIFO
+// passed it (confirmed: Lstat of a FIFO reports mode prw------- with ModeSymlink
+// clear and IsRegular false). Checking the mode of what was actually opened closes
+// the check-then-use gap rather than widening the check — whatever the name was
+// swapped for in between, this is the object the read will come from.
+func openRegularFileForRead(path, what string) (*os.File, os.FileInfo, error) {
+	if err := rejectIfSymlink(path); err != nil {
+		return nil, nil, err
+	}
+	// #nosec G304 -- path is <resolved home>/.ssh/<name> for a validated login name, or
+	// a file in the broker's own state directory; symlink-checked above, opened
+	// O_NOFOLLOW so the final component cannot be a link, O_NONBLOCK so a FIFO cannot
+	// wedge the open, and refused below unless the descriptor is a regular file.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("failed to open %s file: %w", what, err)
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("failed to stat the open %s file: %w", what, err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("refusing to read %s %q: it is not a regular file (mode %s)",
+			what, path, info.Mode())
+	}
+	return file, info, nil
+}
+
+// readAtMost reads a whole file that has already been shown to be a regular one,
+// refusing anything larger than maxAuthorizedKeysBytes (#206).
+//
+// The size is checked twice on purpose. The fstat size is what makes an absurd file
+// cheap to refuse — nothing is allocated for a 200 GB sparse file — but the file lives
+// in a directory the account can write, so it can grow between the fstat and the
+// read. The LimitReader is what bounds the allocation whatever the fstat said, and
+// reaching the limit is an error rather than a truncation: a key list silently missing
+// its tail would be written straight back out by the caller.
+func readAtMost(file *os.File, path, what string, size int64) ([]byte, error) {
+	if size > maxAuthorizedKeysBytes {
+		return nil, fmt.Errorf("refusing to read %s %q: it is %d bytes, and anything over %d "+
+			"is not a key list", what, path, size, maxAuthorizedKeysBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxAuthorizedKeysBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s file: %w", what, err)
+	}
+	if len(data) > maxAuthorizedKeysBytes {
+		return nil, fmt.Errorf("refusing to read %s %q: it grew past %d bytes while being read",
+			what, path, maxAuthorizedKeysBytes)
+	}
+	return data, nil
 }
 
 // writeAuthorizedKeysAtomic writes content to the authorized_keys file safely:
@@ -238,14 +374,29 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte, account Acco
 	if err := rejectIfSymlink(path); err != nil {
 		return err
 	}
-	tmpPath := filepath.Join(sshDir, fmt.Sprintf(".authorized_keys.tmp.%d", os.Getpid()))
-	_ = os.Remove(tmpPath) // clear any stale temp from a prior crash
-	// #nosec G304 -- tmpPath is under the validated .ssh dir and opened with
-	// O_EXCL|O_NOFOLLOW, so it cannot follow or clobber a pre-existing symlink.
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	handOver, err := targetShouldBeHandedToAccount(path, account)
+	if err != nil {
+		return err
+	}
+
+	// (#225) The temp file used to be named .authorized_keys.tmp.<pid>. The broker's
+	// pid is readable by any local user — /proc, ps, systemd's MainPID — and the
+	// directory belongs to the target account, so the account could pre-create that
+	// exact name as a directory, as a symlink, or as a file it holds, and every write
+	// through this function failed. The name is keyed on the broker's pid and nothing
+	// else, so the account obstructing it need not be the account being provisioned:
+	// one user could stop key provisioning for the whole host. Two brokers, or a pid
+	// recycled after a crash, collided on it by accident for the same reason.
+	//
+	// os.CreateTemp picks an unpredictable name and creates it O_EXCL, retrying on
+	// collision, so there is no name to pre-create and nothing to clobber: O_EXCL on
+	// an existing name — including a symlink, dangling or not — fails rather than
+	// following it.
+	tmp, err := os.CreateTemp(sshDir, ".authorized_keys.tmp.*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp authorized_keys: %w", err)
 	}
+	tmpPath := tmp.Name()
 	cleanup := func() { _ = os.Remove(tmpPath) }
 	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
@@ -253,13 +404,27 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte, account Acco
 		return fmt.Errorf("failed to write temp authorized_keys: %w", err)
 	}
 	// The handover goes through the still-open descriptor rather than through
-	// tmpPath (#203). The temp file sits in a directory the account can write, and
-	// its name was predictable, so a chown by name could be pointed at any file on
-	// the host. fchown(2) can only reach the file that was opened here.
-	if err := chownFileToAccount(tmp, account); err != nil {
+	// tmpPath (#203). The temp file sits in a directory the account can write, so a
+	// chown by name could be pointed at any file on the host. fchown(2) can only reach
+	// the file that was opened here.
+	if handOver {
+		if err := chownFileToAccount(tmp, account); err != nil {
+			_ = tmp.Close()
+			cleanup()
+			return err
+		}
+	}
+	// (#225) fsync before the rename. Without it, on ext4 with the default
+	// data=ordered, a host that loses power just after the rename can come back with
+	// the directory entry durable and the file's contents not — the documented outcome
+	// is a zero-length authorized_keys. Every provisioned key for that account is then
+	// gone, and nothing detects it, because the file exists and parses: the user simply
+	// cannot log in by the mechanism the broker is responsible for until their next
+	// successful login rewrites it.
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		cleanup()
-		return err
+		return fmt.Errorf("failed to flush temp authorized_keys to disk: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
@@ -269,7 +434,79 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte, account Acco
 		cleanup()
 		return fmt.Errorf("failed to replace authorized_keys: %w", err)
 	}
+	syncDir(sshDir)
 	return nil
+}
+
+// syncDir fsyncs a directory so that a rename into it survives a crash.
+//
+// (#225) The second half of the atomic-replace recipe: fsync on the file makes the
+// contents durable, fsync on the directory makes the *name* pointing at them durable.
+// Without it a crash can leave the account with the previous key list, which is at
+// least a consistent state, but the rename's durability is unspecified.
+//
+// A failure here is logged and not returned. The rename has already happened, so the
+// running system is correct and there is nothing to undo; reporting an error would
+// tell AddPublicKey's caller that provisioning failed when it had succeeded, and deny
+// a login over a durability warning. It is also not something a retry fixes.
+func syncDir(dir string) {
+	// #nosec G304 -- dir is the .ssh directory this write has already validated, opened
+	// O_NOFOLLOW|O_DIRECTORY so it cannot be redirected to anything else.
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		log.Warn().Err(err).Str("dir", dir).
+			Msg("Could not open the .ssh directory to flush it; the authorized_keys replacement " +
+				"may not survive a crash")
+		return
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		log.Warn().Err(err).Str("dir", dir).
+			Msg("Could not flush the .ssh directory; the authorized_keys replacement may not " +
+				"survive a crash")
+	}
+}
+
+// targetShouldBeHandedToAccount reports whether the replacement for path should be
+// given to the account, or left owned by the broker.
+//
+// (#228) chownFileToAccount used to run on every write, whoever owned the file before
+// it. A root-owned authorized_keys — a hardened deployment, an operator who wrote the
+// file with sudo, a configuration-management system that owns it — was therefore
+// handed to the unprivileged account by the broker's first write. Nothing looked
+// wrong afterwards: the contents were correct, and the only visible change was that
+// the user could now edit the list of keys that authorize them, which is exactly what
+// root ownership was there to prevent. sshd is content either way; StrictModes
+// accepts an authorized_keys owned by the target user or by root, provided it is not
+// group- or world-writable, and this function writes 0600.
+//
+// (#171 still holds for the other direction: a file the broker created in someone's
+// home must end up theirs, or they cannot manage their own keys.) So the rule is that
+// the broker hands over what it created and preserves what it found.
+//
+// The existing owner is read with Lstat rather than through a descriptor, and that is
+// sound here even though the directory is user-writable. The chown itself still goes
+// through the temp file's own descriptor, so a swapped name cannot redirect it; the
+// only thing a race can change is the *decision*, and both wrong answers are safe.
+// Deciding to keep root ownership when the file was in fact the user's leaves them a
+// root-owned key list they cannot edit — visible, and not a privilege gain. Deciding
+// to hand over when the file was in fact root-owned requires the attacker to have
+// replaced a root-owned authorized_keys with one of their own first, which means .ssh
+// was writable by them, which means root ownership of the file was not protecting
+// anything to begin with.
+func targetShouldBeHandedToAccount(path string, account Account) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil // the broker is creating it, so it is the broker's to give
+		}
+		return false, fmt.Errorf("failed to stat authorized_keys: %w", err)
+	}
+	uid, ok := statUID(info)
+	if !ok {
+		return false, fmt.Errorf("cannot determine the owner of authorized_keys %q", path)
+	}
+	return uid == account.UID, nil
 }
 
 // writeAuthorizedKeysLines renders the surviving lines back to authorized_keys,
@@ -310,6 +547,7 @@ const DefaultKeyLifetime = 24 * time.Hour
 type AuthorizedKeysManager struct {
 	lookupAccount AccountLookup
 	lockDir       string
+	backupDir     string
 	lockTimeout   time.Duration
 	keyLifetime   time.Duration
 }
@@ -331,9 +569,28 @@ func NewAuthorizedKeysManager(lockDir string) *AuthorizedKeysManager {
 	return &AuthorizedKeysManager{
 		lookupAccount: LookupAccount,
 		lockDir:       lockDir,
-		lockTimeout:   lockAcquireTimeout,
-		keyLifetime:   DefaultKeyLifetime,
+		// Backups live beside the locks, in the broker's own state directory, and never
+		// in the user's .ssh (#228). Derived from lockDir rather than hardcoded so that
+		// a manager pointed at a temporary state directory keeps everything there:
+		// production's /var/lib/oidc-pam/locks yields /var/lib/oidc-pam/backups.
+		backupDir:   filepath.Join(filepath.Dir(lockDir), "backups"),
+		lockTimeout: lockAcquireTimeout,
+		keyLifetime: DefaultKeyLifetime,
 	}
+}
+
+// SetBackupDir overrides where BackupAuthorizedKeys writes and RestoreAuthorizedKeys
+// reads. It must be a directory only the broker can write to — see BackupAuthorizedKeys
+// for why a backup in the user's own .ssh cannot be trusted as a restore source.
+func (akm *AuthorizedKeysManager) SetBackupDir(dir string) {
+	if dir != "" {
+		akm.backupDir = dir
+	}
+}
+
+// BackupPath returns the file BackupAuthorizedKeys writes for an account.
+func (akm *AuthorizedKeysManager) BackupPath(username string) string {
+	return filepath.Join(akm.backupDir, username+".authorized_keys")
 }
 
 // SetAccountLookup replaces the account database this manager resolves homes and
@@ -402,11 +659,52 @@ func (akm *AuthorizedKeysManager) userPaths(username string) (Account, string, s
 	return account, sshDir, filepath.Join(sshDir, "authorized_keys"), nil
 }
 
-// LockPath returns the lock file serializing writes to one user's
-// authorized_keys. The username is validated by every caller before use, so it
-// cannot contain a separator or traverse out of lockDir.
+// LockPath returns the lock file serializing writes to the authorized_keys file
+// this account's home directory resolves to.
+//
+// (#225) The lock used to be named after the account: <lockDir>/<username>.lock. Two
+// accounts can share a home directory — a deliberate configuration for a pair of
+// service identities, and also what an NSS or LDAP misconfiguration produces — and
+// two writers naming their locks after different accounts do not exclude each other
+// even though they are rewriting the same file. Both read, both write, the second
+// rename wins, and one account's key has silently vanished from a file that looks
+// perfectly well-formed. Keying the lock on the directory instead means anything
+// writing a given authorized_keys takes the same lock, whichever account it is for.
+//
+// The name is a hash because the thing being named is a path, which does not fit in a
+// filename and cannot be sanitized into one without making two different paths
+// collide. An operator can recover the mapping with
+// `printf %s /home/bob/.ssh | sha256sum` and comparing the first 32 characters.
+//
+// This is textual, not canonical: a path is not resolved through symlinks first.
+// Resolving would have to happen before .ssh exists, which is exactly when it cannot
+// be resolved, and a fallback that sometimes resolves and sometimes does not would
+// hand two writers of the same file two different lock names — the bug this fixes.
+// So two aliases of one directory (a symlinked component above .ssh) still take
+// different locks. userPaths refuses a symlinked home and checkSSHDir a symlinked
+// .ssh, so reaching that needs an operator to have aliased an intermediate directory,
+// and the atomic replace still leaves a consistent file; what can be lost is one
+// concurrent update.
 func (akm *AuthorizedKeysManager) LockPath(username string) string {
-	return filepath.Join(akm.lockDir, username+".lock")
+	account, err := akm.lookupAccount(username)
+	if err != nil {
+		// A name that does not resolve never reaches a write — userPaths fails first —
+		// so this value guards nothing. It is still distinct per name, so that a caller
+		// holding it cannot accidentally exclude an unrelated account.
+		return akm.lockPathForKey("unresolved-account\x00" + username)
+	}
+	return akm.lockPathForSSHDir(filepath.Join(account.Home, ".ssh"))
+}
+
+// lockPathForSSHDir is what the write paths actually lock on: the .ssh directory they
+// are about to write into. See LockPath.
+func (akm *AuthorizedKeysManager) lockPathForSSHDir(sshDir string) string {
+	return akm.lockPathForKey(filepath.Clean(sshDir))
+}
+
+func (akm *AuthorizedKeysManager) lockPathForKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(akm.lockDir, hex.EncodeToString(sum[:16])+".lock")
 }
 
 // SetLockTimeout overrides how long a write waits for the per-user lock before
@@ -466,7 +764,7 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 		return fmt.Errorf("public key is not a valid authorized_keys entry")
 	}
 
-	return withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+	return withFileLock(akm.lockPathForSSHDir(sshDir), akm.lockTimeout, func() error {
 		existing, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
 			return err
@@ -526,8 +824,14 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 		return false, err
 	}
 
-	// Check if .ssh directory exists; if not, nothing to remove
-	if _, statErr := os.Stat(sshDir); os.IsNotExist(statErr) {
+	// Validate .ssh rather than merely asking whether it exists (#204): os.Stat
+	// followed a symlinked .ssh, and this path then rewrote whatever it pointed at.
+	// An absent .ssh still means there is nothing to remove.
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return false, err
+	}
+	if !sshDirExists {
 		return false, nil
 	}
 
@@ -537,7 +841,7 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 	}
 
 	removed := false
-	err = withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+	err = withFileLock(akm.lockPathForSSHDir(sshDir), akm.lockTimeout, func() error {
 		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
 			return err
@@ -588,13 +892,26 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 // Without the distinction, one-live-key-per-user would make every revocation of a
 // superseded key look like a failed revocation.
 func (akm *AuthorizedKeysManager) KeyIsAuthorized(username string, publicKey []byte) (bool, error) {
-	account, _, authorizedKeysPath, err := akm.userPaths(username)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
 	if err != nil {
 		return false, err
 	}
 	target, ok := parseKeyEntry(string(publicKey))
 	if !ok {
 		return false, fmt.Errorf("public key is not a valid authorized_keys entry")
+	}
+
+	// (#204) This used not to look at .ssh at all, so a symlinked .ssh made it report
+	// on somebody else's key list — root's, if it was aimed at /root/.ssh, which
+	// checkOwner accepts. The answer feeds the broker's decision about whether a
+	// revocation that matched nothing is benign, so a wrong answer there is an alarm
+	// about the wrong account.
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return false, err
+	}
+	if !sshDirExists {
+		return false, nil
 	}
 
 	lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
@@ -623,8 +940,18 @@ func (akm *AuthorizedKeysManager) RemoveOIDCKeys(username string) (int, error) {
 		return 0, err
 	}
 
+	// An absent .ssh means there is nothing to reconcile; a symlinked one is refused
+	// rather than followed (#204).
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return 0, err
+	}
+	if !sshDirExists {
+		return 0, nil
+	}
+
 	removed := 0
-	err = withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+	err = withFileLock(akm.lockPathForSSHDir(sshDir), akm.lockTimeout, func() error {
 		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
 			return err
@@ -674,12 +1001,18 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 		return err
 	}
 
-	// Check if .ssh directory exists; if not, nothing to clean
-	if _, statErr := os.Stat(sshDir); os.IsNotExist(statErr) {
+	// Validate .ssh rather than merely asking whether it exists (#204). This is the
+	// path the broker's single cleanup goroutine walks for every account on the host,
+	// and os.Stat followed a symlinked .ssh straight into whatever it named.
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return err
+	}
+	if !sshDirExists {
 		return nil
 	}
 
-	return withFileLock(akm.LockPath(username), akm.lockTimeout, func() error {
+	return withFileLock(akm.lockPathForSSHDir(sshDir), akm.lockTimeout, func() error {
 		lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
 		if err != nil {
 			return err
@@ -744,9 +1077,20 @@ func (akm *AuthorizedKeysManager) entryHasExpired(line string, now time.Time) bo
 // authorized_keys entries this broker is responsible for, distinguished from the
 // user's own keys by the `@oidc-pam-<timestamp>` comment.
 func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error) {
-	account, _, authorizedKeysPath, err := akm.userPaths(username)
+	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
 	if err != nil {
 		return nil, err
+	}
+
+	// (#204) Also did not look at .ssh. An operator asking which entries the broker
+	// owns for an account must not be shown the contents of a key list the account
+	// merely symlinked to.
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return nil, err
+	}
+	if !sshDirExists {
+		return []string{}, nil
 	}
 
 	lines, err := readAuthorizedKeysLines(authorizedKeysPath, account)
@@ -767,21 +1111,35 @@ func (akm *AuthorizedKeysManager) ListOIDCKeys(username string) ([]string, error
 	return oidcKeys, nil
 }
 
-// BackupAuthorizedKeys creates a backup of the authorized_keys file.
+// BackupAuthorizedKeys creates a backup of the authorized_keys file, in the broker's
+// own state directory.
 //
 // Operator-facing recovery API, paired with RestoreAuthorizedKeys; the broker
 // does not call it during authentication. The key-management functions rewrite a
 // file the user also owns, so a copy taken before a manual intervention is worth
 // having.
+//
+// (#228) The backup used to be written to ~/.ssh/authorized_keys.backup and chowned
+// to the account, which made it useless as a recovery source and worse than useless
+// as a restore source. It was user-owned and user-writable, sitting in a directory
+// the user controls under a name they can predict, so the user could rewrite it and
+// then have the broker install its contents with root's privileges; and a backup of a
+// root-owned authorized_keys became user-owned by the act of backing it up. A copy
+// somebody can edit is not a backup of anything. It now lives in the broker's state
+// directory, mode 0700, and is never handed over.
 func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 	account, sshDir, authorizedKeysPath, err := akm.userPaths(username)
 	if err != nil {
 		return err
 	}
-	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
-
-	// Check if original file exists
-	if _, statErr := os.Stat(authorizedKeysPath); os.IsNotExist(statErr) {
+	sshDirExists, err := checkSSHDir(sshDir, account)
+	if err != nil {
+		return err
+	}
+	if !sshDirExists {
+		return nil // nothing to back up
+	}
+	if _, statErr := os.Lstat(authorizedKeysPath); os.IsNotExist(statErr) {
 		return nil // No file to backup
 	}
 
@@ -794,11 +1152,13 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 		data = []byte(strings.Join(lines, "\n") + "\n")
 	}
 
-	// Write the backup without following a planted symlink at the backup path.
-	if err := rejectIfSymlink(backupPath); err != nil {
+	if err := ensureBrokerOwnedDir("backup directory", akm.backupDir); err != nil {
 		return err
 	}
-	// #nosec G304 -- validated username path; symlink-checked above and opened O_NOFOLLOW.
+	backupPath := akm.BackupPath(username)
+	// #nosec G304 -- <backupDir>/<validated login name>.authorized_keys, in a directory
+	// ensureBrokerOwnedDir has just checked only this process can write; O_NOFOLLOW so
+	// that even there the final component cannot be a link.
 	bf, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
@@ -807,11 +1167,9 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 		_ = bf.Close()
 		return fmt.Errorf("failed to create backup: %w", err)
 	}
-	// The backup sits in the user's own .ssh, so it is theirs, not root's (#171) —
-	// handed over through the open descriptor, not by name (#203).
-	if err := chownFileToAccount(bf, account); err != nil {
+	if err := bf.Sync(); err != nil {
 		_ = bf.Close()
-		return err
+		return fmt.Errorf("failed to flush backup to disk: %w", err)
 	}
 	if err := bf.Close(); err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
@@ -837,20 +1195,24 @@ func (akm *AuthorizedKeysManager) RestoreAuthorizedKeys(username string) error {
 	if err != nil {
 		return err
 	}
-	backupPath := filepath.Join(sshDir, "authorized_keys.backup")
+	backupPath := akm.BackupPath(username)
 
-	// Check if backup exists
-	if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-		return fmt.Errorf("no backup file found")
-	}
-
-	// Copy backup to authorized_keys
-	if err := rejectIfSymlink(backupPath); err != nil {
+	// The backup is read the same way authorized_keys is: bounded, and only if the
+	// descriptor turns out to be a regular file. It is in the broker's own directory
+	// now (#228), so neither guard should ever fire — but this is the one path that
+	// writes a file's contents into an account's key list with root's privileges, and
+	// it is not the place to assume a directory is beyond reach.
+	bf, info, err := openRegularFileForRead(backupPath, "backup")
+	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(backupPath) // #nosec G304 -- resolved home, symlink-checked above
+	if bf == nil {
+		return fmt.Errorf("no backup file found at %s", backupPath)
+	}
+	data, err := readAtMost(bf, backupPath, "backup", info.Size())
+	_ = bf.Close()
 	if err != nil {
-		return fmt.Errorf("failed to read backup file: %w", err)
+		return err
 	}
 
 	if err := ensureSecureSSHDir(sshDir, account); err != nil {

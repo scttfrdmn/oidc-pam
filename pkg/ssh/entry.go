@@ -235,8 +235,8 @@ func splitOptions(options string) []string {
 	return out
 }
 
-// expiryTimespecLayout is the format the broker writes: sshd's YYYYMMDDHHMMSS, in
-// the host's own time zone, which is how sshd reads a timespec with no suffix.
+// expiryTimespecLayout is the format the broker writes: sshd's YYYYMMDDHHMMSS,
+// rendered at the host zone's standard-time offset (see standardTimeOffset).
 //
 // Not the UTC form. Suffixing the timespec with Z to mean UTC was added in OpenSSH
 // 9.1; every sshd before that parses a timespec by its length (8, 12 or 14 digits)
@@ -244,36 +244,127 @@ func splitOptions(options string) []string {
 // writing UTC would have limited this to Debian 12/Ubuntu 24.04-era hosts and
 // broken RHEL 8 and 9, Debian 11 and Ubuntu 20.04 and 22.04 — and broken them in
 // the way that is hardest to see, since the file looks correct and only sshd
-// disagrees. The two processes share a host and therefore a time zone, so the
-// local form is unambiguous in practice.
+// disagrees.
+//
+// Verified rather than assumed: misc.c at tag V_9_0_P1 switches on strlen(s) over
+// {8,12,14} and returns SSH_ERR_INVALID_FORMAT for anything else, while V_9_1_P1 is
+// the first tag that strips a trailing "Z"/"UTC" before that switch. So the plain
+// 14-digit form is the only one the supported range parses, and #226's proposed fix
+// — append "Z" — would deny every login on the majority of supported platforms.
 const expiryTimespecLayout = "20060102150405"
+
+// standardTimeOffset returns the UTC offset loc keeps when daylight saving is *not*
+// in effect around t. It is the offset sshd will use to read an unsuffixed timespec,
+// and it is not necessarily the offset in force at t.
+//
+// (#226) This is what the option's value has to be rendered at, and getting it wrong
+// is a revocation gap rather than cosmetic drift. sshd parses the timespec with
+// parse_absolute_time() (misc.c), which does:
+//
+//	memset(&tm, 0, sizeof(tm));
+//	strptime(buf, fmt, &tm);
+//	mktime(&tm);
+//
+// The memset leaves tm.tm_isdst == 0, and strptime does not set it. Zero means "DST
+// is not in effect" — not "work it out", which would be -1 — so mktime resolves the
+// wall clock at the zone's standard offset whatever time of year it is. Measured, on
+// both libcs that matter, for 2026-08-14 12:00:00 in America/New_York:
+//
+//	tm_isdst =  0  ->  2026-08-14 17:00 UTC   (i.e. 12:00 EST)
+//	tm_isdst = -1  ->  2026-08-14 16:00 UTC   (i.e. 12:00 EDT)
+//
+// identical on Darwin libc and on glibc 2.41 (Debian, python:3-slim), which settles
+// the question #226 left open. Rendering the expiry at the offset in force at t —
+// what this used to do — therefore made sshd honour a key for an hour longer than
+// the session it belonged to for the whole of the DST half of the year: the broker
+// expired the session, the audit trail said the access had ended, and the key still
+// authenticated. Rendering it at the standard offset makes the two agree exactly.
+//
+// A host in UTC, or in any zone with no DST rule, is unaffected either way: t is
+// never DST there, so this returns the offset at t and the output is unchanged.
+func standardTimeOffset(t time.Time, loc *time.Location) int {
+	local := t.In(loc)
+	if !local.IsDST() {
+		_, offset := local.Zone()
+		return offset
+	}
+	// Probe outward for the nearest instant in this zone that is not DST and take
+	// that period's offset. This is deliberately the same search glibc's mktime makes
+	// when the tm it is handed asks for an isdst it cannot satisfy locally, so the two
+	// arrive at the same offset. A day's granularity is enough: the shortest non-DST
+	// period in the tz database is about eight days (Africa/Tunis, 1943), and the
+	// shortest DST period about seven.
+	for days := 1; days <= 200; days++ {
+		for _, direction := range []int{-1, 1} {
+			if probe := local.AddDate(0, 0, direction*days); !probe.IsDST() {
+				_, offset := probe.Zone()
+				return offset
+			}
+		}
+	}
+	// A zone that is on DST all year round (Europe/Dublin's negative-DST encoding is
+	// the closest real case). Nothing better to say than the offset at t.
+	_, offset := local.Zone()
+	return offset
+}
 
 // parseExpiryTimespec reads any of the forms sshd(8) documents for a timespec:
 // YYYYMMDD or YYYYMMDDHHMM[SS], each optionally suffixed with Z for UTC and
-// otherwise in the host's own time zone.
+// otherwise at the host zone's standard-time offset.
 //
 // It reads more forms than formatExpiryTimespec writes on purpose. The sweep must
 // agree with sshd about when an entry stops working, and an entry it did not write
 // — an operator's own expiring key, or the Z form an sshd 9.1+ host accepts — is
 // still one whose expiry it should honour rather than guess at.
+//
+// (#226) Reading the unsuffixed form at the standard offset rather than "in local
+// time" is the other half of that agreement. Parsing with time.ParseInLocation and
+// time.Local resolves a summer wall clock as DST, which is precisely what sshd does
+// not do — so the sweep would have removed a key up to an hour before sshd stopped
+// honouring it, dropping users mid-session, and the round trip through
+// formatExpiryTimespec would not have been the identity.
 func parseExpiryTimespec(value string) (time.Time, bool) {
-	loc := time.Local
-	if strings.HasSuffix(value, "Z") || strings.HasSuffix(value, "z") {
+	return parseExpiryTimespecIn(value, time.Local)
+}
+
+// parseExpiryTimespecIn is parseExpiryTimespec against an explicit zone, so that the
+// DST behaviour can be tested on a host in any time zone.
+func parseExpiryTimespecIn(value string, loc *time.Location) (time.Time, bool) {
+	isUTC := strings.HasSuffix(value, "Z") || strings.HasSuffix(value, "z")
+	if isUTC {
 		value = value[:len(value)-1]
-		loc = time.UTC
 	}
 	for _, layout := range []string{"20060102150405", "200601021504", "20060102"} {
-		if parsed, err := time.ParseInLocation(layout, value, loc); err == nil {
-			return parsed, true
+		// Read the digits as a wall clock first, with no zone applied, then place it.
+		nominal, err := time.ParseInLocation(layout, value, time.UTC)
+		if err != nil {
+			continue
 		}
+		if isUTC {
+			return nominal, true
+		}
+		// Within an hour or so of a DST transition the standard offset derived from
+		// nominal can be the neighbouring period's, and mktime's own search has the
+		// same ambiguity from the other side. An hour of disagreement in the two hours
+		// a year a transition covers is not worth a second parse to chase.
+		offset := standardTimeOffset(nominal, loc)
+		return nominal.Add(-time.Duration(offset) * time.Second), true
 	}
 	return time.Time{}, false
 }
 
-// formatExpiryTimespec renders an expiry for sshd's expiry-time= option, in the
-// host's local time because that is what sshd reads an unsuffixed timespec as.
+// formatExpiryTimespec renders an expiry for sshd's expiry-time= option at the host
+// zone's standard-time offset, because that is how sshd reads an unsuffixed timespec
+// whatever the time of year (#226; see standardTimeOffset).
 func formatExpiryTimespec(t time.Time) string {
-	return t.Local().Format(expiryTimespecLayout)
+	return formatExpiryTimespecIn(t, time.Local)
+}
+
+// formatExpiryTimespecIn is formatExpiryTimespec against an explicit zone, so that
+// the DST behaviour can be tested on a host in any time zone.
+func formatExpiryTimespecIn(t time.Time, loc *time.Location) string {
+	offset := standardTimeOffset(t, loc)
+	return t.In(time.FixedZone("", offset)).Format(expiryTimespecLayout)
 }
 
 // brokerEntryLine renders the authorized_keys line the broker installs: the key

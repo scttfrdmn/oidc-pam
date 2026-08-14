@@ -57,11 +57,14 @@ func seedStaleKey(t *testing.T, baseDir, username string) string {
 	return path
 }
 
-// runWithin runs fn and returns its error, failing the test if fn has not
-// returned by limit. Without the guard a regression would hang the whole package
-// until `go test` times out ten minutes later with no indication of which call
-// blocked.
-func runWithin(t *testing.T, limit time.Duration, fn func() error) error {
+// runWithin runs fn and returns its error, failing the test if fn has not returned by
+// limit. `what` names what was being waited for, and should say what a timeout would
+// mean, because a call that blocks forever is the failure being tested for in more
+// than one place: on a held lock (#161) and on a FIFO in the user's .ssh (#205).
+//
+// Without the guard such a regression hangs the whole package until `go test` times
+// out ten minutes later, with a goroutine dump and no indication of which call blocked.
+func runWithin(t *testing.T, limit time.Duration, what string, fn func() error) error {
 	t.Helper()
 
 	done := make(chan error, 1)
@@ -70,7 +73,8 @@ func runWithin(t *testing.T, limit time.Duration, fn func() error) error {
 	case err := <-done:
 		return err
 	case <-time.After(limit):
-		t.Fatalf("call did not return within %s while the lock was held; it is blocking on the lock (#161)", limit)
+		t.Fatalf("%s did not return within %s: it is blocked in the kernel rather than "+
+			"failing, which is the defect itself and not a slow test", what, limit)
 		return nil
 	}
 }
@@ -85,7 +89,8 @@ func TestRemoveExpiredKeysGivesUpWhenTheLockIsHeld(t *testing.T) {
 	path := seedStaleKey(t, base, "alice")
 	holdLock(t, akm, "alice")
 
-	err := runWithin(t, 5*time.Second, func() error { return akm.RemoveExpiredKeys("alice") })
+	err := runWithin(t, 5*time.Second, "RemoveExpiredKeys while another writer held alice's lock (#161)",
+		func() error { return akm.RemoveExpiredKeys("alice") })
 	if !errors.Is(err, ErrLockUnavailable) {
 		t.Fatalf("expected ErrLockUnavailable, got %v", err)
 	}
@@ -112,7 +117,8 @@ func TestAddPublicKeyGivesUpWhenTheLockIsHeld(t *testing.T) {
 	holdLock(t, akm, "alice")
 
 	key := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINrqnRJYKhFTuTjCGAZ alice@oidc-pam")
-	err := runWithin(t, 5*time.Second, func() error { return akm.AddPublicKey("alice", key, testExpiry()) })
+	err := runWithin(t, 5*time.Second, "AddPublicKey while another writer held alice's lock (#161)",
+		func() error { return akm.AddPublicKey("alice", key, testExpiry()) })
 	if !errors.Is(err, ErrLockUnavailable) {
 		t.Fatalf("expected ErrLockUnavailable, got %v", err)
 	}
@@ -130,7 +136,8 @@ func TestOneUsersLockDoesNotBlockAnother(t *testing.T) {
 	seedStaleKey(t, base, "alice")
 	holdLock(t, akm, "alice")
 
-	if err := runWithin(t, 5*time.Second, func() error { return akm.RemoveExpiredKeys("bob") }); err != nil {
+	if err := runWithin(t, 5*time.Second, "RemoveExpiredKeys for bob while alice held her lock",
+		func() error { return akm.RemoveExpiredKeys("bob") }); err != nil {
 		t.Fatalf("RemoveExpiredKeys(bob): %v", err)
 	}
 
@@ -170,8 +177,49 @@ func TestTheLockIsNotInTheUsersHome(t *testing.T) {
 		}
 	}
 
-	if _, err := os.Stat(filepath.Join(lockDir, "alice.lock")); err != nil {
+	lockPath := akm.LockPath("alice")
+	if filepath.Dir(lockPath) != lockDir {
+		t.Fatalf("lock path %s is not in the broker's lock directory %s", lockPath, lockDir)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
 		t.Errorf("expected the lock in the broker's lock directory: %v", err)
+	}
+}
+
+// (#225) The lock has to name the file it protects, not the account that asked for
+// it. Two accounts sharing one home — a role account and its owner, or a pair of AD
+// principals mapped to one POSIX home, which is how service accounts are commonly
+// set up — write the *same* authorized_keys, so keying the lock on the username gave
+// them different lock files and no mutual exclusion at all. Each would read, modify
+// and rewrite the whole file, and whichever renamed last silently discarded the
+// other's key: a login that reported success and then could not authenticate.
+func TestTwoAccountsSharingAHomeShareALock(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "shared")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	akm := NewAuthorizedKeysManager(t.TempDir())
+	akm.SetAccountLookup(func(username string) (Account, error) {
+		// Both names resolve to one home, as a passwd database with two entries
+		// pointing at the same directory does.
+		return Account{Username: username, Home: home, UID: os.Geteuid(), GID: os.Getegid()}, nil
+	})
+	akm.SetLockTimeout(150 * time.Millisecond)
+
+	if alice, bob := akm.LockPath("alice"), akm.LockPath("bob"); alice != bob {
+		t.Errorf("alice and bob share %s but lock different files:\n  %s\n  %s", home, alice, bob)
+	}
+
+	holdLock(t, akm, "alice")
+
+	key := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINrqnRJYKhFTuTjCGAZ bob@oidc-pam")
+	err := runWithin(t, 5*time.Second, "AddPublicKey for bob while alice held the lock on their shared home (#225)",
+		func() error { return akm.AddPublicKey("bob", key, testExpiry()) })
+	if !errors.Is(err, ErrLockUnavailable) {
+		t.Fatalf("bob wrote %s while alice held the lock on it: expected ErrLockUnavailable, got %v",
+			filepath.Join(home, ".ssh", "authorized_keys"), err)
 	}
 }
 

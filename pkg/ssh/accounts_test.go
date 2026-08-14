@@ -61,6 +61,56 @@ exit 2
 	}
 }
 
+// (#229) Only GECOS can legitimately contain a colon, and an smbldap- or
+// AD-populated one routinely does ("Smith, Jane:Engineering" is the shape
+// smbldap-useradd writes, and AD's description attribute is copied verbatim). getent
+// prints what NSS handed it with no escaping, so such an entry splits into more than
+// seven fields and everything after GECOS shifts right.
+//
+// The field count check is `< 7`, so the line was *accepted* and index 5 held the tail
+// of the GECOS instead of the home directory. The broker then either wrote an
+// authorized_keys under a path named after a department, or — since a home that does
+// not exist is refused — denied the login with an error naming a directory no operator
+// had ever configured. Home and shell are therefore counted from the right, which is
+// unambiguous for any number of colons in GECOS and identical on a well-formed line.
+func TestAColonInTheGECOSDoesNotShiftTheHomeDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name, gecos string
+	}{
+		{name: "no colon", gecos: "Alice Example"},
+		{name: "one colon", gecos: "Smith, Jane:Engineering"},
+		{name: "several colons", gecos: "Jane:Engineering:Floor 3:x1234"},
+		{name: "empty", gecos: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubGetent(t, "echo 'alice:x:4242:4243:"+tc.gecos+":/home/ldap-domain/alice:/bin/bash'\nexit 0\n")
+
+			account, err := lookupViaGetent("alice")
+			if err != nil {
+				t.Fatalf("lookupViaGetent: %v", err)
+			}
+			if account.Home != "/home/ldap-domain/alice" {
+				t.Errorf("home = %q, want /home/ldap-domain/alice: a colon in the GECOS shifted "+
+					"the fields, so the broker would write a key list somewhere sshd never reads "+
+					"(or refuse the login over a home nobody configured)", account.Home)
+			}
+			if account.UID != 4242 || account.GID != 4243 {
+				t.Errorf("uid/gid = %d/%d, want 4242/4243", account.UID, account.GID)
+			}
+		})
+	}
+}
+
+// A line with genuinely too few fields is still a broken answer, not something to
+// index into from the right: with six fields, "the second from last" is the GECOS.
+func TestATruncatedPasswdLineIsRefused(t *testing.T) {
+	stubGetent(t, "echo 'alice:x:4242:4243:Alice:/home/alice'\nexit 0\n")
+
+	if account, err := lookupViaGetent("alice"); err == nil {
+		t.Fatalf("a six-field passwd line was accepted, giving home %q", account.Home)
+	}
+}
+
 // getent exits 2 for "key not found". That is an answer, and it has to be
 // distinguishable from a broken account database: one means "no such user", the
 // other means the broker cannot tell and must not guess.
