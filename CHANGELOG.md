@@ -102,6 +102,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/*.sh` may touch `common-auth` or `system-auth`; and every
   `configs/pam/<file>` a document or script names must exist, so a deleted stack
   cannot leave install instructions pointing at it.
+- **High (#170): none of the configuration files this project ships could be
+  loaded, and every security setting an operator wrote under a name the broker
+  does not read was discarded in silence.** viper's `Unmarshal` drops unknown
+  keys without a word, so `security.tls_verification.pin_certificates` — not the
+  name of any field; pinning is `pinned_certificates` and takes SHA-256
+  fingerprints, not a boolean — was accepted in six files and set to `true` in
+  three of them, including `broker-enterprise.yaml`, which
+  `CONFIGURATION-GUIDE.md` recommends as the production template. Everyone who
+  followed it believed certificate pinning was on and had nothing of the kind.
+  Worse were the files that could not start at all:
+  `configs/production/broker-cloud.yaml` used `${VAR:-default}` shell
+  interpolation that nothing expands, so sixteen of its values were the literal
+  string and it failed to parse; `broker-enterprise.yaml` named audit output
+  types (`remote_syslog`, `webhook`) that no constructor knows, which is a
+  `log.Fatal` before the broker listens — an audit sink silently absent on the
+  host that most wanted one. Both shipped for eleven releases.
+
+  - `LoadConfig` now decodes with `UnmarshalExact`: an unknown key is a startup
+    error naming its full path (`'security.tls_verification' has invalid keys:
+    pin_certificates`). A key the broker does not read is a setting that does
+    nothing, and a setting that does nothing must not look like protection.
+  - Because the shipped PAM stack has no password fallback (#160), a config that
+    loaded yesterday must not become an unbootable host:
+    `OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true` downgrades the error to a warning
+    naming the keys, for recovery only.
+  - `pin_certificates` corrected to `pinned_certificates` in all six files;
+    `broker-cloud.yaml` deleted (the `cloud:` subtree it existed for was never
+    read — `env:` and `file:` secret references are how secrets stay out of the
+    file); the inert `cloud:`, `ssh:`, `policy:`, `logging:`, `health:` and
+    `metrics:` blocks removed, with a note pointing at the settings that are
+    actually enforced. `security.encryption_key`, `oidc.timeout` and the
+    `monitoring:`/`network:` blocks are gone from QUICK-START.md and
+    DEPLOYMENT.md for the same reason, and the guide now documents the live
+    knobs no template showed (`server.metrics_addr`, `socket_group`,
+    `audit.overflow_strategy` and the rest).
+  - `security.ValidateAuditConfig` checks output types, paths and
+    `overflow_strategy` up front, so an unknown `overflow_strategy` no longer
+    degrades quietly to `drop`.
+
+  Coverage: `TestShippedConfigsLoad` puts every YAML under `configs/`, plus
+  `test/e2e/broker.yaml`, through `LoadConfig` → `Validate` → the audit check
+  the broker performs at startup, and `TestDocumentedConfigSnippetsLoad` holds
+  the YAML in README/QUICK-START/DEPLOYMENT/CONFIGURATION-GUIDE to the same
+  standard, since a wrong key in a document is a key somebody pastes into
+  `broker.yaml`. Proven against the defect: restoring the old files fails seven
+  of the config cases and five of the document cases, naming `cloud`, `logging`,
+  `policy`, `ssh`, `format` and `pin_certificates` by path.
 - **High (#168): the shipped PAM stacks logged every login's broker response to
   syslog, and a service with no PAM conversation crashed the login outright.** Five
   defects in the C module, grouped because they are one PR's worth of work.

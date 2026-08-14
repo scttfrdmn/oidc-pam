@@ -11,6 +11,7 @@ import (
 	"log/syslog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,13 @@ var auditDrainBudget = 5 * time.Second
 func NewAuditLogger(cfg config.AuditConfig) (*AuditLogger, error) {
 	if !cfg.Enabled {
 		return &AuditLogger{config: cfg}, nil
+	}
+
+	// (#170) Check every output before opening any of them, so a config naming
+	// an output type that does not exist reports all of them at once instead of
+	// failing on the first after the earlier ones are already on disk.
+	if err := ValidateAuditConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	var outputs []AuditOutput
@@ -373,19 +381,81 @@ func isCriticalEvent(event AuditEvent) bool {
 
 // Helper functions
 
+// auditOutputConstructors is the set of audit output types that exist. Both
+// createAuditOutput and ValidateAuditConfig read it, so what the broker accepts
+// and what a configuration check reports can never drift apart (#170).
+var auditOutputConstructors = map[string]func(config.AuditOutput) (AuditOutput, error){
+	"file":   func(c config.AuditOutput) (AuditOutput, error) { return NewFileAuditOutput(c) },
+	"stdout": func(c config.AuditOutput) (AuditOutput, error) { return NewStdoutAuditOutput(c) },
+	"syslog": func(c config.AuditOutput) (AuditOutput, error) { return NewSyslogAuditOutput(c) },
+	"http":   func(c config.AuditOutput) (AuditOutput, error) { return NewHTTPAuditOutput(c) },
+}
+
 func createAuditOutput(config config.AuditOutput) (AuditOutput, error) {
-	switch config.Type {
-	case "file":
-		return NewFileAuditOutput(config)
-	case "stdout":
-		return NewStdoutAuditOutput(config)
-	case "syslog":
-		return NewSyslogAuditOutput(config)
-	case "http":
-		return NewHTTPAuditOutput(config)
-	default:
-		return nil, fmt.Errorf("unsupported audit output type: %s", config.Type)
+	newOutput, ok := auditOutputConstructors[config.Type]
+	if !ok {
+		return nil, fmt.Errorf("unsupported audit output type %q (supported: %s)", config.Type, SupportedAuditOutputTypes())
 	}
+	return newOutput(config)
+}
+
+// SupportedAuditOutputTypes lists the values audit.outputs[].type accepts,
+// sorted, for use in error messages and documentation.
+func SupportedAuditOutputTypes() string {
+	types := make([]string, 0, len(auditOutputConstructors))
+	for t := range auditOutputConstructors {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return strings.Join(types, ", ")
+}
+
+// ValidateAuditConfig reports everything wrong with an audit configuration
+// without opening a file, connecting to syslog or reaching the network, so a
+// configuration can be checked by a test running as an ordinary user (#170).
+//
+// configs/production/broker-enterprise.yaml — recommended as a template by
+// CONFIGURATION-GUIDE.md — named the output types "remote_syslog" and "webhook",
+// neither of which exists. createAuditOutput's error reaches log.Fatal in
+// cmd/broker, so that file was fatal at startup for as long as it has shipped.
+func ValidateAuditConfig(cfg config.AuditConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	var problems []string
+	for i, out := range cfg.Outputs {
+		if _, ok := auditOutputConstructors[out.Type]; !ok {
+			problems = append(problems, fmt.Sprintf("audit.outputs[%d]: unsupported type %q (supported: %s)",
+				i, out.Type, SupportedAuditOutputTypes()))
+			continue
+		}
+		switch out.Type {
+		case "file":
+			if out.Path == "" {
+				problems = append(problems, fmt.Sprintf("audit.outputs[%d] (file): path is required", i))
+			}
+		case "http":
+			if out.URL == "" {
+				problems = append(problems, fmt.Sprintf("audit.outputs[%d] (http): url is required", i))
+			}
+		}
+	}
+
+	// An unrecognised strategy falls through to "drop" in writeAuditEvent, which
+	// discards records under load — the one behaviour an operator has to opt into
+	// explicitly. A typo must not choose it.
+	switch cfg.OverflowStrategy {
+	case "", "block", "sync", "drop":
+	default:
+		problems = append(problems, fmt.Sprintf("audit.overflow_strategy %q is not one of block, sync, drop",
+			cfg.OverflowStrategy))
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid audit configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func generateEventID() string {
