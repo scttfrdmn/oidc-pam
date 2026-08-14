@@ -280,6 +280,35 @@ jobs:
       - name: Check the installer PAM wiring
         run: ./test/scripts/test-pam-wiring.sh
 
+      # #208 was pam_oidc.so being copied into /lib/security, a directory that
+      # exists on no distribution this project supports; #241 was two unreferenced
+      # build scripts that went on emitting an installer doing exactly that, long
+      # after the shipped installer stopped. Those scripts are deleted, so this
+      # check passes trivially today — it is here so the next copy of that line is a
+      # build failure rather than something an operator discovers when a host stops
+      # accepting logins.
+      #
+      # It fires only where something *writes* to the path — a copy, a mode change,
+      # a mkdir, a redirect — or assigns it to a variable, and it sees inside a
+      # heredoc because that is where both emitted installers hid it. Naming the
+      # path in prose stays allowed: install-release.sh and install.sh explain why
+      # it is wrong, uninstall.sh sweeps a stale module out of it, and a check that
+      # forbade the explanation would get the explanation deleted instead of the
+      # defect.
+      - name: Check no script hardcodes /lib/security as the PAM module path
+        run: |
+          hardcoded=$(grep -rnE \
+            -e '^[[:space:]]*(sudo[[:space:]]+)?(cp|mv|ln|install|rsync|chmod|chown|mkdir)([[:space:]]|$).*/lib/security' \
+            -e '>[[:space:]]*"?/lib/security' \
+            -e "^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[\"']?/lib/security" \
+            scripts/ || true)
+          if [ -n "$hardcoded" ]; then
+            echo "::error::/lib/security is hardcoded as a write target in scripts/. PAM's module directory differs per distribution (#208, #241) — resolve it at runtime, as install-release.sh's resolve_pam_dir() does:"
+            echo "$hardcoded"
+            exit 1
+          fi
+          echo "No script writes to a hardcoded /lib/security."
+
       - name: Shellcheck the install scripts
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
