@@ -84,13 +84,17 @@ oidc:
       client_secret: "your-client-secret"
       scopes: ["openid", "email", "profile", "groups"]
 
-logging:
-  level: "info"
-  audit_level: "detailed"
-  
+server:
+  log_level: "info"
+
 security:
-  encryption_key: "your-32-character-encryption-key"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
 ```
+
+The broker refuses to start on a key it does not read, naming the key and its
+path, so a typo or a setting from an older guide cannot sit in the file doing
+nothing.
 
 ### 3. Start OIDC Broker
 
@@ -130,23 +134,29 @@ oidc:
       client_id: "your-client-id"
       client_secret: "your-client-secret"
       scopes: ["openid", "email", "profile", "groups"]
-      device_flow_enabled: true
 
 authentication:
+  token_lifetime: "8h"
   policies:
+    # "default" applies to every host; any other name must match this host's
+    # name. See configs/CONFIGURATION-GUIDE.md, "Authentication Policies".
     default:
       require_groups: ["users"]
-      session_duration: "8h"
+      max_session_duration: "8h"
       audit_level: "standard"
 
-logging:
-  level: "info"
-  audit_level: "detailed"
-  audit_file: "/var/log/oidc-auth/audit.log"
+server:
+  log_level: "info"
 
 security:
-  encryption_key: "generate-a-32-character-key-here"
-  token_cache_duration: "1h"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
+
+audit:
+  enabled: true
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
 ```
 
 ### 2. PAM Configuration
@@ -262,12 +272,8 @@ sudo oidc-auth-broker --config /etc/oidc-auth/broker.yaml --validate
 
 #### 2. Authentication Fails
 ```bash
-# Enable debug mode
-# Edit /etc/oidc-auth/broker.yaml
-logging:
-  level: "debug"
-
-# Restart broker
+# Enable debug mode: set server.log_level to "debug" in
+# /etc/oidc-auth/broker.yaml, then restart the broker
 sudo systemctl restart oidc-auth-broker
 
 # Check detailed logs
@@ -303,10 +309,14 @@ openssl s_client -connect your-oidc-provider.com:443
 Enable debug logging in `/etc/oidc-auth/broker.yaml`:
 
 ```yaml
-logging:
-  level: "debug"
-  audit_level: "detailed"
-  audit_file: "/var/log/oidc-auth/audit.log"
+server:
+  log_level: "debug"
+
+audit:
+  enabled: true
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
 ```
 
 Add debug to PAM configuration:

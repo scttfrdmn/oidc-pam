@@ -99,8 +99,11 @@ security:
   
   # TLS verification
   tls_verification:
-    pin_certificates: false
     skip_tls_verify: false  # Set to true only for development
+    # SHA-256 fingerprints that must appear in the provider's TLS chain; empty
+    # means the system trust store decides. (#170) This was `pin_certificates`,
+    # a key the broker does not read, so pinning was off wherever it was set.
+    pinned_certificates: []
   
   # Rate limiting. max_requests_per_minute is the budget for *starting* an
   # authentication, per requested account — not a host-wide total, so traffic for

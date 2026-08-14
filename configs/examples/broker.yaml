@@ -142,9 +142,14 @@ security:
   
   # TLS verification
   tls_verification:
-    pin_certificates: false
     skip_tls_verify: false
-    
+    # SHA-256 fingerprints that must appear in the provider's TLS chain. Empty
+    # means the system trust store decides. (#170) This was `pin_certificates`,
+    # which is not a setting the broker reads — a list of fingerprints, not a
+    # boolean, and a wrong one refuses every connection to the provider.
+    pinned_certificates: []
+    # trusted_ca_bundle: "/etc/ssl/certs/company-ca.pem"  # replaces the system store
+
   # Rate limiting. max_requests_per_minute is the budget for *starting* an
   # authentication, per requested account — not a host-wide total, so traffic for
   # one account cannot deny logins to another. check_session polls are charged
@@ -154,21 +159,10 @@ security:
     max_requests_per_minute: 60
     max_concurrent_auths: 10
 
-# Cloud integration (optional)
-cloud:
-  provider: "aws"  # aws, azure, gcp, or leave empty to disable
-  auto_discovery: true
-  metadata_sources: ["aws", "azure", "gcp"]
-  
-  # AWS configuration
-  aws:
-    region: "us-west-2"
-    parameter_store:
-      prefix: "/company/oidc/"
-      parameters:
-        provider_url: "provider"
-        client_id: "client-id"
-        scopes: "scopes"
+# Secrets from outside the file: a client_secret or token_encryption_key written
+# as "env:VAR_NAME" or "file:/path/to/secret" is resolved at startup. (#170) The
+# cloud: section that used to sit here — provider, auto_discovery, Parameter
+# Store, Key Vault, Secret Manager — had no readers anywhere in the broker.
 
 # Audit configuration
 audit:

@@ -673,15 +673,19 @@ func TestResourcePolicyMatchesTheResourceNotTheClient(t *testing.T) {
 // nothing, resolved no required groups, and admitted every identity the IdP would
 // authenticate.
 func TestQuickStartConfigEnforcesItsRequiredGroups(t *testing.T) {
-	// Verbatim from QUICK-START.md:131-138 — the authentication block a new
+	// Verbatim from QUICK-START.md:138-146 — the authentication block a new
 	// operator is told to write. If this literal changes in the docs, change it
 	// here too, and expect this test to tell you if it stopped enforcing anything.
+	// (#170) It said `session_duration`, which is not a field of a policy; the
+	// loader dropped it in silence then and refuses it now, so the doc says
+	// max_session_duration.
 	const quickStartAuth = `
 authentication:
+  token_lifetime: "8h"
   policies:
     default:
       require_groups: ["users"]
-      session_duration: "8h"
+      max_session_duration: "8h"
       audit_level: "standard"
 `
 	configPath := filepath.Join(t.TempDir(), "broker.yaml")

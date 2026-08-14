@@ -11,13 +11,16 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Config represents the complete configuration for the OIDC PAM broker
+// Config represents the complete configuration for the OIDC PAM broker.
+//
+// Every key a configuration file may contain is a field below: the loader
+// refuses keys it does not read (see unmarshalStrict, #170), so adding a
+// section to a shipped config means adding it here too.
 type Config struct {
 	Server         ServerConfig         `mapstructure:"server"`
 	OIDC           OIDCConfig           `mapstructure:"oidc"`
 	Authentication AuthenticationConfig `mapstructure:"authentication"`
 	Security       SecurityConfig       `mapstructure:"security"`
-	Cloud          CloudConfig          `mapstructure:"cloud"`
 	Audit          AuditConfig          `mapstructure:"audit"`
 }
 
@@ -291,50 +294,12 @@ type RateLimiting struct {
 	MaxConcurrentAuths int `mapstructure:"max_concurrent_auths"`
 }
 
-// CloudConfig contains cloud provider integration settings
-type CloudConfig struct {
-	Provider        string      `mapstructure:"provider"`
-	AutoDiscovery   bool        `mapstructure:"auto_discovery"`
-	Sources         []string    `mapstructure:"sources"`
-	AWS             AWSConfig   `mapstructure:"aws"`
-	Azure           AzureConfig `mapstructure:"azure"`
-	GCP             GCPConfig   `mapstructure:"gcp"`
-	MetadataSources []string    `mapstructure:"metadata_sources"`
-}
-
-// AWSConfig contains AWS-specific configuration
-type AWSConfig struct {
-	Region         string                  `mapstructure:"region"`
-	ParameterStore AWSParameterStoreConfig `mapstructure:"parameter_store"`
-}
-
-// AWSParameterStoreConfig contains AWS Parameter Store settings
-type AWSParameterStoreConfig struct {
-	Prefix     string            `mapstructure:"prefix"`
-	Parameters map[string]string `mapstructure:"parameters"`
-}
-
-// AzureConfig contains Azure-specific configuration
-type AzureConfig struct {
-	KeyVault AzureKeyVaultConfig `mapstructure:"key_vault"`
-}
-
-// AzureKeyVaultConfig contains Azure Key Vault settings
-type AzureKeyVaultConfig struct {
-	VaultName string            `mapstructure:"vault_name"`
-	Secrets   map[string]string `mapstructure:"secrets"`
-}
-
-// GCPConfig contains GCP-specific configuration
-type GCPConfig struct {
-	ProjectID     string                 `mapstructure:"project_id"`
-	SecretManager GCPSecretManagerConfig `mapstructure:"secret_manager"`
-}
-
-// GCPSecretManagerConfig contains GCP Secret Manager settings
-type GCPSecretManagerConfig struct {
-	Secrets map[string]string `mapstructure:"secrets"`
-}
+// (#170) The cloud: section — provider, auto_discovery, AWS Parameter Store,
+// Azure Key Vault, GCP Secret Manager — was deleted rather than implemented.
+// Nothing in the repository ever read a field of it, there is no cloud SDK in
+// go.mod, and it appeared in the shipped configs as though secrets could be
+// fetched from a parameter store. Use the "env:" and "file:" secret prefixes
+// (resolveSecretValue) with whatever your platform already injects.
 
 // AuditConfig contains audit logging configuration
 type AuditConfig struct {
@@ -402,8 +367,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	var config Config
-	if err := v.Unmarshal(&config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	if err := unmarshalStrict(v, &config); err != nil {
+		return nil, err
 	}
 
 	if err := resolveSecretReferences(&config); err != nil {
@@ -415,6 +380,47 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// AllowUnknownKeysEnv names the environment variable that turns the unknown-key
+// error below into a warning.
+const AllowUnknownKeysEnv = "OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS"
+
+// unmarshalStrict decodes the configuration and refuses any key no field reads.
+//
+// (#170) The loader used viper.Unmarshal, so every unrecognised key at every
+// depth was discarded without a word. That is not a tidiness problem: the keys
+// operators had actually written included `pin_certificates` (the field is
+// `pinned_certificates`), so certificate pinning was off in every configuration
+// that switched it on, and whole `policy:` and `ssh:` blocks that read as the
+// access-control rules of the system were inert. A key that turns a security
+// check off has to be louder than the check being off, and startup is the only
+// moment anybody is looking.
+//
+// The escape hatch exists because refusing to start is not free: the shipped PAM
+// stack has no password fallback (#160), so a broker that will not load is a
+// host nobody can log into. An operator who meets this on upgrade can set
+// OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true in the unit, get the same list of
+// keys as a warning, and clean the file up without being locked out first. It
+// cannot weaken a setting the broker does read.
+func unmarshalStrict(v *viper.Viper, config *Config) error {
+	err := v.UnmarshalExact(config)
+	if err == nil {
+		return nil
+	}
+
+	if strings.ToLower(os.Getenv(AllowUnknownKeysEnv)) == "true" {
+		log.Printf("WARNING: configuration contains keys the broker does not read; they have NO effect: %v "+
+			"(continuing because %s=true)", err, AllowUnknownKeysEnv)
+		// UnmarshalExact aborts part-way through, so decode again permissively.
+		if err := v.Unmarshal(config); err != nil {
+			return fmt.Errorf("failed to unmarshal config: %w", err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to unmarshal config: %w (a key the broker does not read is a setting that does "+
+		"nothing — remove it, or set %s=true to start anyway)", err, AllowUnknownKeysEnv)
 }
 
 // loadFromEnvironment loads configuration from environment variables
@@ -493,10 +499,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.require_auth_time", false)
 	v.SetDefault("security.max_token_age", "24h")
 	v.SetDefault("security.clock_skew_tolerance", "5m")
-
-	// Cloud defaults
-	v.SetDefault("cloud.auto_discovery", true)
-	v.SetDefault("cloud.metadata_sources", []string{"aws", "azure", "gcp"})
 
 	// Audit defaults
 	v.SetDefault("audit.enabled", true)
@@ -663,10 +665,6 @@ func bindSafeEnvironmentVariables(v *viper.Viper) {
 		"authentication.token_lifetime",
 		"authentication.refresh_threshold",
 		"authentication.max_concurrent_sessions",
-
-		// Cloud settings (safe)
-		"cloud.provider",
-		"cloud.auto_discovery",
 
 		// Audit settings (safe)
 		"audit.format",

@@ -265,15 +265,9 @@ oidc:
     - name: "production"
       issuer: "https://your-oidc-provider.com"
       client_id: "your-production-client-id"
-      client_secret: "your-production-client-secret"
+      # A literal, or "env:VAR_NAME", or "file:/path/to/secret"
+      client_secret: "file:/etc/oidc-auth/client-secret"
       scopes: ["openid", "email", "profile", "groups"]
-      device_flow_enabled: true
-      discovery_cache_duration: "1h"
-      
-  # Connection settings
-  timeout: "30s"
-  retry_count: 3
-  retry_delay: "5s"
 
 # Authentication policies
 #
@@ -307,44 +301,38 @@ authentication:
 
 # Security settings
 security:
-  encryption_key: "your-32-character-encryption-key-here"
-  token_cache_duration: "1h"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "file:/etc/oidc-auth/token-encryption-key"
   max_token_age: "24h"
-  secure_cookies: true
-  csrf_protection: true
-  
-# Network settings
-network:
-  bind_address: "127.0.0.1"
-  port: 8080
-  tls_enabled: false  # Use reverse proxy for TLS
-  cors_enabled: false
-  
-# Logging configuration
-logging:
-  level: "info"
-  format: "json"
-  output: "/var/log/oidc-auth/broker.log"
-  max_size: "100MB"
-  max_backups: 10
-  max_age: 30
-  
-  # Audit logging
-  audit_enabled: true
-  audit_level: "standard"
-  audit_file: "/var/log/oidc-auth/audit.log"
-  audit_max_size: "500MB"
-  audit_max_backups: 20
-  audit_max_age: 90
+  clock_skew_tolerance: "5m"
+  rate_limiting:
+    max_requests_per_minute: 60   # per requested account, not host-wide
+    max_concurrent_auths: 10
 
-# Monitoring settings
-monitoring:
+# Server: the broker listens on a Unix socket, not a TCP port. There is no
+# bind address and no HTTP API; metrics are the one optional TCP listener.
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"   # Prometheus /metrics; empty disables it
+
+# Audit trail
+audit:
   enabled: true
-  metrics_port: 9090
-  health_check_enabled: true
-  health_check_path: "/health"
-  ready_check_path: "/ready"
+  format: "json"
+  overflow_strategy: "block"       # block | sync | drop — see below
+  outputs:
+    - type: "file"                 # file | stdout | syslog | http
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
 ```
+
+Every key a configuration file may contain is a field of `config.Config`. Since
+#170 the broker refuses to start on a key it does not read and names the key's
+full path, so nothing in the file can be a setting that does nothing. If an
+upgrade rejects a file you cannot edit immediately, setting
+`OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true` in the unit downgrades the refusal to
+a warning that lists the keys.
 
 ### 3. PAM Configuration
 
@@ -646,6 +634,11 @@ server {
 ### 2. Monitoring Setup
 
 #### Prometheus Configuration
+
+The broker serves `/metrics` only when `server.metrics_addr` is set; there is no
+default and no listener otherwise. Bind it to a loopback or management address —
+the endpoint has no authentication.
+
 ```yaml
 # /etc/prometheus/prometheus.yml
 global:
@@ -970,10 +963,8 @@ sudo tail -f /var/log/oidc-auth/broker.log
 # Check PAM logs
 sudo tail -f /var/log/auth.log
 
-# Enable debug mode
-# Edit /etc/oidc-auth/broker.yaml
-logging:
-  level: "debug"
+# Enable debug mode: set server.log_level to "debug" in
+# /etc/oidc-auth/broker.yaml, then restart the broker
 ```
 
 #### 3. Performance Issues
