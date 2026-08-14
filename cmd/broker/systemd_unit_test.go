@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,16 @@ func TestShippedUnitLetsTheBrokerWriteWhereItMust(t *testing.T) {
 			t.Errorf("ReadWritePaths=%q does not include %s, which ProtectSystem=strict then "+
 				"makes read-only to the broker", readWrite, required)
 		}
+	}
+
+	// /home must be listed as optional. systemd fails the unit's namespace setup
+	// when a ReadWritePaths entry does not exist, and the host whose homes are on
+	// /export/home — the one the comment above ReadWritePaths tells to add its own
+	// path — is exactly the host with no /home at all. Without the prefix, that host
+	// gets a broker that will not start, which is worse than the outage being fixed.
+	if !hasOptionalPath(readWrite, "/home") {
+		t.Errorf("ReadWritePaths=%q lists /home without the \"-\" prefix, so systemd fails "+
+			"the unit on a host that keeps homes elsewhere and has no /home", readWrite)
 	}
 
 	// The state directory has to exist before the first start; systemd creating it
@@ -95,4 +106,11 @@ func hasPath(list, path string) bool {
 		}
 	}
 	return false
+}
+
+// hasOptionalPath reports whether the list contains path with systemd's "-"
+// prefix, which makes a path that does not exist non-fatal instead of a
+// unit-starting failure.
+func hasOptionalPath(list, path string) bool {
+	return slices.Contains(strings.Fields(list), "-"+path)
 }

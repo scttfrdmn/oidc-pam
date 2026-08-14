@@ -46,11 +46,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     handed to the account.
   - A login installs exactly one broker key: every previous `@oidc-pam-` entry is
     dropped as it is written, and the account's own keys are left alone. The entry
-    carries `expiry-time="…Z"`, so **sshd** enforces the key's lifetime whether or
+    carries `expiry-time="…"`, so **sshd** enforces the key's lifetime whether or
     not the broker is running or remembers the session. Both the key store and the
     `authorized_keys` sweep now use the configured `token_lifetime`; both used to be
     hardcoded to 24 hours, so a site that had deliberately set `token_lifetime: 1h`
     still handed out keys good for a day.
+  - **That option makes OpenSSH 7.7 or newer a requirement**, and it is now stated
+    where an operator will see it: DEPLOYMENT.md's prerequisites, and README.md's
+    platform table, which gains an OpenSSH column and marks Amazon Linux 2 and
+    RHEL/CentOS 7 (both `7.4p1`) unsupported rather than "expected to work". sshd
+    refuses an entire authorized_keys entry that carries an option it does not
+    recognise, so on an older host every key the broker installs is rejected — the
+    same "authenticated, then `Permission denied (publickey)`" outcome, reached a
+    different way. The timespec is written in the host's own time zone, not UTC: the
+    `Z` suffix meaning UTC is OpenSSH 9.1 and newer, and every sshd before that
+    rejects the entry carrying it, which would have limited this to Debian 12-era
+    hosts while breaking RHEL 8 and 9, Debian 11 and Ubuntu 20.04 and 22.04. The
+    broker does not detect the local sshd version; whether it should, refuse to
+    start, or make the option configurable is #199.
   - Startup revokes what the previous run left behind. The key store survives a
     restart even though sessions do not, so anything in it at startup belongs to no
     live session and its `authorized_keys` entry is removed.
@@ -64,10 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (#165), and firing it for the ordinary two-logins case would have trained
     operators to ignore it.
   - `configs/systemd/oidc-auth-broker.service` sets `ProtectHome=false`, lists
-    `/home` in `ReadWritePaths` (`ProtectSystem=strict` otherwise makes it
+    `-/home` in `ReadWritePaths` (`ProtectSystem=strict` otherwise makes it
     read-only) and declares `StateDirectory=oidc-pam`; `scripts/install-release.sh`
     creates `/var/lib/oidc-pam/{ssh-keys,locks}` at 0700, and DEPLOYMENT.md's unit
-    matches the shipped one.
+    matches the shipped one. The `-` prefix is load-bearing: systemd fails a unit
+    whose `ReadWritePaths` names a path that does not exist, and the site told to add
+    its own home path — `/export/home` and the like — is exactly the site with no
+    `/home`, which would have got a broker that refuses to start.
 
   Coverage: `pkg/ssh` tests that a key is written to the home the account database
   gives and that nothing is created at `/home/<user>`, that a missing home is
@@ -79,9 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pkg/auth` tests that a login whose key cannot be installed is denied and audited,
   that startup revokes a previous run's keys through `Start` itself, that
   `token_lifetime` reaches the key manager, and that a superseded revocation is not
-  reported as incomplete; `cmd/broker` pins the unit's `ProtectHome`,
-  `ReadWritePaths` and `StateDirectory`; and two e2e cases cover a second login
-  replacing the first key and a broker restart sweeping the keys it had issued.
+  reported as incomplete; `pkg/ssh/docs_test.go` fails if DEPLOYMENT.md or README.md
+  stops stating the minimum OpenSSH version, or if the timespec written is anything
+  other than the form an older sshd parses; `cmd/broker` pins the unit's
+  `ProtectHome`, its optional `-/home` and `StateDirectory`; and two e2e cases cover
+  a second login replacing the first key and a broker restart sweeping the keys it
+  had issued.
 - **Medium (#188): stopping the audit logger discarded every record still
   queued, and a second `Stop` panicked.** `processEvents` selected on its stop
   channel and returned without looking at the buffer, so the events sitting in

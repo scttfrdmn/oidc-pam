@@ -243,9 +243,13 @@ func TestInstalledEntryCarriesTheExpirySSHDEnforces(t *testing.T) {
 		t.Fatalf("AddPublicKey: %v", err)
 	}
 
+	// The timespec is the host-local form, which is what every sshd that knows the
+	// option accepts; TestTheExpiryTimespecIsTheFormEverySupportedSSHDParses covers
+	// why it is not the UTC one.
 	content := readKeys(t, baseDir, "testuser")
-	if !strings.Contains(content, `expiry-time="20310304050607Z"`) {
-		t.Errorf(`authorized_keys does not carry expiry-time="20310304050607Z"; file is %q`, content)
+	want := fmt.Sprintf(`expiry-time=%q`, expiresAt.Local().Format("20060102150405"))
+	if !strings.Contains(content, want) {
+		t.Errorf("authorized_keys does not carry %s; file is %q", want, content)
 	}
 
 	// And the option must be read back as the expiry it states, or the sweep cannot

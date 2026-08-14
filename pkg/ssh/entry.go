@@ -31,9 +31,23 @@ const oidcMarker = "@oidc-pam-"
 // instead of leaving a comment line per login behind.
 const brokerCommentPrefix = "# Added by OIDC PAM on"
 
-// expiryTimeOption is sshd's per-key expiry option (OpenSSH 8.2+, sshd(8)
-// AUTHORIZED_KEYS FILE FORMAT). sshd refuses the key after the time given.
+// expiryTimeOption is sshd's per-key expiry option (sshd(8), AUTHORIZED_KEYS FILE
+// FORMAT). sshd refuses the key after the time given.
+//
+// It needs OpenSSH minOpenSSHVersion or newer. An sshd that does not recognise an
+// option refuses the entry carrying it, so on anything older every key the broker
+// installs is rejected and the account is authenticated and then cannot log in —
+// the failure #171 is about, reached by a different route.
 const expiryTimeOption = "expiry-time"
+
+// minOpenSSHVersion is the oldest sshd that understands what this package writes.
+// OpenSSH 7.7 added expiry-time= for authorized_keys, and the timespec written
+// below is deliberately the form 7.7 accepts.
+//
+// It is a constant here so pkg/ssh/docs_test.go can hold DEPLOYMENT.md and
+// README.md to the same number: a version requirement only this file knows about
+// is one an operator discovers from a login that does not work.
+const minOpenSSHVersion = "7.7"
 
 // keyEntry is one authorized_keys entry split into the parts that matter:
 //
@@ -221,14 +235,27 @@ func splitOptions(options string) []string {
 	return out
 }
 
-// expiryTimespecLayout is the format the broker writes: sshd's YYYYMMDDHHMMSS
-// with the Z suffix that makes it UTC, so the entry means the same thing whatever
-// time zone the host is set to.
-const expiryTimespecLayout = "20060102150405Z"
+// expiryTimespecLayout is the format the broker writes: sshd's YYYYMMDDHHMMSS, in
+// the host's own time zone, which is how sshd reads a timespec with no suffix.
+//
+// Not the UTC form. Suffixing the timespec with Z to mean UTC was added in OpenSSH
+// 9.1; every sshd before that parses a timespec by its length (8, 12 or 14 digits)
+// and rejects the 15-character Z form outright, taking the whole entry with it. So
+// writing UTC would have limited this to Debian 12/Ubuntu 24.04-era hosts and
+// broken RHEL 8 and 9, Debian 11 and Ubuntu 20.04 and 22.04 — and broken them in
+// the way that is hardest to see, since the file looks correct and only sshd
+// disagrees. The two processes share a host and therefore a time zone, so the
+// local form is unambiguous in practice.
+const expiryTimespecLayout = "20060102150405"
 
 // parseExpiryTimespec reads any of the forms sshd(8) documents for a timespec:
 // YYYYMMDD or YYYYMMDDHHMM[SS], each optionally suffixed with Z for UTC and
 // otherwise in the host's own time zone.
+//
+// It reads more forms than formatExpiryTimespec writes on purpose. The sweep must
+// agree with sshd about when an entry stops working, and an entry it did not write
+// — an operator's own expiring key, or the Z form an sshd 9.1+ host accepts — is
+// still one whose expiry it should honour rather than guess at.
 func parseExpiryTimespec(value string) (time.Time, bool) {
 	loc := time.Local
 	if strings.HasSuffix(value, "Z") || strings.HasSuffix(value, "z") {
@@ -243,9 +270,10 @@ func parseExpiryTimespec(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// formatExpiryTimespec renders an expiry for sshd's expiry-time= option.
+// formatExpiryTimespec renders an expiry for sshd's expiry-time= option, in the
+// host's local time because that is what sshd reads an unsuffixed timespec as.
 func formatExpiryTimespec(t time.Time) string {
-	return t.UTC().Format(expiryTimespecLayout)
+	return t.Local().Format(expiryTimespecLayout)
 }
 
 // brokerEntryLine renders the authorized_keys line the broker installs: the key

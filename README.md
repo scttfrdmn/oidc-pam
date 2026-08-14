@@ -241,19 +241,29 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📊 Supported Platforms
 
-| Platform | SSH (`sshd`) | Console (`login`), `su`, `sudo` | Display manager |
-|----------|--------------|---------------------------------|-----------------|
-| Debian 12 (bookworm) | ✅ Tested in CI | Example config, untested | Not supported |
-| Debian 11, Ubuntu 20.04+, Ubuntu 22.04+ | Expected to work | Example config, untested | Not supported |
-| RHEL 8+, CentOS Stream 8+, Fedora 35+ | Expected to work | Example config, untested | Not supported |
+| Platform | OpenSSH | SSH (`sshd`) | Console (`login`), `su`, `sudo` | Display manager |
+|----------|---------|--------------|---------------------------------|-----------------|
+| Debian 12 (bookworm) | 9.2p1 | ✅ Tested in CI | Example config, untested | Not supported |
+| Debian 11, Ubuntu 20.04+, Ubuntu 22.04+ | 8.4p1 / 8.2p1 / 8.9p1 | Expected to work | Example config, untested | Not supported |
+| RHEL 8+, CentOS Stream 8+, Fedora 35+ | 8.0p1 / 8.0p1 / 8.7p1+ | Expected to work | Example config, untested | Not supported |
+| Amazon Linux 2, RHEL/CentOS 7 | 7.4p1 | ❌ Not supported | Not supported | Not supported |
+
+**Requires OpenSSH 7.7 or newer.** The broker writes each login's key with an
+`expiry-time="…"` option so that sshd, not the broker, enforces the key's lifetime.
+That option was added in OpenSSH 7.7, and an sshd that does not recognise an
+authorized_keys option refuses the whole entry — so on an older sshd every key the
+broker installs is rejected and the account is authenticated and then cannot log
+in. The version column above is what each platform ships; check anything not listed
+with `ssh -V`. Nothing detects this for you yet
+([#199](https://github.com/scttfrdmn/oidc-pam/issues/199)).
 
 **Tested in CI** means `test/e2e` performs real SSH logins against the built
 `pam_oidc.so` on that image, with the stack `configs/pam/ssh` ships. That harness
 runs on Debian 12 and covers `sshd` and nothing else.
 
-**Expected to work** means the module builds against that distribution's libpam
-and json-c and nothing about it is known to differ — not that a login has been
-run on it.
+**Expected to work** means the module builds against that distribution's libpam and
+json-c, the platform's sshd is new enough for the `expiry-time=` option above, and
+nothing else about it is known to differ — not that a login has been run on it.
 
 **Example config, untested** means `configs/pam/` carries a stack for the service
 but nobody has verified that its PAM conversation displays the verification URL.
