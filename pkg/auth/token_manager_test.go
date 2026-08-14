@@ -97,7 +97,7 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 
 	// A round trip returns the original plaintext, so the ID is all a caller
 	// needs to keep.
-	retrievedToken, err := tm.GetToken(tokenID)
+	retrievedToken, err := tm.GetToken(tokenID, "test-user")
 	if err != nil {
 		t.Fatalf("GetToken(%q): %v", tokenID, err)
 	}
@@ -106,15 +106,6 @@ func TestTokenManagerBasicOperations(t *testing.T) {
 	}
 	if retrievedToken.RefreshToken != testToken.RefreshToken {
 		t.Errorf("refresh token = %q, want %q", retrievedToken.RefreshToken, testToken.RefreshToken)
-	}
-
-	// Test ValidateToken
-	stored, err := tm.ValidateToken("test-fingerprint", "test-user")
-	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
-	}
-	if stored.ID != tokenID {
-		t.Errorf("ValidateToken returned token %q, want %q", stored.ID, tokenID)
 	}
 
 	// Test GetTokenStats
@@ -176,14 +167,14 @@ func TestStoredCiphertextDoesNotOpenInAnotherRecord(t *testing.T) {
 		t.Fatal("the refresh token was stored in plaintext; this test would prove nothing")
 	}
 
-	token, err := tm.GetToken(bobID)
+	token, err := tm.GetToken(bobID, "bob")
 	if err == nil {
 		t.Errorf("bob's record opened alice's refresh token: got %q", token.RefreshToken)
 	}
 
 	// Alice's own record is untouched and must still work: the binding may not
 	// cost the legitimate read.
-	if token, err := tm.GetToken(aliceID); err != nil {
+	if token, err := tm.GetToken(aliceID, "alice"); err != nil {
 		t.Errorf("GetToken(alice): %v", err)
 	} else if token.RefreshToken != aliceRefresh {
 		t.Errorf("alice's refresh token = %q, want %q", token.RefreshToken, aliceRefresh)
@@ -196,7 +187,7 @@ func TestStoredCiphertextDoesNotOpenInAnotherRecord(t *testing.T) {
 	tm.tokenStore.tokens[aliceID].RefreshToken = alicesAccessCiphertext
 	tm.tokenStore.mutex.Unlock()
 
-	if token, err := tm.GetToken(aliceID); err == nil {
+	if token, err := tm.GetToken(aliceID, "alice"); err == nil {
 		t.Errorf("an access token opened in the refresh_token field: got %q", token.RefreshToken)
 	}
 }
@@ -343,8 +334,7 @@ func TestTokenManagerConcurrency(t *testing.T) {
 			}
 
 			// Test concurrent operations
-			_, _ = tm.GetToken(tokenID)
-			_, _ = tm.ValidateToken(tokenID, fmt.Sprintf("user-%d", i))
+			_, _ = tm.GetToken(tokenID, fmt.Sprintf("user-%d", i))
 			_ = tm.RevokeToken(tokenID)
 		}(i)
 	}
@@ -353,9 +343,11 @@ func TestTokenManagerConcurrency(t *testing.T) {
 	t.Log("Concurrent operations completed successfully")
 }
 
-func TestValidateTokenConcurrent(t *testing.T) {
-	// Regression test: ValidateToken mutates LastUsed. Under a read lock this
-	// would race; the fix uses a write lock. Run with -race to verify.
+func TestGetTokenConcurrent(t *testing.T) {
+	// Regression test: reading a token mutates LastUsed. Under a read lock this
+	// would race; the fix uses a write lock. Run with -race to verify. This
+	// covered ValidateToken until #233 deleted it; GetToken is the reader that
+	// carries the same mutation.
 
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
@@ -369,7 +361,7 @@ func TestValidateTokenConcurrent(t *testing.T) {
 		t.Fatalf("Failed to create token manager: %v", err)
 	}
 
-	// Store a token so ValidateToken has something to find
+	// Store a token so the readers have something to find
 	testToken := &Token{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
@@ -379,7 +371,8 @@ func TestValidateTokenConcurrent(t *testing.T) {
 		Fingerprint:  "concurrent-fp",
 		Claims:       make(map[string]interface{}),
 	}
-	if _, err := tm.StoreToken(testToken, "user1", "session1"); err != nil {
+	tokenID, err := tm.StoreToken(testToken, "user1", "session1")
+	if err != nil {
 		t.Fatalf("Failed to store token: %v", err)
 	}
 
@@ -391,13 +384,13 @@ func TestValidateTokenConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				storedToken, err := tm.ValidateToken("concurrent-fp", "user1")
+				token, err := tm.GetToken(tokenID, "user1")
 				if err != nil {
-					t.Errorf("ValidateToken failed: %v", err)
+					t.Errorf("GetToken failed: %v", err)
 					return
 				}
-				if storedToken == nil {
-					t.Error("ValidateToken returned nil token")
+				if token == nil {
+					t.Error("GetToken returned nil token")
 					return
 				}
 			}
@@ -422,8 +415,8 @@ func newTMForTest(t *testing.T) *TokenManager {
 	return tm
 }
 
-// storeTestToken stores a token with the given fingerprint and returns it.
-func storeTestToken(t *testing.T, tm *TokenManager, fp string) *Token {
+// storeTestToken stores a token with the given fingerprint and returns its ID.
+func storeTestToken(t *testing.T, tm *TokenManager, fp string) string {
 	t.Helper()
 	tok := &Token{
 		AccessToken: "access-" + fp,
@@ -432,54 +425,55 @@ func storeTestToken(t *testing.T, tm *TokenManager, fp string) *Token {
 		Fingerprint: fp,
 		Claims:      make(map[string]interface{}),
 	}
-	if _, err := tm.StoreToken(tok, "user1", "sess1"); err != nil {
+	tokenID, err := tm.StoreToken(tok, "user1", "sess1")
+	if err != nil {
 		t.Fatalf("StoreToken(%q): %v", fp, err)
 	}
-	return tok
+	return tokenID
 }
 
-// TestFingerprintIndexPopulatedOnStore verifies that StoreToken adds an entry
-// to the fingerprint index.
-func TestFingerprintIndexPopulatedOnStore(t *testing.T) {
-	tm := newTMForTest(t)
-	storeTestToken(t, tm, "fp-store-test")
-
+// storedIDs returns the IDs currently in the store.
+func storedIDs(tm *TokenManager) []string {
 	tm.tokenStore.mutex.RLock()
-	_, ok := tm.tokenStore.fingerprintIndex["fp-store-test"]
-	tm.tokenStore.mutex.RUnlock()
+	defer tm.tokenStore.mutex.RUnlock()
+	ids := make([]string, 0, len(tm.tokenStore.tokens))
+	for id := range tm.tokenStore.tokens {
+		ids = append(ids, id)
+	}
+	return ids
+}
 
-	if !ok {
-		t.Error("Expected fingerprint index to contain the stored fingerprint")
+// The five tests below tracked the fingerprint index that #233 deleted along
+// with ValidateToken. What they were really asserting — that every path which
+// drops a token drops it from the store — still matters, so they now assert it
+// against the one map that remains.
+
+func TestStoreTokenPutsTheRecordInTheStore(t *testing.T) {
+	tm := newTMForTest(t)
+	tokenID := storeTestToken(t, tm, "fp-store-test")
+
+	if got := storedIDs(tm); len(got) != 1 || got[0] != tokenID {
+		t.Errorf("store holds %v, want just %q", got, tokenID)
 	}
 }
 
-// TestFingerprintIndexRemovedOnRevoke verifies that RevokeToken removes the
-// fingerprint index entry.
-func TestFingerprintIndexRemovedOnRevoke(t *testing.T) {
+func TestRevokeTokenRemovesTheRecord(t *testing.T) {
 	tm := newTMForTest(t)
-	storeTestToken(t, tm, "fp-revoke-test")
-
-	// Find the tokenID from the index, then revoke it.
-	tm.tokenStore.mutex.RLock()
-	tokenID := tm.tokenStore.fingerprintIndex["fp-revoke-test"]
-	tm.tokenStore.mutex.RUnlock()
+	tokenID := storeTestToken(t, tm, "fp-revoke-test")
 
 	if err := tm.RevokeToken(tokenID); err != nil {
 		t.Fatalf("RevokeToken: %v", err)
 	}
 
-	tm.tokenStore.mutex.RLock()
-	_, ok := tm.tokenStore.fingerprintIndex["fp-revoke-test"]
-	tm.tokenStore.mutex.RUnlock()
-
-	if ok {
-		t.Error("Expected fingerprint index entry to be removed after revoke")
+	if got := storedIDs(tm); len(got) != 0 {
+		t.Errorf("store still holds %v after revoking the only token", got)
+	}
+	if _, err := tm.GetToken(tokenID, "user1"); err == nil {
+		t.Error("a revoked token ID still resolves")
 	}
 }
 
-// TestFingerprintIndexRemovedOnCleanup verifies that performCleanup removes
-// expired tokens' fingerprint index entries.
-func TestFingerprintIndexRemovedOnCleanup(t *testing.T) {
+func TestCleanupRemovesExpiredRecords(t *testing.T) {
 	tm := newTMForTest(t)
 
 	// Store a token that is already expired.
@@ -496,18 +490,12 @@ func TestFingerprintIndexRemovedOnCleanup(t *testing.T) {
 
 	tm.performCleanup()
 
-	tm.tokenStore.mutex.RLock()
-	_, inTokens := tm.tokenStore.tokens[tm.tokenStore.fingerprintIndex["fp-cleanup-test"]]
-	_, inIndex := tm.tokenStore.fingerprintIndex["fp-cleanup-test"]
-	tm.tokenStore.mutex.RUnlock()
-
-	if inTokens || inIndex {
-		t.Error("Expected expired token and its index entry to be removed after cleanup")
+	if got := storedIDs(tm); len(got) != 0 {
+		t.Errorf("store still holds %v after cleanup of an expired token", got)
 	}
 }
 
-// TestFingerprintIndexRemovedByUserRevoke verifies RevokeUserTokens cleans the index.
-func TestFingerprintIndexRemovedByUserRevoke(t *testing.T) {
+func TestRevokeUserTokensRemovesTheRecords(t *testing.T) {
 	tm := newTMForTest(t)
 	storeTestToken(t, tm, "fp-user-revoke")
 
@@ -515,18 +503,12 @@ func TestFingerprintIndexRemovedByUserRevoke(t *testing.T) {
 		t.Fatalf("RevokeUserTokens: %v", err)
 	}
 
-	tm.tokenStore.mutex.RLock()
-	_, ok := tm.tokenStore.fingerprintIndex["fp-user-revoke"]
-	tm.tokenStore.mutex.RUnlock()
-
-	if ok {
-		t.Error("Expected index entry removed after RevokeUserTokens")
+	if got := storedIDs(tm); len(got) != 0 {
+		t.Errorf("store still holds %v after RevokeUserTokens", got)
 	}
 }
 
-// TestFingerprintIndexRemovedBySessionRevoke verifies RevokeSessionTokens
-// cleans the index.
-func TestFingerprintIndexRemovedBySessionRevoke(t *testing.T) {
+func TestRevokeSessionTokensRemovesTheRecords(t *testing.T) {
 	tm := newTMForTest(t)
 	storeTestToken(t, tm, "fp-session-revoke")
 
@@ -534,115 +516,116 @@ func TestFingerprintIndexRemovedBySessionRevoke(t *testing.T) {
 		t.Fatalf("RevokeSessionTokens: %v", err)
 	}
 
-	tm.tokenStore.mutex.RLock()
-	_, ok := tm.tokenStore.fingerprintIndex["fp-session-revoke"]
-	tm.tokenStore.mutex.RUnlock()
-
-	if ok {
-		t.Error("Expected index entry removed after RevokeSessionTokens")
+	if got := storedIDs(tm); len(got) != 0 {
+		t.Errorf("store still holds %v after RevokeSessionTokens", got)
 	}
 }
 
-// TestValidateTokenO1 stores a large number of tokens and validates one that
-// sits in the middle, confirming the O(1) path works correctly regardless of
-// store size.
-func TestValidateTokenO1(t *testing.T) {
+// TestGetTokenRefusesAnotherAccountsTokenID covers #233: a token ID is a lookup
+// key, not a bearer credential, so naming the wrong account must not return the
+// token.
+//
+// The check used to live in ValidateToken, which no production path called — so
+// in the running broker nothing verified ownership at all, and a session that
+// ended up holding another account's token ID (a bug in session handling, or an
+// attacker who can write to the store) got that account's access and refresh
+// tokens back.
+func TestGetTokenRefusesAnotherAccountsTokenID(t *testing.T) {
 	tm := newTMForTest(t)
 
-	const n = 200
-	var targetFP string
-	for i := 0; i < n; i++ {
-		fp := fmt.Sprintf("fp-%04d", i)
-		storeTestToken(t, tm, fp)
-		if i == n/2 {
-			targetFP = fp
-		}
+	aliceID, err := tm.StoreToken(&Token{
+		AccessToken:  "alices-access-token",
+		RefreshToken: "alices-refresh-token",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		Fingerprint:  "alice-fp",
+	}, "alice", "session-alice")
+	if err != nil {
+		t.Fatalf("StoreToken(alice): %v", err)
 	}
 
-	st, err := tm.ValidateToken(targetFP, "user1")
-	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
+	if token, err := tm.GetToken(aliceID, "bob"); err == nil {
+		t.Errorf("bob read alice's token: access=%q refresh=%q", token.AccessToken, token.RefreshToken)
 	}
-	if st.Fingerprint != targetFP {
-		t.Errorf("Expected fingerprint %q, got %q", targetFP, st.Fingerprint)
+
+	// A prefix of the owner's name is not the owner either — the comparison is
+	// over the whole value, not a length-blind one.
+	if _, err := tm.GetToken(aliceID, "alic"); err == nil {
+		t.Error("a truncated user ID was accepted as the owner")
+	}
+
+	if token, err := tm.GetToken(aliceID, "alice"); err != nil {
+		t.Errorf("GetToken(alice): %v", err)
+	} else if token.AccessToken != "alices-access-token" {
+		t.Errorf("access token = %q, want %q", token.AccessToken, "alices-access-token")
 	}
 }
 
-// TestValidateTokenIndexConsistency verifies that the fingerprint index and
-// the token map stay in sync across a sequence of stores and revocations.
-func TestValidateTokenIndexConsistency(t *testing.T) {
+// TestStopZeroesTheEncryptionKey covers #233: Encryption.Destroy existed for
+// this and had no caller outside its own test, so the AES key stayed in the
+// broker's heap for the life of the process.
+func TestStopZeroesTheEncryptionKey(t *testing.T) {
 	tm := newTMForTest(t)
 
-	for i := 0; i < 10; i++ {
-		storeTestToken(t, tm, fmt.Sprintf("fp-consistency-%d", i))
+	// The key is read through the Encryption value the manager holds, which is
+	// the same buffer Destroy scrubs.
+	before, err := tm.encryption.Encrypt("canary")
+	if err != nil {
+		t.Fatalf("Encrypt before Stop: %v", err)
+	}
+	if _, err := tm.encryption.Decrypt(before); err != nil {
+		t.Fatalf("Decrypt before Stop: %v", err)
 	}
 
-	// Revoke half of them via RevokeUserTokens.
-	if err := tm.RevokeUserTokens("user1"); err != nil {
-		t.Fatalf("RevokeUserTokens: %v", err)
+	if err := tm.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 
-	tm.tokenStore.mutex.RLock()
-	tokenCount := len(tm.tokenStore.tokens)
-	indexCount := len(tm.tokenStore.fingerprintIndex)
-	tm.tokenStore.mutex.RUnlock()
-
-	if tokenCount != indexCount {
-		t.Errorf("Token map (%d) and fingerprint index (%d) are out of sync", tokenCount, indexCount)
+	// An all-zero key is still a usable AES key, so the observable consequence of
+	// zeroing is that a ciphertext written under the real key no longer opens.
+	if got, err := tm.encryption.Decrypt(before); err == nil {
+		t.Errorf("the encryption key survived Stop: decrypted %q", got)
 	}
 }
 
-// BenchmarkValidateToken measures ValidateToken throughput with a populated
-// store.  Run with: go test -bench=BenchmarkValidateToken -benchmem ./pkg/auth/
-func BenchmarkValidateToken(b *testing.B) {
-	tm, err := NewTokenManager(&config.Config{
-		Security: config.SecurityConfig{
-			SecureTokenStorage: true,
-			TokenEncryptionKey: "benchmark-key-that-is-long-enough-for-security",
-		},
-	})
-	if err != nil {
-		b.Fatalf("NewTokenManager: %v", err)
-	}
-
-	// Pre-populate the store with 1000 tokens.
-	const storeSize = 1000
-	fps := make([]string, storeSize)
-	for i := 0; i < storeSize; i++ {
-		fp := fmt.Sprintf("bench-fp-%04d", i)
-		fps[i] = fp
-		tok := &Token{
-			AccessToken: "access-" + fp,
-			TokenType:   "Bearer",
-			ExpiresAt:   time.Now().Add(time.Hour),
-			Fingerprint: fp,
-			Claims:      make(map[string]interface{}),
-		}
-		if _, err := tm.StoreToken(tok, "user", "sess"); err != nil {
-			b.Fatalf("StoreToken: %v", err)
-		}
-	}
+// BenchmarkGetToken measures GetToken throughput with a populated store.
+// Run with: go test -bench=BenchmarkGetToken -benchmem ./pkg/auth/
+func BenchmarkGetToken(b *testing.B) {
+	tm, ids := benchStore(b, "bench")
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			fp := fps[i%storeSize]
-			if _, err := tm.ValidateToken(fp, "user"); err != nil {
-				b.Errorf("ValidateToken(%q): %v", fp, err)
+			id := ids[i%len(ids)]
+			if _, err := tm.GetToken(id, "user"); err != nil {
+				b.Errorf("GetToken(%q): %v", id, err)
 			}
 			i++
 		}
 	})
 }
 
-// BenchmarkValidateTokenSerial is a serial variant of BenchmarkValidateToken
-// that shows single-goroutine latency.
-func BenchmarkValidateTokenSerial(b *testing.B) {
+// BenchmarkGetTokenSerial is a serial variant of BenchmarkGetToken that shows
+// single-goroutine latency.
+func BenchmarkGetTokenSerial(b *testing.B) {
+	tm, ids := benchStore(b, "bench-serial")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		id := ids[i%len(ids)]
+		if _, err := tm.GetToken(id, "user"); err != nil {
+			b.Errorf("GetToken(%q): %v", id, err)
+		}
+	}
+}
+
+// benchStore returns a manager holding 1000 live tokens and their IDs.
+func benchStore(b *testing.B, prefix string) (*TokenManager, []string) {
+	b.Helper()
 	tm, err := NewTokenManager(&config.Config{
 		Security: config.SecurityConfig{
 			SecureTokenStorage: true,
-			TokenEncryptionKey: "benchmark-key-that-is-long-enough-for-security",
+			TokenEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
 		},
 	})
 	if err != nil {
@@ -650,10 +633,9 @@ func BenchmarkValidateTokenSerial(b *testing.B) {
 	}
 
 	const storeSize = 1000
-	fps := make([]string, storeSize)
+	ids := make([]string, storeSize)
 	for i := 0; i < storeSize; i++ {
-		fp := fmt.Sprintf("bench-serial-fp-%04d", i)
-		fps[i] = fp
+		fp := fmt.Sprintf("%s-fp-%04d", prefix, i)
 		tok := &Token{
 			AccessToken: "access-" + fp,
 			TokenType:   "Bearer",
@@ -661,18 +643,13 @@ func BenchmarkValidateTokenSerial(b *testing.B) {
 			Fingerprint: fp,
 			Claims:      make(map[string]interface{}),
 		}
-		if _, err := tm.StoreToken(tok, "user", "sess"); err != nil {
+		id, err := tm.StoreToken(tok, "user", "sess")
+		if err != nil {
 			b.Fatalf("StoreToken: %v", err)
 		}
+		ids[i] = id
 	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		fp := fps[i%storeSize]
-		if _, err := tm.ValidateToken(fp, "user"); err != nil {
-			b.Errorf("ValidateToken(%q): %v", fp, err)
-		}
-	}
+	return tm, ids
 }
 
 func TestTokenManagerAlwaysEncrypts(t *testing.T) {

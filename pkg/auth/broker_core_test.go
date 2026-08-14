@@ -182,13 +182,13 @@ func TestTokenManagerCore(t *testing.T) {
 		t.Fatal("StoreToken returned an empty token ID")
 	}
 
-	// Test ValidateToken
-	stored, err := tokenManager.ValidateToken("test-fingerprint", "test-user")
+	// Test GetToken, which is the call that checks ownership
+	stored, err := tokenManager.GetToken(tokenID, "test-user")
 	if err != nil {
-		t.Fatalf("ValidateToken: %v", err)
+		t.Fatalf("GetToken: %v", err)
 	}
-	if stored.UserID != "test-user" {
-		t.Errorf("stored token user = %q, want test-user", stored.UserID)
+	if stored.AccessToken != testToken.AccessToken {
+		t.Errorf("stored access token = %q, want %q", stored.AccessToken, testToken.AccessToken)
 	}
 
 	// Test GetTokenStats

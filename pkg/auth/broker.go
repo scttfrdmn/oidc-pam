@@ -900,8 +900,11 @@ func (b *Broker) RefreshSession(sessionID, userID string) (*AuthResponse, error)
 	}
 
 	// The refresh token lives encrypted in the token store; decrypt it only for
-	// the duration of this call rather than keeping a copy on the session.
-	storedToken, err := b.tokenManager.GetToken(session.TokenID)
+	// the duration of this call rather than keeping a copy on the session. The
+	// account is named so the store refuses a token ID that does not belong to
+	// this session's user (#233) rather than handing over whatever the ID points
+	// at.
+	storedToken, err := b.tokenManager.GetToken(session.TokenID, session.UserID)
 	if err != nil {
 		log.Warn().
 			Err(err).

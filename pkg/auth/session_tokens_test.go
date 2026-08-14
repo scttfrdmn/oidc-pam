@@ -98,7 +98,7 @@ func TestRevokeSessionDestroysItsStoredTokens(t *testing.T) {
 	broker, tm := newTokenTestBroker(t)
 	tokenID := storeSessionWithToken(t, broker, tm, "sess-revoke", "test-user", time.Now().Add(time.Hour))
 
-	if _, err := tm.GetToken(tokenID); err != nil {
+	if _, err := tm.GetToken(tokenID, "test-user"); err != nil {
 		t.Fatalf("token should exist before revocation: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestRevokeSessionDestroysItsStoredTokens(t *testing.T) {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 
-	if _, err := tm.GetToken(tokenID); err == nil {
+	if _, err := tm.GetToken(tokenID, "test-user"); err == nil {
 		t.Error("session was revoked but its tokens are still in the store")
 	}
 	if total := tm.GetTokenStats()["total_tokens"].(int); total != 0 {
@@ -123,7 +123,7 @@ func TestRevokeSessionForWrongUserLeavesTokens(t *testing.T) {
 		t.Fatal("expected cross-user revocation to be refused")
 	}
 
-	if _, err := tm.GetToken(tokenID); err != nil {
+	if _, err := tm.GetToken(tokenID, "owner"); err != nil {
 		t.Errorf("a refused revocation destroyed the owner's tokens: %v", err)
 	}
 	if broker.getSession("sess-owned") == nil {
@@ -142,14 +142,14 @@ func TestExpiredSessionsHaveTheirTokensRevoked(t *testing.T) {
 	if broker.getSession("sess-expired") != nil {
 		t.Error("expired session was not removed")
 	}
-	if _, err := tm.GetToken(expiredID); err == nil {
+	if _, err := tm.GetToken(expiredID, "user-a"); err == nil {
 		t.Error("the expired session's tokens are still in the store")
 	}
 
 	if broker.getSession("sess-live") == nil {
 		t.Fatal("the live session was removed")
 	}
-	if _, err := tm.GetToken(liveID); err != nil {
+	if _, err := tm.GetToken(liveID, "user-b"); err != nil {
 		t.Errorf("the live session's tokens were revoked: %v", err)
 	}
 }
@@ -170,7 +170,7 @@ func TestIdleSessionsHaveTheirTokensRevoked(t *testing.T) {
 	if broker.getSession("sess-idle") != nil {
 		t.Error("idle session was not removed")
 	}
-	if _, err := tm.GetToken(tokenID); err == nil {
+	if _, err := tm.GetToken(tokenID, "user-a"); err == nil {
 		t.Error("the idle session's tokens are still in the store")
 	}
 }
