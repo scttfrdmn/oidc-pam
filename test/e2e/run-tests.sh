@@ -86,6 +86,24 @@ fi
 passed=0
 failed=()
 
+# run_orphan_case drives orphan_keys_swept, the one case whose subject is a broker
+# restart: a login installs a key, the broker restarts, and the key must be gone
+# because the session it belonged to no longer exists anywhere (#171). A case runs
+# inside the client container and cannot restart a service in another one, so the
+# restart happens here, between the case's two phases.
+#
+# /home is deliberately not reset in between — the key the first phase installed is
+# the whole subject of the second.
+run_orphan_case() {
+    "${COMPOSE[@]}" exec -T -e PHASE=setup client /harness/cases.sh orphan_keys_swept || return 1
+
+    say "case orphan_keys_swept (restarting the broker between its two phases)"
+    "${COMPOSE[@]}" restart broker >/dev/null 2>&1
+    wait_for_socket || return 1
+
+    "${COMPOSE[@]}" exec -T -e PHASE=check client /harness/cases.sh orphan_keys_swept
+}
+
 for name in "${cases[@]}"; do
     # Every case starts from a broker with no sessions and no in-flight device
     # flows. Otherwise a flow left polling by the previous case can be granted by
@@ -113,7 +131,13 @@ for name in "${cases[@]}"; do
     # removal final.
     reset_homes
 
-    if "${COMPOSE[@]}" exec -T client /harness/cases.sh "${name}"; then
+    if [[ "${name}" == "orphan_keys_swept" ]]; then
+        run_case=(run_orphan_case)
+    else
+        run_case=("${COMPOSE[@]}" exec -T client /harness/cases.sh "${name}")
+    fi
+
+    if "${run_case[@]}"; then
         echo "    PASS ${name}"
         passed=$((passed + 1))
     else

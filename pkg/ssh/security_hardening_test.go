@@ -31,7 +31,7 @@ func TestAddPublicKeyRejectsSymlinkedAuthorizedKeys(t *testing.T) {
 	}
 
 	akm := newTestManager(t, base)
-	err := akm.AddPublicKey(username, []byte("ssh-ed25519 AAAAC3Nz key"))
+	err := akm.AddPublicKey(username, []byte("ssh-ed25519 AAAAC3Nz key"), testExpiry())
 	if err == nil {
 		t.Fatal("expected AddPublicKey to reject symlinked authorized_keys, got nil error")
 	}
@@ -64,7 +64,7 @@ func TestAddPublicKeyRejectsSymlinkedSSHDir(t *testing.T) {
 	}
 
 	akm := newTestManager(t, base)
-	if err := akm.AddPublicKey(username, []byte("ssh-ed25519 AAAAC3Nz key")); err == nil {
+	if err := akm.AddPublicKey(username, []byte("ssh-ed25519 AAAAC3Nz key"), testExpiry()); err == nil {
 		t.Fatal("expected AddPublicKey to reject symlinked .ssh dir, got nil error")
 	}
 }
@@ -76,7 +76,7 @@ func TestAddPublicKeyRejectsEmbeddedNewline(t *testing.T) {
 	base := t.TempDir()
 	akm := newTestManager(t, base)
 	injected := []byte("ssh-ed25519 AAAAreal key\ncommand=\"evil\" ssh-ed25519 AAAAevil key2")
-	if err := akm.AddPublicKey("testuser", injected); err == nil {
+	if err := akm.AddPublicKey("testuser", injected, testExpiry()); err == nil {
 		t.Fatal("expected AddPublicKey to reject embedded newline, got nil error")
 	}
 }

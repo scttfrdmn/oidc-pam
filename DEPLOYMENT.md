@@ -425,6 +425,10 @@ consult the PAM auth stack at all.
 ### 4. System Service Configuration
 
 #### Systemd Service (`/etc/systemd/system/oidc-auth-broker.service`)
+
+The unit shipped in `configs/systemd/oidc-auth-broker.service` is the reference; install
+that rather than retyping it. It looks like this:
+
 ```ini
 [Unit]
 Description=OIDC Authentication Broker
@@ -433,18 +437,30 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=oidc-auth
-Group=oidc-auth
-ExecStart=/usr/bin/oidc-auth-broker --config /etc/oidc-auth/broker.yaml
+# root, not a service account: the broker installs each login's SSH key in that
+# account's ~/.ssh/authorized_keys and hands the file to the account, which needs
+# both write access to the home directory and the ability to chown.
+User=root
+Group=root
+ExecStart=/usr/local/bin/oidc-auth-broker --config /etc/oidc-auth/broker.yaml
 Restart=always
-RestartSec=5
+RestartSec=10
 
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/oidc-auth /var/lib/oidc-auth
+# Must stay off. ProtectHome=true replaces /home with an empty tmpfs for this
+# service, so no authorized_keys can be written at all (#171).
+ProtectHome=false
+# ProtectSystem=strict makes everything read-only, so every path the broker
+# writes is listed: its runtime socket, its logs, its state directory (issued keys
+# and per-user locks), and the home directories it provisions keys into. Add your
+# own home path here if homes are not under /home.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam /home
+StateDirectory=oidc-pam
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Resource limits
 LimitNOFILE=65536
@@ -457,6 +473,12 @@ Environment=GOGC=100
 [Install]
 WantedBy=multi-user.target
 ```
+
+If a login reports success but the SSH key does not work, check these three things
+first: that `ProtectHome` is not `true`, that the path homes really live on is in
+`ReadWritePaths`, and that `/var/lib/oidc-pam` exists and is writable. A key the
+broker could not install now denies the login rather than completing it, and the
+reason is recorded as an `ssh_key_provisioning_failed` audit event.
 
 ## Security Hardening
 
