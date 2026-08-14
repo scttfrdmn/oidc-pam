@@ -388,22 +388,40 @@ func isBrokerComment(line string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), brokerCommentPrefix)
 }
 
-// dropStrandedBrokerComments removes the broker's provenance comments from a set
-// of lines that no longer contains any broker-issued entry. A comment claiming
-// the broker added a key, sitting above the user's own keys because the key it
-// described has been revoked, misleads whoever reads the file next.
-func dropStrandedBrokerComments(lines []string) []string {
-	for _, line := range lines {
-		if entry, ok := parseKeyEntry(line); ok && entry.brokerIssued() {
-			return lines
-		}
-	}
+// pruneBrokerComments removes every provenance comment that no longer describes
+// anything. A comment claiming the broker added a key, sitting above the user's own
+// keys because the key it described has been revoked, misleads whoever reads the file
+// next.
+//
+// The comment belongs to the entry below it, so a comment survives only if the next
+// entry in the file is a broker-issued one and no newer provenance comment has come
+// between the two. (#227) That is finer-grained than the "is there any broker entry
+// left anywhere" test this used to make, which was sufficient only while an account
+// held at most one broker entry: with a live entry per concurrent session, removing one
+// of several entries used to leave its comment behind claiming a date for the entry
+// that happened to follow it.
+func pruneBrokerComments(lines []string) []string {
 	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if isBrokerComment(line) {
+	for i, line := range lines {
+		if isBrokerComment(line) && !describesABrokerEntry(lines[i+1:]) {
 			continue
 		}
 		kept = append(kept, line)
 	}
 	return kept
+}
+
+// describesABrokerEntry reports whether the lines following a provenance comment make
+// it a comment about a broker-issued entry. Blank lines do not separate a comment from
+// its entry; a later provenance comment does, because that one is the entry's own.
+func describesABrokerEntry(rest []string) bool {
+	for _, line := range rest {
+		if isBrokerComment(line) {
+			return false
+		}
+		if entry, ok := parseKeyEntry(line); ok {
+			return entry.brokerIssued()
+		}
+	}
+	return false
 }

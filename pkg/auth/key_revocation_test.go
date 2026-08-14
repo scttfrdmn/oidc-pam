@@ -255,13 +255,18 @@ func TestRevocationThatMatchesNothingIsNotAuditedAsSuccess(t *testing.T) {
 	}
 }
 
-// A second login supersedes the first: one live broker-issued key per account is
-// the invariant, so the earlier entry is gone by the time the earlier session
-// expires. That removal must not then be reported as a failure — it is the
-// intended state, and calling it ssh_key_revocation_incomplete would train
+// A revocation that matches nothing because the entry is genuinely already gone must
+// not be reported as a failure: the credential is absent, which is the outcome
+// revocation wanted, and calling it ssh_key_revocation_incomplete would train
 // operators to ignore the one event that means a credential is still live (#165,
 // #171).
-func TestRevokingASupersededKeyIsNotReportedAsIncomplete(t *testing.T) {
+//
+// (#227) The way an account reached that state used to be a second login, which
+// removed the first login's entry. It does not any more — concurrent sessions each
+// keep their key — so what gets there now is the expiry sweep, a restart's reconcile,
+// or a revocation that already ran once. The removal below stands for all three: what
+// revokeSSHKey sees is the same in every case, an entry that is not there.
+func TestRevokingAKeyThatIsAlreadyGoneIsNotReportedAsIncomplete(t *testing.T) {
 	env := newRevokeTestEnv(t)
 
 	first := env.provision(t, "carol")
@@ -270,12 +275,20 @@ func TestRevokingASupersededKeyIsNotReportedAsIncomplete(t *testing.T) {
 	second := env.provisionSession(t, "carol", "b7e4d5c6a1f09283b7e4d5c6a1f09283b7e4d5c6a1f09283b7e4d5c6a1f09283")
 
 	remaining := env.authorizedKeys(t, "carol")
-	if strings.Contains(remaining, strings.TrimSpace(first.SSHPublicKey)) {
-		t.Fatalf("the first login's key is still authorized after a second login; the account "+
-			"has two live broker keys (#171). File is %q", remaining)
+	for what, key := range map[string]string{"first": first.SSHPublicKey, "second": second.SSHPublicKey} {
+		if !strings.Contains(remaining, strings.TrimSpace(key)) {
+			t.Fatalf("the %s login's key is not authorized, so that session cannot open a "+
+				"connection (#227); file is %q", what, remaining)
+		}
 	}
-	if !strings.Contains(remaining, strings.TrimSpace(second.SSHPublicKey)) {
-		t.Fatalf("the second login's key was not authorized; file is %q", remaining)
+
+	// Something removed the first session's entry before its revocation got there.
+	removed, err := env.broker.authorizedKeysManager.RemovePublicKey("carol", []byte(first.SSHPublicKey))
+	if err != nil {
+		t.Fatalf("RemovePublicKey: %v", err)
+	}
+	if !removed {
+		t.Fatal("the setup removal matched nothing, so the case under test was never reached")
 	}
 
 	// Now the first session expires and its key is revoked. There is nothing left to
@@ -286,21 +299,21 @@ func TestRevokingASupersededKeyIsNotReportedAsIncomplete(t *testing.T) {
 
 	types := env.auditEventTypes(t)
 	if recorded(types, "ssh_key_revocation_incomplete") {
-		t.Errorf("revoking a key that a later login had already superseded was reported as an "+
+		t.Errorf("revoking a key that was already gone from the file was reported as an "+
 			"incomplete revocation; events: %v", types)
 	}
 	if !recorded(types, "ssh_key_revoked") {
-		t.Errorf("revoking a superseded key recorded %v, want ssh_key_revoked", types)
+		t.Errorf("revoking an already-absent key recorded %v, want ssh_key_revoked", types)
 	}
 	if got := env.revokeMetric(t, "failure"); got != 0 {
-		t.Errorf("revoke failure metric = %v for a superseded key, want 0", got)
+		t.Errorf("revoke failure metric = %v for an already-absent key, want 0", got)
 	}
 	if got := env.revokeMetric(t, "success"); got != 1 {
 		t.Errorf("revoke success metric = %v, want 1", got)
 	}
 	// The live login keeps working: revoking the older session must not disturb it.
 	if after := env.authorizedKeys(t, "carol"); !strings.Contains(after, strings.TrimSpace(second.SSHPublicKey)) {
-		t.Errorf("revoking the superseded key removed the live one; file is %q", after)
+		t.Errorf("revoking the older session's key removed the live one; file is %q", after)
 	}
 }
 
