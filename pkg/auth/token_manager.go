@@ -63,6 +63,8 @@ const (
 // that wrote it — which is why the record format needs no version field of its
 // own. If the store is ever persisted, that stops being true and this constant is
 // where the compatibility break becomes visible.
+// #nosec G101 -- a format tag, not a credential: this string is public input to
+// the AEAD and is safe to log, while the key it is used with comes from config.
 const tokenAADVersion = "oidc-pam/stored-token/v1"
 
 // tokenAAD returns the additional authenticated data binding one encrypted field
