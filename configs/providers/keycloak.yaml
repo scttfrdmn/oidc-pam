@@ -73,17 +73,22 @@ authentication:
   # naming it at startup. Rename the tier that applies to these hosts to
   # "default", or name your hosts to match. Every matching policy applies:
   # require_groups is the union of all matches and the global setting.
+  #
+  # (#212) audit_level was set on both tiers and read by nothing — the audit trail
+  # records the same fields either way. Setting it is now a startup error rather
+  # than a control that appears to exist, so it is gone from here.
   policies:
     production:
       require_groups: ["production-access", "keycloak-admin"]
+      # Requires a hardware or FIDO authenticator in the identity's amr claim.
+      # Keycloak sends amr only when the authentication flow is configured to;
+      # against a realm that does not, this denies every login.
       require_device_trust: true
       max_session_duration: "4h"
-      audit_level: "detailed"
-      
+
     development:
       require_groups: ["developers", "keycloak-dev"]
       max_session_duration: "8h"
-      audit_level: "basic"
 
 # Security configuration
 security:

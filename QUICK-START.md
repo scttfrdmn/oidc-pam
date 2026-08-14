@@ -143,7 +143,6 @@ authentication:
     default:
       require_groups: ["users"]
       max_session_duration: "8h"
-      audit_level: "standard"
 
 server:
   log_level: "info"

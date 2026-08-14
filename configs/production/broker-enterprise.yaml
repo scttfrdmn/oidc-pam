@@ -131,57 +131,63 @@ authentication:
   # naming it at startup. Rename the tier that applies to these hosts to
   # "default", or name your hosts to match. Every matching policy applies:
   # require_groups is the union of all matches and the global setting.
+  #
+  # (#212) This file used to set require_reauth_for_new_hosts,
+  # require_institutional_affiliation, require_additional_mfa, no_data_export,
+  # session_recording, audit_level, require_approval_for and
+  # allow_untrusted_devices. Nothing read any of them: they parsed, they appeared
+  # in the loaded configuration, and they controlled nothing. The broker now
+  # refuses to start on any of them rather than let a tier called "maximum
+  # security" be four settings weaker than it reads. They are left here as
+  # comments because what they were reaching for is real — it is just not built.
   policies:
     # Production environment - maximum security
     production:
       require_groups: ["production-access", "senior-engineers"]
+      # Denies any login whose identity does not present a hardware or FIDO
+      # authenticator in its amr claim. Enable this only against a provider that
+      # emits amr: an IdP that never sends "hwk" or "fido" denies every login here.
       require_device_trust: true
       max_session_duration: "2h"
-      require_reauth_for_new_hosts: true
-      require_institutional_affiliation: true
-      require_additional_mfa: true
-      no_data_export: true
-      session_recording: true
-      audit_level: "detailed"
-      require_approval_for: ["database-access", "admin-actions"]
       ip_whitelist: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-    
+      # Not enforceable — see the note above (#212):
+      #   require_reauth_for_new_hosts: true
+      #   require_institutional_affiliation: true
+      #   require_additional_mfa: true
+      #   no_data_export: true
+      #   session_recording: true
+      #   audit_level: "detailed"
+      #   require_approval_for: ["database-access", "admin-actions"]
+
     # Staging environment - high security
     staging:
       require_groups: ["staging-access", "developers", "qa-team"]
       require_device_trust: true
       max_session_duration: "4h"
-      require_reauth_for_new_hosts: false
-      require_additional_mfa: false
-      audit_level: "standard"
       ip_whitelist: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
-    
+
     # Development environment - balanced security
     development:
       require_groups: ["developers", "contractors"]
       require_device_trust: false
       max_session_duration: "8h"
-      allow_untrusted_devices: true
-      audit_level: "basic"
-    
+
     # Service accounts - automated access
     service:
       require_groups: ["service-accounts"]
       require_device_trust: true
       max_session_duration: "1h"
-      require_reauth_for_new_hosts: true
-      audit_level: "detailed"
-      no_data_export: true
-    
+
     # Emergency access - break-glass
+    #
+    # require_device_trust is deliberately false: a break-glass account is used
+    # when the usual path is unavailable, which includes the case where the
+    # authenticator is what is unavailable. The short max_session_duration is what
+    # bounds it, and every use is on the audit trail.
     emergency:
       require_groups: ["emergency-access", "security-team"]
       require_device_trust: false
       max_session_duration: "30m"
-      require_additional_mfa: true
-      session_recording: true
-      audit_level: "detailed"
-      require_approval_for: ["all-actions"]
 
   # Network security requirements
   network_requirements:
@@ -209,34 +215,57 @@ authentication:
       maintenance_windows: ["Sunday 02:00-06:00", "Wednesday 01:00-03:00"]
       holiday_restrictions: ["2024-12-25", "2024-01-01", "2024-07-04"]
     
-    time_restrictions:
-      - providers: ["contractors"]
-        allowed_hours: "08:00-18:00"
-        timezone: "America/New_York"
-        exceptions: ["emergency-access"]
-    
-    geo_restrictions:
-      - providers: ["contractors"]
-        allowed_countries: ["US", "CA"]
-        blocked_countries: ["CN", "RU", "IR", "KP"]
+    # providers names the OIDC providers a restriction applies to, by the name
+    # under oidc.providers, or "all". An empty list matches no provider, so the
+    # restriction applies to nothing — the broker refuses to start on it rather
+    # than let a time window look like it is in force (#212).
+    #
+    # "contractors" below must therefore be the name of a provider in this file's
+    # oidc.providers list. It is not — these restrictions are examples, so they are
+    # commented out. Uncomment them against a provider you actually have.
+    #
+    # exceptions is not implemented: it parsed and was never read, so a listed
+    # group was still refused outside the window. Starting on it is refused.
+    time_restrictions: []
+    #   - providers: ["contractors"]
+    #     allowed_hours: "08:00-18:00"   # local to timezone; may cross midnight
+    #     timezone: "America/New_York"
+
+    # Country restrictions need authentication.geoip_database_path. Without it
+    # every address resolves to no country, an allowed_countries list matches
+    # nothing, and every login the restriction covers is denied — so the broker
+    # refuses to start on a country restriction with no database (#212). The path
+    # must exist at startup: set it to a MaxMind GeoLite2-Country.mmdb you have
+    # installed on these hosts.
+    geo_restrictions: []
+    #   - providers: ["contractors"]
+    #     allowed_countries: ["US", "CA"]
+    #     blocked_countries: ["CN", "RU", "IR", "KP"]
 
   # Advanced risk-based policies
+  #
+  # (#212, #213) The action is DENY or LOG. REQUIRE_ADDITIONAL_MFA and
+  # REQUIRE_APPROVAL were accepted, set a field nothing read, and left the login to
+  # proceed exactly as if the policy had not matched — so a config full of them
+  # described an approval workflow that did not exist. There is no step-up or
+  # approval mechanism in the broker; DENY is the only thing it can do about risk,
+  # and LOG is the honest way to record a condition without acting on it.
+  #
+  # The condition vocabulary is a risk_score comparison, or one or more of
+  # unusual_location, after_hours, untrusted_network, unknown_device and
+  # unknown_network_origin joined by AND. Anything else is a startup error: the old
+  # "new_device AND production_access" and "contractor AND sensitive_data" named
+  # four flags that have never existed, so both policies matched nothing.
   risk_policies:
     - condition: "risk_score >= 80"
       action: "DENY"
       recommendation: "Critical risk detected, access denied"
     - condition: "risk_score >= 60"
-      action: "REQUIRE_ADDITIONAL_MFA"
-      recommendation: "High risk detected, additional authentication required"
+      action: "LOG"
+      recommendation: "High risk login permitted; review the audit trail"
     - condition: "unusual_location AND after_hours"
-      action: "REQUIRE_APPROVAL"
+      action: "LOG"
       recommendation: "Unusual access pattern detected"
-    - condition: "new_device AND production_access"
-      action: "REQUIRE_APPROVAL"
-      recommendation: "New device accessing production systems"
-    - condition: "contractor AND sensitive_data"
-      action: "REQUIRE_APPROVAL"
-      recommendation: "Contractor accessing sensitive resources"
 
 # Enhanced Security Configuration
 security:
@@ -339,11 +368,12 @@ audit:
 # loaded: this file is now checked by TestShippedConfigsLoad, and an unknown key
 # is a startup error rather than silence. What is enforced lives above:
 #
-#   * require_groups, max_session_duration, require_device_trust,
-#     require_additional_mfa and ip_whitelist under authentication.policies.<name>
-#     (see the note on policy names there — ip_whitelist matches the SOURCE
-#     address of the login, which is the network allowlist this file wanted)
-#   * risk thresholds under authentication.risk_policies
+#   * require_groups, max_session_duration, require_device_trust and
+#     ip_whitelist under authentication.policies.<name> — those four, and nothing
+#     else (#212). See the note on policy names there; ip_whitelist matches the
+#     SOURCE address of the login, which is the network allowlist this file wanted.
+#   * risk thresholds under authentication.risk_policies, whose only actions are
+#     DENY and LOG
 #   * network requirements under authentication.network_requirements
 #   * log verbosity under server.log_level, and the audit trail under audit:
 #

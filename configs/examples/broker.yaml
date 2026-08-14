@@ -104,32 +104,41 @@ authentication:
   # naming it at startup. Rename the tier that applies to these hosts to
   # "default", or name your hosts to match. Every matching policy applies:
   # require_groups is the union of all matches and the global setting.
+  #
+  # A policy has four settings the broker enforces: require_groups,
+  # max_session_duration, require_device_trust and ip_whitelist. (#212) This example
+  # also set require_reauth_for_new_hosts, allow_untrusted_devices and audit_level,
+  # none of which anything read — writing any of them is now a startup error rather
+  # than a control that appears to exist.
   policies:
     production:
       require_groups: ["production-access", "senior-engineers"]
+      # Denies any login whose identity does not present a hardware or FIDO
+      # authenticator in its amr claim. Against a provider that does not emit amr,
+      # this denies every login — check yours before enabling it.
       require_device_trust: true
       max_session_duration: "4h"
-      require_reauth_for_new_hosts: true
-      audit_level: "detailed"
-      
+
     staging:
       require_groups: ["developers", "qa-team"]
       max_session_duration: "8h"
-      audit_level: "standard"
-      
+
     development:
       require_groups: ["developers", "contractors"]
       max_session_duration: "12h"
-      allow_untrusted_devices: true
-      audit_level: "basic"
 
   # Risk-based policies
+  #
+  # The action is DENY or LOG, and nothing else. (#212) REQUIRE_ADDITIONAL_MFA and
+  # REQUIRE_APPROVAL were accepted and then did nothing at all — the login went
+  # ahead as if the policy had not matched — so this example described a step-up
+  # flow the broker has never had. Writing either is now a startup error.
   risk_policies:
     - condition: "risk_score >= 70"
-      action: "REQUIRE_ADDITIONAL_MFA"
-      recommendation: "High risk detected, additional authentication required"
+      action: "LOG"
+      recommendation: "High risk login permitted; review the audit trail"
     - condition: "unusual_location AND after_hours"
-      action: "REQUIRE_APPROVAL"
+      action: "LOG"
       recommendation: "Unusual access pattern detected"
 
 # Security configuration

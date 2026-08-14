@@ -323,19 +323,20 @@ authentication:
   require_groups: ["employees"]
   max_concurrent_sessions: 3
 
+  # A policy sets require_groups, max_session_duration, require_device_trust and
+  # ip_whitelist. Those four are enforced; anything else is a startup error (#212).
   policies:
     default:
       require_groups: ["employees", "contractors"]
       max_session_duration: "8h"
-      audit_level: "standard"
 
     # Applies only on hosts named "admin", e.g. admin.example.com.
     admin:
       require_groups: ["administrators", "sysadmins"]
       max_session_duration: "4h"
-      require_additional_mfa: true
+      # Denies any identity whose amr claim carries no hwk/fido authenticator.
+      # Confirm your provider emits amr first — one that does not denies every login.
       require_device_trust: true
-      audit_level: "detailed"
 
 # Security settings
 security:
