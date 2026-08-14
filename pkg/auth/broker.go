@@ -222,7 +222,7 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		auditLogger:           auditLogger,
 		sessions:              make(map[string]*Session),
 		keyManager:            sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys"),
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager("/home"),
+		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager("/home", sshpkg.DefaultLockDir),
 		stopChan:              make(chan struct{}),
 	}
 

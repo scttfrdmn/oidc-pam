@@ -10,15 +10,36 @@ import (
 	"time"
 )
 
+// newTestManager builds a manager whose home base is baseDir and whose lock
+// directory is a fresh temp dir.
+//
+// The lock directory is a separate argument in production too (#161): the locks
+// must not be reachable from the homes they protect. A test that pointed lockDir
+// at baseDir would still pass while reintroducing exactly the bug, so no test
+// shares the two.
+func newTestManager(t *testing.T, baseDir string) *AuthorizedKeysManager {
+	t.Helper()
+	return NewAuthorizedKeysManager(baseDir, t.TempDir())
+}
+
 func TestNewAuthorizedKeysManager(t *testing.T) {
 	baseDir := "/tmp/test-auth-keys"
-	akm := NewAuthorizedKeysManager(baseDir)
+	lockDir := "/tmp/test-auth-locks"
+	akm := NewAuthorizedKeysManager(baseDir, lockDir)
 
 	if akm == nil {
 		t.Fatal("Expected non-nil AuthorizedKeysManager")
 	}
 	if akm.baseDir != baseDir {
 		t.Errorf("Expected baseDir %s, got %s", baseDir, akm.baseDir)
+	}
+	if akm.lockDir != lockDir {
+		t.Errorf("Expected lockDir %s, got %s", lockDir, akm.lockDir)
+	}
+	// The lock must not live under the home directory it protects: a user who can
+	// write there can take the lock and wedge the broker (#161).
+	if got := akm.LockPath("alice"); strings.HasPrefix(got, filepath.Join(baseDir, "alice")) {
+		t.Errorf("lock path %s is inside the user's own home", got)
 	}
 }
 
@@ -30,7 +51,7 @@ func TestAddPublicKey(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	publicKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... testuser@example.com")
 
@@ -81,7 +102,7 @@ func TestAddPublicKeyWithExistingFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -128,7 +149,7 @@ func TestRemovePublicKey(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	publicKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... testuser@example.com")
 
@@ -165,7 +186,7 @@ func TestRemovePublicKeyNonExistentFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	publicKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... testuser@example.com")
 
@@ -184,7 +205,7 @@ func TestRemovePublicKeyNotFound(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	existingKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... existing@example.com")
 	nonExistentKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... nonexistent@example.com")
@@ -222,7 +243,7 @@ func TestListOIDCKeys(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -273,7 +294,7 @@ func TestListOIDCKeysNonExistentFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 
 	// List OIDC keys from non-existent file
@@ -295,7 +316,7 @@ func TestBackupAuthorizedKeys(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -338,7 +359,7 @@ func TestBackupAuthorizedKeysNonExistentFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 
 	// Try to backup non-existent file
@@ -356,7 +377,7 @@ func TestRestoreAuthorizedKeys(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -406,7 +427,7 @@ func TestRestoreAuthorizedKeysNoBackup(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 
 	// Try to restore when no backup exists
@@ -420,7 +441,7 @@ func TestRestoreAuthorizedKeysNoBackup(t *testing.T) {
 }
 
 func TestValidateKeyFormat(t *testing.T) {
-	akm := NewAuthorizedKeysManager("/tmp")
+	akm := newTestManager(t, "/tmp")
 
 	// Test valid keys
 	validKeys := [][]byte{
@@ -462,7 +483,7 @@ func TestRemoveExpiredKeys(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 	sshDir := filepath.Join(tmpDir, username, ".ssh")
 	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
@@ -529,7 +550,7 @@ func TestAddPublicKeyConcurrent(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 
 	const goroutines = 20
@@ -574,7 +595,7 @@ func TestRemoveExpiredKeysNonExistentFile(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	akm := NewAuthorizedKeysManager(tmpDir)
+	akm := newTestManager(t, tmpDir)
 	username := "testuser"
 
 	// Try to remove expired keys from non-existent file

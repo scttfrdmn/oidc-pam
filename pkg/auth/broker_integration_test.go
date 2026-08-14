@@ -293,7 +293,7 @@ func TestBrokerSSHKeyMethods(t *testing.T) {
 			},
 		},
 		keyManager:            sshpkg.NewKeyManager(keyDir),
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
+		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir, t.TempDir()),
 	}
 
 	// Use a short key size to keep the test fast.
