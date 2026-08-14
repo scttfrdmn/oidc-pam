@@ -92,7 +92,7 @@ When deploying OIDC PAM, follow these security recommendations:
 
 OIDC PAM includes several security features:
 
-- **Encrypted Token Storage**: AES-256-GCM authenticated encryption (base64 32-byte key; no passphrase stretching)
+- **Encrypted Token Storage**: AES-256-GCM authenticated encryption (base64 32-byte key; no passphrase stretching), each token bound to the account, session and field it was stored for, so a ciphertext moved to another record does not decrypt
 - **Identity Binding**: The authenticated OIDC identity is bound to the requested local username, and `require_groups` is enforced
 - **Comprehensive Audit Logging**: All authentication events logged, and a broker told to audit with no `audit.outputs` refuses to start rather than accepting events and discarding them
 - **Risk-Based Policy Engine**: Geographic and temporal access controls
@@ -153,6 +153,19 @@ security audit (all findings remediated as of v0.4.x):
 - It has not undergone an independent third-party security audit
 - Breaking changes may occur before 1.0
 - Validate thoroughly for your own environment before high-security production use
+
+### The Audit Trail Is Not Tamper-Evident
+The broker runs as root and its audit log lives under `/var/log/oidc-auth`, so
+whoever has compromised the broker can rewrite its own record of the compromise.
+Records are appended independently and nothing chains them, which means a deleted
+entry is indistinguishable from an entry that was never written (#232).
+
+A per-record hash chain on its own would not change that: an attacker who can
+rewrite the file and holds no secret can recompute the chain after editing it. The
+mitigation that works is getting records off the host as they are written, so
+configure a `syslog` or `http` audit output alongside the file one where the
+integrity of the trail matters. Anchoring the chain in something an on-host
+attacker cannot forge is tracked in #232.
 
 ### PAM Integration
 - PAM modules run with elevated privileges

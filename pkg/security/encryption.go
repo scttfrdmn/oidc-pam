@@ -67,8 +67,22 @@ func ValidateKeyString(keyString string) error {
 	return err
 }
 
-// Encrypt encrypts the given plaintext
+// Encrypt encrypts the given plaintext with no additional authenticated data.
+//
+// Prefer EncryptWithAAD wherever the ciphertext will be stored in a record that
+// identifies something: GCM proves a ciphertext was not modified, but on its own
+// it says nothing about where the ciphertext belongs, so one lifted out of a
+// record and pasted into another still decrypts (#232).
 func (e *Encryption) Encrypt(plaintext string) (string, error) {
+	return e.EncryptWithAAD(plaintext, nil)
+}
+
+// EncryptWithAAD encrypts plaintext and binds the ciphertext to aad, which is
+// authenticated but not stored: decryption succeeds only when the caller supplies
+// the same bytes. Pass whatever identifies the record the ciphertext is being
+// written into, so that moving it to another record makes it undecryptable rather
+// than making it somebody else's secret.
+func (e *Encryption) EncryptWithAAD(plaintext string, aad []byte) (string, error) {
 	if plaintext == "" {
 		return "", nil
 	}
@@ -92,14 +106,23 @@ func (e *Encryption) Encrypt(plaintext string) (string, error) {
 	}
 
 	// Encrypt the plaintext
-	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), aad)
 
 	// Encode to base64
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// Decrypt decrypts the given ciphertext
+// Decrypt decrypts a ciphertext that was encrypted with no additional
+// authenticated data.
 func (e *Encryption) Decrypt(ciphertext string) (string, error) {
+	return e.DecryptWithAAD(ciphertext, nil)
+}
+
+// DecryptWithAAD decrypts a ciphertext produced by EncryptWithAAD, and fails
+// unless aad is byte-identical to the value it was encrypted under. The error
+// deliberately does not distinguish a wrong AAD from a corrupted ciphertext:
+// both mean the record and the secret in it do not belong together.
+func (e *Encryption) DecryptWithAAD(ciphertext string, aad []byte) (string, error) {
 	if ciphertext == "" {
 		return "", nil
 	}
@@ -132,7 +155,7 @@ func (e *Encryption) Decrypt(ciphertext string) (string, error) {
 	nonce, ciphertextBytes := data[:nonceSize], data[nonceSize:]
 
 	// Decrypt the ciphertext
-	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, aad)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
