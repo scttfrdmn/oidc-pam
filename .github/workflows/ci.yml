@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+  # Called by release.yml so a tag publishes only what this workflow accepts.
+  # Reuse, not a copy: a second hand-maintained definition of the test set drifts
+  # from this one silently, and the release is the copy nobody watches (#214).
+  workflow_call:
 
 permissions:
   contents: read
@@ -228,3 +232,42 @@ jobs:
       # offending package instead of failing with a missing header.
       - name: Check the cgo quarantine
         run: ./scripts/check-cgo-quarantine.sh
+
+      # Every `uses:` in this directory must name a 40-hex commit SHA. A version
+      # tag is mutable: whoever controls the action's repository can retarget it,
+      # and the two references that were left unpinned sat between "build the PAM
+      # module" and "publish it" (#221). This check is here so that is a build
+      # failure rather than something an audit has to find again.
+      - name: Check every action is pinned to a commit SHA
+        run: |
+          # Local reusable workflows (`uses: ./...`) resolve to this repository at
+          # this commit, so there is no third-party tag to pin.
+          unpinned=$(grep -rnE '^[[:space:]]*(-[[:space:]]+)?uses:' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*\./' \
+            | grep -vE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$)' \
+            || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error::unpinned action reference(s) — pin each to a 40-hex commit SHA with a '# vX.Y.Z' comment:"
+            echo "$unpinned"
+            exit 1
+          fi
+          echo "All action references in .github/workflows/ are pinned to commit SHAs."
+
+      # #214: `build` in release.yml needed only `verify-version`, which checks the
+      # README badge and a CHANGELOG header — so a tag published binaries no test
+      # had run against. Assert the gate is still wired, since removing one `needs`
+      # entry restores the hole silently.
+      - name: Check the release build stays gated on CI
+        run: |
+          uses=$(yq -r '.jobs.ci.uses // ""' .github/workflows/release.yml)
+          if [ "$uses" != "./.github/workflows/ci.yml" ]; then
+            echo "::error::release.yml has no 'ci' job calling ./.github/workflows/ci.yml (found: '${uses}')"
+            exit 1
+          fi
+          # `needs` may be a string or a sequence; compare as JSON either way.
+          needs=$(yq -o=json -I=0 '.jobs.build.needs' .github/workflows/release.yml)
+          if ! printf '%s' "$needs" | grep -q '"ci"'; then
+            echo "::error::release.yml's build job does not need the 'ci' job (needs: ${needs}). A tag would publish untested binaries."
+            exit 1
+          fi
+          echo "release.yml's build job is gated on the CI workflow."
