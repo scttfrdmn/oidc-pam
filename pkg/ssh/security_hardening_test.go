@@ -197,3 +197,52 @@ func TestUsernameFromComment(t *testing.T) {
 		}
 	}
 }
+
+// TestNothingInThisPackageChownsByName pins the #203 fix: every handover of a file
+// to its account goes through fchown(2) on an open descriptor, never through
+// chown(2) on a path.
+//
+// The distinction is the whole vulnerability. os.Chown resolves the name it is given
+// and follows symlinks, and every path this package hands over lives in a directory
+// the target account can write — so a chown by name can be redirected at any file on
+// the host, and the root broker performs it. That was unreachable while the shipped
+// unit withheld CAP_CHOWN (#202); granting the capability is what made it live, which
+// is why the two landed together.
+//
+// This is a source guard rather than a behavioural test, deliberately and with a
+// known limit: chownFileToAccount is a no-op for a non-root process, so a test that
+// does not run as root cannot observe which file got chowned. What it does catch is
+// the reintroduction of os.Chown by someone who does not know the history — which is
+// the realistic regression. The behavioural half belongs in the e2e suite, which runs
+// as root in a container.
+func TestNothingInThisPackageChownsByName(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package directory: %v", err)
+	}
+
+	// os.Lchown is listed too. It does not follow symlinks, so it is not the
+	// escalation — but it still acts on a name, and a name in a user-writable
+	// directory can be a different inode by the time the call runs. The descriptor is
+	// the only thing this package should be chowning.
+	banned := []string{"os.Chown(", "os.Lchown(", "syscall.Chown(", "syscall.Lchown("}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(name) // #nosec G304 -- a .go file in this package's own directory
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, call := range banned {
+			if strings.Contains(string(source), call) {
+				t.Errorf("%s calls %s: hand the file over with chownFileToAccount on an open "+
+					"descriptor instead. Chowning a path the account can replace with a symlink "+
+					"lets it point the root broker's chown at any file on the host (#203).",
+					name, strings.TrimSuffix(call, "("))
+			}
+		}
+	}
+}

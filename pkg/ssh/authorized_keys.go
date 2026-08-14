@@ -153,7 +153,7 @@ func ensureSecureSSHDir(sshDir string, account Account) error {
 			if mkErr := os.MkdirAll(sshDir, 0700); mkErr != nil {
 				return fmt.Errorf("failed to create .ssh directory: %w", mkErr)
 			}
-			return chownToAccount(sshDir, account)
+			return chownDirToAccount(sshDir, account)
 		}
 		return fmt.Errorf("failed to stat .ssh directory: %w", err)
 	}
@@ -252,13 +252,18 @@ func writeAuthorizedKeysAtomic(sshDir, path string, content []byte, account Acco
 		cleanup()
 		return fmt.Errorf("failed to write temp authorized_keys: %w", err)
 	}
+	// The handover goes through the still-open descriptor rather than through
+	// tmpPath (#203). The temp file sits in a directory the account can write, and
+	// its name was predictable, so a chown by name could be pointed at any file on
+	// the host. fchown(2) can only reach the file that was opened here.
+	if err := chownFileToAccount(tmp, account); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
 		return fmt.Errorf("failed to close temp authorized_keys: %w", err)
-	}
-	if err := chownToAccount(tmpPath, account); err != nil {
-		cleanup()
-		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		cleanup()
@@ -802,12 +807,14 @@ func (akm *AuthorizedKeysManager) BackupAuthorizedKeys(username string) error {
 		_ = bf.Close()
 		return fmt.Errorf("failed to create backup: %w", err)
 	}
+	// The backup sits in the user's own .ssh, so it is theirs, not root's (#171) —
+	// handed over through the open descriptor, not by name (#203).
+	if err := chownFileToAccount(bf, account); err != nil {
+		_ = bf.Close()
+		return err
+	}
 	if err := bf.Close(); err != nil {
 		return fmt.Errorf("failed to create backup: %w", err)
-	}
-	// The backup sits in the user's own .ssh, so it is theirs, not root's (#171).
-	if err := chownToAccount(backupPath, account); err != nil {
-		return err
 	}
 
 	log.Info().

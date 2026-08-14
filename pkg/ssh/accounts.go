@@ -213,17 +213,50 @@ func checkOwner(what, path string, info fs.FileInfo, account Account) error {
 		what, path, uid, account.Username, account.UID)
 }
 
-// chownToAccount gives a path to the account, so that a file the root broker
-// created in someone's home stays theirs to manage.
+// chownFileToAccount gives an already-open descriptor to the account, so that a
+// file the root broker created in someone's home stays theirs to manage.
 //
 // Only root can hand a file to another user, so this is a no-op for an unprivileged
 // process — which is every test, and any development run.
-func chownToAccount(path string, account Account) error {
+//
+// (#203) The chown goes through the descriptor, never through a path. os.Chown
+// resolves the name it is handed and follows symlinks, and every path this package
+// chowns lives in a directory the target account can write. Between creating a file
+// and chowning it by name, the account can replace that name with a link to any file
+// on the host — /etc/shadow, a setuid binary, root's authorized_keys — and the root
+// broker hands them the target. fchown(2) acts on the object that was actually
+// opened, so there is no name left to race and no window to race it in.
+//
+// This is why the fix and CAP_CHOWN (#202) had to land together: until the
+// capability was granted every one of these calls failed with EPERM, which made the
+// path dead code. Granting the capability without fixing the chown would have
+// converted that dead code into a live local privilege escalation.
+func chownFileToAccount(f *os.File, account Account) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	if err := os.Chown(path, account.UID, account.GID); err != nil {
-		return fmt.Errorf("failed to give %q to %s (uid %d): %w", path, account.Username, account.UID, err)
+	if err := f.Chown(account.UID, account.GID); err != nil {
+		return fmt.Errorf("failed to give %q to %s (uid %d): %w", f.Name(), account.Username, account.UID, err)
 	}
 	return nil
+}
+
+// chownDirToAccount gives a directory to the account without ever following a
+// symlink at its path: it opens the directory O_NOFOLLOW|O_DIRECTORY and chowns the
+// descriptor. See chownFileToAccount for why the name is not safe to chown.
+//
+// O_NOFOLLOW constrains only the final path component, which is the component the
+// account controls here — the parent is their home directory, verified by the caller.
+func chownDirToAccount(path string, account Account) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	// #nosec G304 -- path is <resolved home>/.ssh for a validated login name, and the
+	// descriptor is refused below unless it is a real directory rather than a link.
+	dir, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open %q to give it to %s: %w", path, account.Username, err)
+	}
+	defer func() { _ = dir.Close() }()
+	return chownFileToAccount(dir, account)
 }
