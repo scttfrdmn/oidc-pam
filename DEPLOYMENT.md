@@ -276,27 +276,33 @@ oidc:
   retry_delay: "5s"
 
 # Authentication policies
+#
+# A policy is selected by its name: "default" applies to every host, and any
+# other name must match the hostname of the machine being logged into (exactly,
+# or as a domain component — "production" matches "api.production.example.com").
+# A policy whose name matches no host never applies; the broker logs a warning
+# naming it at startup. Policies cannot be scoped to an operation such as sudo.
+#
+# Every matching policy applies: require_groups is the union of the global
+# authentication.require_groups and every match's, and max_session_duration is
+# the smallest of them.
 authentication:
+  # Applies everywhere, whatever the host is called.
+  require_groups: ["employees"]
+  max_concurrent_sessions: 3
+
   policies:
     default:
       require_groups: ["employees", "contractors"]
-      session_duration: "8h"
-      max_concurrent_sessions: 3
-      require_mfa: false
+      max_session_duration: "8h"
       audit_level: "standard"
-      
-    admin_operations:
+
+    # Applies only on hosts named "admin", e.g. admin.example.com.
+    admin:
       require_groups: ["administrators", "sysadmins"]
-      session_duration: "4h"
-      max_concurrent_sessions: 1
-      require_mfa: true
-      audit_level: "detailed"
-      
-    sudo_operations:
-      require_groups: ["sudo-users", "administrators"]
-      session_duration: "1h"
-      max_concurrent_sessions: 2
-      require_mfa: true
+      max_session_duration: "4h"
+      require_additional_mfa: true
+      require_device_trust: true
       audit_level: "detailed"
 
 # Security settings

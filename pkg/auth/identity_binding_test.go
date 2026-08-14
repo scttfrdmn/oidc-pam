@@ -110,7 +110,7 @@ func TestVerifyRequiredGroups(t *testing.T) {
 			b := &Broker{config: &config.Config{
 				Authentication: config.AuthenticationConfig{RequireGroups: tc.required},
 			}}
-			err := b.verifyRequiredGroups(tc.have)
+			err := b.verifyRequiredGroups(tc.required, tc.have)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error, got nil")
 			}

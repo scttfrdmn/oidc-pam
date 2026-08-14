@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **High (#158): `require_groups` written the way every document tells operators
+  to write it enforced nothing.** Group membership was checked against the global
+  `authentication.require_groups`, but the configuration in QUICK-START.md,
+  DEPLOYMENT.md and the provider examples puts `require_groups` under
+  `authentication.policies.<name>`. The policy engine collected those into
+  `PolicyResult.RequiredGroups` and nothing ever read it, so on the documented
+  configuration any identity the provider would authenticate received a login,
+  a session, and an SSH key. `pollDeviceAuthorization` now enforces the list the
+  policy engine resolved — the union of the global setting and every matching
+  policy — which it takes as an argument, because the check runs in a background
+  goroutine long after policy evaluation and re-evaluating there would evaluate
+  against a different clock.
+
+  Two things prevented that resolved list from ever containing anything:
+
+  - Policies were matched against `AuthRequest.TargetHost`, which despite its
+    name is populated from PAM's `PAM_RHOST` by both clients — the address the
+    user is connecting *from*. A policy named `production` therefore only matched
+    a *client* literally named `production`. Matching is now against the
+    hostname of the machine being logged into, which is what a policy naming a
+    resource means.
+  - No policy name in any shipped configuration is a hostname; they are all
+    `default`, `production`, `staging`. `default` is now a documented catch-all
+    that applies to every host, so `policies.default.require_groups` — the
+    QUICK-START configuration — is enforced.
+
+  Policies whose names cannot match this host are logged by name at startup
+  instead of silently doing nothing, and `applyResourcePolicies` now applies
+  *every* matching policy rather than ranging over a map and breaking on the
+  first, which made the effective policy vary between runs of the same binary on
+  the same host. Unioning `require_groups` and taking the minimum
+  `max_session_duration` means an additional match can only restrict access
+  further.
+
+  `configs/CONFIGURATION-GUIDE.md` documents how a policy is selected;
+  DEPLOYMENT.md's example no longer uses three keys that are not fields of a
+  policy (`session_duration`, `max_concurrent_sessions`, `require_mfa`) or two
+  names that can never match (`admin_operations`, `sudo_operations`). Policies
+  still cannot be scoped to an operation such as `sudo`.
 - **Medium (#153): every `authentication_successful` record was written without
   the identity it authenticated.** The device-flow poll loop clones the session
   before mutating it (the map holds the raw pointer, so writing through it would

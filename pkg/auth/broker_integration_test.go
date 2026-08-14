@@ -561,7 +561,7 @@ func TestBrokerPollDeviceAuthorization(t *testing.T) {
 	// This method runs in a goroutine and doesn't return values
 	// We'll just call it to test it doesn't panic
 	broker.wg.Add(1)
-	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow)
+	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow, nil)
 
 	// Wait briefly for the polling to start
 	time.Sleep(10 * time.Millisecond)

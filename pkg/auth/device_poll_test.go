@@ -49,6 +49,11 @@ type pollTestEnv struct {
 	homeDir string
 	// auditPath is the JSON-lines file the broker's audit logger writes to.
 	auditPath string
+	// requiredGroups is what the policy engine would have resolved for this login:
+	// the union of the global require_groups and every matching per-resource
+	// policy's. pollDeviceAuthorization takes it as an argument rather than reading
+	// config, so a test drives group enforcement by setting this (#158).
+	requiredGroups []string
 }
 
 func newPollTestEnv(t *testing.T) *pollTestEnv {
@@ -219,7 +224,7 @@ func (e *pollTestEnv) run(t *testing.T) time.Duration {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.broker.pollDeviceAuthorization(e.session, e.provider, e.flow)
+		e.broker.pollDeviceAuthorization(e.session, e.provider, e.flow, e.requiredGroups)
 	}()
 
 	select {
@@ -361,7 +366,7 @@ func TestDeviceFlowStopsWithTheBroker(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		env.broker.pollDeviceAuthorization(env.session, env.provider, env.flow)
+		env.broker.pollDeviceAuthorization(env.session, env.provider, env.flow, env.requiredGroups)
 	}()
 
 	// Let it poll at least once so it is genuinely mid-flow.
@@ -531,5 +536,201 @@ func TestDeviceFlowProvisionsLoginKey(t *testing.T) {
 	}
 	if !strings.Contains(string(data), session.UserID+"@oidc-pam-") {
 		t.Errorf("the authorized key is not commented for %q:\n%s", session.UserID, data)
+	}
+}
+
+// TestPerPolicyRequireGroupsIsEnforced covers #158.
+//
+// The gate is the *config path*, not the comparison. verifyRequiredGroups was
+// always correct; it was reading the wrong list. require_groups written under
+// authentication.policies.<name> — the form QUICK-START.md:136-138 and
+// DEPLOYMENT.md:280-297 both instruct operators to use — was collected into
+// PolicyResult.RequiredGroups by applyResourcePolicies and then read by nothing,
+// while the enforcement looked at the global authentication.require_groups, which
+// in this configuration is empty. So the documented configuration enforced no
+// groups at all and any identity the IdP would authenticate got a login.
+//
+// Note what this test deliberately does not do: it does not set
+// Authentication.RequireGroups. That is the field the old code read, and setting it
+// is what let TestVerifyRequiredGroups pass while the real path was open.
+func TestPerPolicyRequireGroupsIsEnforced(t *testing.T) {
+	env := newPollTestEnv(t)
+
+	// A policy named for the resource being logged into — this host. The engine
+	// matches on its own hostname rather than on req.TargetHost, which is PAM_RHOST
+	// and names the *client*.
+	const host = "policy-test-host"
+	policyCfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			Policies: map[string]config.AuthenticationPolicy{
+				host: {RequireGroups: []string{"hpc-admins"}},
+			},
+		},
+	}
+	engine := &PolicyEngine{config: policyCfg, resourceHost: host}
+
+	result, err := engine.EvaluateRequest(&AuthRequest{
+		UserID:     "testuser",
+		LoginType:  "ssh",
+		SourceIP:   "192.0.2.10",
+		TargetHost: "some-client.example.net", // what a client actually sends
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRequest: %v", err)
+	}
+	if len(result.RequiredGroups) != 1 || result.RequiredGroups[0] != "hpc-admins" {
+		t.Fatalf("policy resolved RequiredGroups = %v, want [hpc-admins] from the per-policy config", result.RequiredGroups)
+	}
+
+	// Now the login. The issuer's identity is in "researchers" and no other group,
+	// so the requirement cannot be satisfied.
+	env.requiredGroups = result.RequiredGroups
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("the session survived a login that satisfies no required group: %+v", session)
+	}
+
+	event := env.auditEvent(t, "authentication_denied")
+	if event.ErrorCode != "GROUP_DENIED" {
+		t.Errorf("denial recorded with error_code %q, want GROUP_DENIED", event.ErrorCode)
+	}
+	if event.Success {
+		t.Error("the denial event is recorded with success=true")
+	}
+	for _, e := range env.auditEvents(t) {
+		if e.EventType == "authentication_successful" {
+			t.Fatal("a login that satisfies no required group was recorded as successful (#158)")
+		}
+	}
+
+	// And no credential was left behind for it.
+	authorizedKeys := filepath.Join(env.homeDir, env.session.UserID, ".ssh", "authorized_keys")
+	if data, err := os.ReadFile(authorizedKeys); err == nil && strings.Contains(string(data), "@oidc-pam-") {
+		t.Errorf("a refused login installed a login key:\n%s", data)
+	}
+}
+
+// TestResourcePolicyMatchesTheResourceNotTheClient covers the other half of #158:
+// policies were matched against req.TargetHost, which both clients populate from
+// PAM_RHOST — the address the user is connecting *from*. A policy named
+// "production" therefore only ever matched a client literally named "production",
+// so the whole policies: block never fired for anyone.
+func TestResourcePolicyMatchesTheResourceNotTheClient(t *testing.T) {
+	policyCfg := &config.Config{
+		Authentication: config.AuthenticationConfig{
+			Policies: map[string]config.AuthenticationPolicy{
+				"production": {RequireGroups: []string{"prod-admins"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		resourceHost string
+		targetHost   string
+		wantGroups   bool
+	}{
+		{"resource host matches the policy name", "production", "laptop.example.net", true},
+		{"resource host in the policy's domain", "api.production.example.com", "laptop.example.net", true},
+		{"client host matching the policy name does not", "some-host", "production", false},
+		{"neither matches", "some-host", "laptop.example.net", false},
+		{"no hostname resolved, so nothing matches", "", "production", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := &PolicyEngine{config: policyCfg, resourceHost: tc.resourceHost}
+			result, err := engine.EvaluateRequest(&AuthRequest{
+				UserID: "testuser", LoginType: "ssh", TargetHost: tc.targetHost,
+			})
+			if err != nil {
+				t.Fatalf("EvaluateRequest: %v", err)
+			}
+			got := len(result.RequiredGroups) > 0
+			if got != tc.wantGroups {
+				t.Errorf("RequiredGroups = %v, want a requirement: %v", result.RequiredGroups, tc.wantGroups)
+			}
+		})
+	}
+}
+
+// TestQuickStartConfigEnforcesItsRequiredGroups is the acceptance test for #158:
+// the exact configuration QUICK-START.md hands a first-time operator, loaded
+// through the real config loader, must deny a user who is in none of the groups it
+// names.
+//
+// This is the test that mattered. The two tests above construct a config.Config in
+// Go, so they prove the engine and the enforcement agree; they cannot prove that
+// the YAML in the docs reaches the engine at all. It did not: `policies.default`
+// names no host, so before the DefaultPolicyName catch-all this config matched
+// nothing, resolved no required groups, and admitted every identity the IdP would
+// authenticate.
+func TestQuickStartConfigEnforcesItsRequiredGroups(t *testing.T) {
+	// Verbatim from QUICK-START.md:131-138 — the authentication block a new
+	// operator is told to write. If this literal changes in the docs, change it
+	// here too, and expect this test to tell you if it stopped enforcing anything.
+	const quickStartAuth = `
+authentication:
+  policies:
+    default:
+      require_groups: ["users"]
+      session_duration: "8h"
+      audit_level: "standard"
+`
+	configPath := filepath.Join(t.TempDir(), "broker.yaml")
+	if err := os.WriteFile(configPath, []byte(quickStartAuth), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig on the QUICK-START configuration: %v", err)
+	}
+	if got := cfg.Authentication.Policies["default"].RequireGroups; len(got) != 1 || got[0] != "users" {
+		t.Fatalf("loader read policies.default.require_groups as %v, want [users]", got)
+	}
+	// The global key stays empty: that is the whole point. It is what the old
+	// enforcement read.
+	if len(cfg.Authentication.RequireGroups) != 0 {
+		t.Fatalf("authentication.require_groups = %v, want empty; this config sets only the per-policy form",
+			cfg.Authentication.RequireGroups)
+	}
+
+	// A real engine, so the host resolution and the catch-all both run for real.
+	engine, err := NewPolicyEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewPolicyEngine: %v", err)
+	}
+	defer engine.Close()
+
+	result, err := engine.EvaluateRequest(&AuthRequest{
+		UserID:     "testuser",
+		LoginType:  "ssh",
+		SourceIP:   "192.0.2.10",
+		TargetHost: "some-client.example.net",
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRequest: %v", err)
+	}
+	if len(result.RequiredGroups) != 1 || result.RequiredGroups[0] != "users" {
+		t.Fatalf("the QUICK-START config resolved RequiredGroups = %v, want [users]; "+
+			"a policies.default block that resolves nothing enforces nothing (#158)", result.RequiredGroups)
+	}
+
+	// And the login it governs is refused: the issuer's identity is in
+	// "researchers", not "users".
+	env := newPollTestEnv(t)
+	env.requiredGroups = result.RequiredGroups
+	env.idp.Script(testoidc.Grant)
+
+	env.run(t)
+
+	if session := env.activeSession(); session != nil {
+		t.Errorf("the QUICK-START configuration admitted a user in none of its require_groups: %+v", session)
+	}
+	if event := env.auditEvent(t, "authentication_denied"); event.ErrorCode != "GROUP_DENIED" {
+		t.Errorf("denial recorded with error_code %q, want GROUP_DENIED", event.ErrorCode)
 	}
 }
