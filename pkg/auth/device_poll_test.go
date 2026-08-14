@@ -281,7 +281,7 @@ func TestDeviceFlowCompletesAfterAuthorizationPending(t *testing.T) {
 	if session.TokenID == "" {
 		t.Fatal("session has no TokenID, so its tokens were never stored")
 	}
-	stored, err := env.broker.tokenManager.GetToken(session.TokenID)
+	stored, err := env.broker.tokenManager.GetToken(session.TokenID, session.UserID)
 	if err != nil {
 		t.Fatalf("GetToken(%q): %v", session.TokenID, err)
 	}

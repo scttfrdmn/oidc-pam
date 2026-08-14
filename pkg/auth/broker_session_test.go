@@ -500,7 +500,7 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 	}
 
 	// The new refresh token is reachable through the store...
-	refreshed, err := tokenManager.GetToken(updated.TokenID)
+	refreshed, err := tokenManager.GetToken(updated.TokenID, "test-user")
 	if err != nil {
 		t.Fatalf("GetToken(%q): %v", updated.TokenID, err)
 	}
@@ -510,7 +510,7 @@ func TestBrokerRefreshSessionSuccess(t *testing.T) {
 
 	// ...and the rotated one is gone, rather than lingering as dead credential
 	// material until the token store's own sweep.
-	if _, err := tokenManager.GetToken(oldTokenID); err == nil {
+	if _, err := tokenManager.GetToken(oldTokenID, "test-user"); err == nil {
 		t.Error("the pre-refresh token is still in the store after rotation")
 	}
 }

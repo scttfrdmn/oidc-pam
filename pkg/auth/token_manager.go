@@ -25,9 +25,8 @@ type TokenManager struct {
 
 // TokenStore represents a token storage backend
 type TokenStore struct {
-	tokens           map[string]*StoredToken
-	fingerprintIndex map[string]string // fingerprint → tokenID for O(1) ValidateToken
-	mutex            sync.RWMutex
+	tokens map[string]*StoredToken
+	mutex  sync.RWMutex
 }
 
 // StoredToken represents a token stored in the token store
@@ -98,8 +97,7 @@ func NewTokenManager(cfg *config.Config) (*TokenManager, error) {
 
 	// Initialize token store
 	tokenStore := &TokenStore{
-		tokens:           make(map[string]*StoredToken),
-		fingerprintIndex: make(map[string]string),
+		tokens: make(map[string]*StoredToken),
 	}
 
 	return &TokenManager{
@@ -126,6 +124,17 @@ func (tm *TokenManager) Stop() error {
 
 	close(tm.stopChan)
 	tm.wg.Wait()
+
+	// (#233) Zero the token encryption key. Destroy existed for this and had no
+	// caller outside a test, so the key stayed in the heap for as long as the
+	// process did — which on a Restart=always unit failing its preconditions is a
+	// process that dies and respawns every few seconds, each one leaving another
+	// copy behind. Safe here because Stop is terminal: the broker stops its own
+	// goroutines and the IPC server stops accepting before this is reached, so no
+	// encrypt or decrypt can still be in flight.
+	if tm.encryption != nil {
+		tm.encryption.Destroy()
+	}
 
 	return nil
 }
@@ -194,12 +203,9 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) (stri
 		storedToken.Metadata["claims"] = token.Claims
 	}
 
-	// Store in token store and update fingerprint index
+	// Store in token store
 	tm.tokenStore.mutex.Lock()
 	tm.tokenStore.tokens[tokenID] = storedToken
-	if storedToken.Fingerprint != "" {
-		tm.tokenStore.fingerprintIndex[storedToken.Fingerprint] = tokenID
-	}
 	tm.tokenStore.mutex.Unlock()
 
 	log.Debug().
@@ -213,14 +219,29 @@ func (tm *TokenManager) StoreToken(token *Token, userID, sessionID string) (stri
 	return tokenID, nil
 }
 
-// GetToken retrieves a token from the token store
-func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
+// GetToken decrypts and returns the token stored under tokenID, which must belong
+// to userID.
+//
+// (#233) The caller naming the account it believes owns the token is the whole
+// point of the second argument: before it, a token ID was a bearer token for the
+// access and refresh tokens inside it, and the only check of ownership in this
+// file was ValidateToken, which nothing in production ever called. Whatever
+// crossed a session with another account's token — a bug here, or an attacker who
+// can write to the store — used to end with the broker holding one user's
+// credentials and attributing them to another.
+func (tm *TokenManager) GetToken(tokenID, userID string) (*Token, error) {
 	tm.tokenStore.mutex.RLock()
 	storedToken, exists := tm.tokenStore.tokens[tokenID]
 	tm.tokenStore.mutex.RUnlock()
 
 	if !exists {
 		return nil, fmt.Errorf("token not found")
+	}
+
+	// Constant-time comparison so a caller probing token IDs cannot learn from
+	// the timing which account a stored token belongs to (L-15).
+	if subtle.ConstantTimeCompare([]byte(storedToken.UserID), []byte(userID)) != 1 {
+		return nil, fmt.Errorf("token does not belong to requesting user")
 	}
 
 	// Check if token has expired
@@ -290,48 +311,12 @@ func (tm *TokenManager) GetToken(tokenID string) (*Token, error) {
 	return token, nil
 }
 
-// ValidateToken validates a token fingerprint and verifies it belongs to the given user.
-// Both fingerprint and userID must match to prevent token hijacking across users.
-// Uses the O(1) fingerprint index for lookup.
-func (tm *TokenManager) ValidateToken(tokenFingerprint, userID string) (*StoredToken, error) {
-	tm.tokenStore.mutex.RLock()
-	defer tm.tokenStore.mutex.RUnlock()
-
-	tokenID, ok := tm.tokenStore.fingerprintIndex[tokenFingerprint]
-	if !ok {
-		return nil, fmt.Errorf("token not found")
-	}
-
-	storedToken, ok := tm.tokenStore.tokens[tokenID]
-	if !ok {
-		// Index is out of sync (should not happen); treat as not found.
-		return nil, fmt.Errorf("token not found")
-	}
-
-	// Constant-time comparison so validation timing does not leak which user a
-	// stored token belongs to (L-15).
-	if subtle.ConstantTimeCompare([]byte(storedToken.UserID), []byte(userID)) != 1 {
-		return nil, fmt.Errorf("token does not belong to requesting user")
-	}
-
-	if storedToken.ExpiresAt.Before(time.Now()) {
-		return nil, fmt.Errorf("token expired")
-	}
-
-	// LastUsed is intentionally not updated here: writing through a pointer
-	// under RLock races with concurrent ValidateToken callers. LastUsed is not
-	// used for any security decision, so it is only updated under write lock
-	// paths (StoreToken, performCleanup).
-	return storedToken, nil
-}
-
 // RevokeToken revokes a token
 func (tm *TokenManager) RevokeToken(tokenID string) error {
 	tm.tokenStore.mutex.Lock()
 	defer tm.tokenStore.mutex.Unlock()
 
 	if storedToken, exists := tm.tokenStore.tokens[tokenID]; exists {
-		delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 		delete(tm.tokenStore.tokens, tokenID)
 
 		log.Debug().
@@ -354,7 +339,6 @@ func (tm *TokenManager) RevokeUserTokens(userID string) error {
 	var revokedTokens []string
 	for tokenID, storedToken := range tm.tokenStore.tokens {
 		if storedToken.UserID == userID {
-			delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 			delete(tm.tokenStore.tokens, tokenID)
 			revokedTokens = append(revokedTokens, tokenID)
 		}
@@ -376,7 +360,6 @@ func (tm *TokenManager) RevokeSessionTokens(sessionID string) error {
 	var revokedTokens []string
 	for tokenID, storedToken := range tm.tokenStore.tokens {
 		if storedToken.SessionID == sessionID {
-			delete(tm.tokenStore.fingerprintIndex, storedToken.Fingerprint)
 			delete(tm.tokenStore.tokens, tokenID)
 			revokedTokens = append(revokedTokens, tokenID)
 		}
@@ -437,10 +420,7 @@ func (tm *TokenManager) generateTokenID() (string, error) {
 func (tm *TokenManager) removeToken(tokenID string) {
 	tm.tokenStore.mutex.Lock()
 	defer tm.tokenStore.mutex.Unlock()
-	if st, ok := tm.tokenStore.tokens[tokenID]; ok {
-		delete(tm.tokenStore.fingerprintIndex, st.Fingerprint)
-		delete(tm.tokenStore.tokens, tokenID)
-	}
+	delete(tm.tokenStore.tokens, tokenID)
 }
 
 func (tm *TokenManager) cleanupExpiredTokens(ctx context.Context) {
@@ -474,11 +454,8 @@ func (tm *TokenManager) performCleanup() {
 		}
 	}
 
-	// Remove expired tokens and their index entries
+	// Remove expired tokens
 	for _, tokenID := range expiredTokens {
-		if st, ok := tm.tokenStore.tokens[tokenID]; ok {
-			delete(tm.tokenStore.fingerprintIndex, st.Fingerprint)
-		}
 		delete(tm.tokenStore.tokens, tokenID)
 	}
 
