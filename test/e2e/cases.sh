@@ -377,6 +377,11 @@ case_identity_mismatch() {
 # Deliberately not root: sshd_config.d/oidc-pam.conf sets PermitRootLogin no, so
 # `ssh root@` never reaches PAM and the case would pass without testing anything.
 # A uid < 1000 account that sshd will accept is what exercises the guard.
+#
+# svcacct has to exist in *both* images at the same uid. The guard resolves the
+# account in the broker, so with the account only in the client image the broker
+# sees no such user, allows the binding, and this case passes the login it is
+# supposed to refuse. Dockerfile.broker creates it for that reason.
 case_privileged_account_refused() {
     reset_state svcacct || return 1
 

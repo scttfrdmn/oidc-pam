@@ -55,14 +55,20 @@ RUN moddir="$(dirname "$(dpkg -L libpam-modules | grep -m1 '/pam_permit\.so$')")
     && echo "installed pam_oidc.so into ${moddir}"
 
 # Two unprivileged accounts: alice is who the harness logs in as, bob exists so
-# a case can tell "refused" apart from "no such user".
+# a case can tell "refused" apart from "no such user". svcacct is below the
+# privileged-uid threshold, for the case that asserts an OIDC identity cannot
+# bind to a service account (#159).
 #
 # --password '*' leaves the account without a usable password but *not* locked.
 # The obvious '!' marks it locked, and some sshd builds refuse a locked account
 # before PAM is ever consulted — which would make every case pass for the wrong
 # reason.
-RUN useradd --create-home --shell /bin/bash --password '*' alice \
-    && useradd --create-home --shell /bin/bash --password '*' bob \
+#
+# The uids are pinned rather than left to useradd because Dockerfile.broker
+# creates the same three accounts, and the privileged-account guard runs in the
+# broker: the two passwd tables have to agree. See the comment there.
+RUN useradd --create-home --shell /bin/bash --password '*' --uid 1001 alice \
+    && useradd --create-home --shell /bin/bash --password '*' --uid 1002 bob \
     && useradd --create-home --shell /bin/bash --password '*' --uid 400 svcacct
 
 COPY test/e2e/sshd_config.d/oidc-pam.conf /etc/ssh/sshd_config.d/oidc-pam.conf
