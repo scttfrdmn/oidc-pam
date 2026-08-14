@@ -1887,8 +1887,9 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 		return nil, fmt.Errorf("failed to save SSH key: %w", err)
 	}
 
-	// Install the public key in the user's authorized_keys, as their only
-	// broker-issued key, carrying the expiry sshd will enforce on it (#171).
+	// Install the public key in the user's authorized_keys, carrying the expiry sshd
+	// will enforce on it (#171), alongside the entries the account's other live
+	// sessions are using (#227).
 	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey, sshKey.ExpiresAt); err != nil {
 		// Best-effort cleanup: remove the stored key if we couldn't authorize it
 		_ = b.keyManager.DeleteKey(session.ID)
@@ -1958,18 +1959,20 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 	// Still best effort — the session is gone either way — but audited as the failure
 	// it is, so an operator can find the host and the file.
 	//
-	// (#171) "Nothing matched" now has a second, innocent cause: a later login for
-	// the same user supersedes the earlier entry, because there is one live
-	// broker-issued key per user. Ask whether the key material still authorizes
-	// anything before raising the alarm, so that the alarm keeps meaning what it says
-	// — the key was already gone, which is the outcome revocation wanted.
+	// (#171) "Nothing matched" has a second, innocent cause: something removed the
+	// entry before this revocation reached it — the expiry sweep, a restart's
+	// reconcile, or a revocation that already ran. (#227 removed the commonest of them:
+	// a later login for the same user no longer takes the earlier session's entry.) Ask
+	// whether the key material still authorizes anything before raising the alarm, so
+	// that the alarm keeps meaning what it says — the key was already gone, which is
+	// the outcome revocation wanted.
 	if !removed {
 		if authorized, checkErr := b.authorizedKeysManager.KeyIsAuthorized(session.UserID, sshKey.PublicKey); checkErr == nil && !authorized {
 			log.Info().
 				Str("session_id", session.ID).
 				Str("user_id", session.UserID).
 				Str("ssh_key_id", session.SSHKeyID).
-				Msg("SSH key was already absent from authorized_keys at revocation (superseded by a later login)")
+				Msg("SSH key was already absent from authorized_keys at revocation")
 
 			if b.auditLogger != nil {
 				b.auditLogger.LogAuthEvent(security.AuditEvent{

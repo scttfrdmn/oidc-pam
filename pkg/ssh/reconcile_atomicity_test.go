@@ -28,14 +28,18 @@ import (
 // all-or-nothing — so that correct ordering above is sufficient.
 
 // planted is a key list a previous broker and a user between them left behind: the
-// user's own key, the broker's provenance comment, and one broker-issued entry.
+// user's own key, and two broker-issued entries with their provenance comments — one
+// long past its expiry, one still belonging to a live session (#227), so that a
+// rewrite of this file has both something to remove and something to preserve.
 func plantedKeyList(t *testing.T, baseDir string) string {
 	t.Helper()
 
 	plantLines(t, baseDir, "testuser",
 		"ssh-rsa AAAAB3NzaC1yc2EOWNKEY testuser@laptop",
 		"# Added by OIDC PAM on 2026-01-01 00:00:00",
-		string(brokerKeyLine(time.Now().Add(-time.Hour), "BROKERKEY")),
+		string(brokerKeyLine(time.Now().Add(-48*time.Hour), "STALEKEY")),
+		"# Added by OIDC PAM on 2026-01-02 00:00:00",
+		liveBrokerEntry(time.Now().Add(time.Hour), "LIVEKEY"),
 	)
 	return readKeys(t, baseDir, "testuser")
 }
@@ -84,7 +88,8 @@ func TestAFailedRewriteLeavesTheWholeKeyListInPlace(t *testing.T) {
 	t.Run("expiry sweep", func(t *testing.T) {
 		baseDir := t.TempDir()
 		akm := newTestManager(t, baseDir)
-		akm.SetKeyLifetime(time.Minute) // the planted broker entry is an hour old, so it is stale
+		// The planted legacy entry is two days old, so it is stale under the default
+		// lifetime and there is something for the sweep to try to remove.
 		before := plantedKeyList(t, baseDir)
 		makeUnwritable(t, baseDir)
 
@@ -116,9 +121,10 @@ func TestAFailedRewriteLeavesTheWholeKeyListInPlace(t *testing.T) {
 }
 
 // A successful install must produce the complete set in one step: the new entry
-// present, the superseded broker entry gone, and the user's own key untouched. This is
-// the "compute the desired content and replace" shape stated positively — a file that
-// ever held only some of these is a file some login was refused against.
+// present, the expired broker entry gone, the other session's entry still there
+// (#227), and the user's own key untouched. This is the "compute the desired content
+// and replace" shape stated positively — a file that ever held only some of these is a
+// file some login was refused against.
 func TestAnInstallPublishesTheCompleteDesiredSetAtOnce(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
@@ -136,10 +142,15 @@ func TestAnInstallPublishesTheCompleteDesiredSetAtOnce(t *testing.T) {
 		t.Errorf("the key just installed is not in the file, so the login it authorized cannot be "+
 			"used; file is %q", after)
 	}
-	if strings.Contains(after, "BROKERKEY") {
-		t.Errorf("the superseded broker key is still authorized; file is %q", after)
+	if !strings.Contains(after, "LIVEKEY") {
+		t.Errorf("the entry belonging to the account's other session was removed by this login, "+
+			"so that session cannot open another connection (#227); file is %q", after)
 	}
-	if got := strings.Count(after, "# Added by OIDC PAM on"); got != 1 {
-		t.Errorf("the file carries %d broker comments, not 1; file is %q", got, after)
+	if strings.Contains(after, "STALEKEY") {
+		t.Errorf("the expired broker key is still authorized; file is %q", after)
+	}
+	// One comment per surviving broker entry: the expired entry's comment goes with it.
+	if got := strings.Count(after, "# Added by OIDC PAM on"); got != 2 {
+		t.Errorf("the file carries %d broker comments for 2 broker entries; file is %q", got, after)
 	}
 }

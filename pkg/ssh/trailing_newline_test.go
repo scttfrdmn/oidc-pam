@@ -20,9 +20,10 @@ func brokerKeyLine(issuedAt time.Time, distinguisher string) []byte {
 // plantLines writes authorized_keys directly, so a test can set up a state a
 // previous broker left behind.
 //
-// AddPublicKey cannot be used for this any more: it installs one live
-// broker-issued key per user and drops the rest (#171), which is the point of that
-// change and makes it useless for building a file that holds several at once.
+// AddPublicKey cannot be used for this: it writes each entry with the expiry it is
+// given and a comment stamped with the moment of the call, so a file holding an entry
+// a previous broker left behind — expired, undatable, or written before
+// `expiry-time=` existed — is not a file any sequence of installs can produce.
 func plantLines(t *testing.T, baseDir, username string, lines ...string) {
 	t.Helper()
 
@@ -97,9 +98,9 @@ func TestTargetedRemovalLeavesATrailingNewline(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
-	// The survivor is the user's own key: since #171 a user has at most one
-	// broker-issued key, so what must be preserved around a targeted removal is the
-	// key the broker did not install.
+	// The survivor is the user's own key, which is what a targeted removal must
+	// preserve whatever else the file holds: the broker's own entries come and go with
+	// the sessions they belong to, and this key does not.
 	doomed := brokerKeyLine(time.Now(), "DOOMED")
 	keeper := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5KEEPER personal-laptop"
 	plantLines(t, baseDir, "testuser", string(doomed), keeper)
@@ -127,9 +128,9 @@ func TestAddSweepAddRevokeRoundTrip(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
-	// The survivor is the user's own key. Since #171 the broker keeps at most one of
-	// its own per user, so the file the sweep leaves behind for the next login to
-	// write into is one holding a key that is not the broker's.
+	// The survivor is the user's own key, so the file the sweep leaves behind for the
+	// next login to write into ends in a line the broker does not own — which is what
+	// made the fused line of #165 both permanent and irremovable.
 	stale := brokerKeyLine(time.Now().Add(-48*time.Hour), "STALE")
 	surviving := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5SURVIVING personal-laptop"
 	plantLines(t, baseDir, "testuser", string(stale), surviving)
@@ -180,7 +181,14 @@ func TestAddSweepAddRevokeRoundTrip(t *testing.T) {
 // impossible. A user who logged in daily therefore accumulated one permanently
 // valid key per login, each on its own sufficient to authenticate, so revoking the
 // current session's key left all the earlier ones working (#171).
-func TestASecondLoginSupersedesTheFirstKey(t *testing.T) {
+//
+// What that accumulation is bounded by is now the expiry on each entry and the
+// per-account limit, not the removal of keys that other sessions are still using
+// (#227, and TestASecondLoginKeepsTheFirstSessionsKey). What this test keeps is the
+// file hygiene across repeated logins: whatever the broker keeps, no line may be fused
+// with a comment, no line may be duplicated, and the user's own key is not the
+// broker's to touch.
+func TestRepeatedLoginsLeaveAWellFormedFile(t *testing.T) {
 	baseDir := t.TempDir()
 	akm := newTestManager(t, baseDir)
 
@@ -189,43 +197,40 @@ func TestASecondLoginSupersedesTheFirstKey(t *testing.T) {
 
 	first := brokerKeyLine(time.Now().Add(-time.Minute), "FIRSTLOGIN")
 	second := brokerKeyLine(time.Now(), "SECONDLOGIN")
-	for _, key := range [][]byte{first, second} {
+	for _, key := range [][]byte{first, second, second} {
 		if err := akm.AddPublicKey("testuser", key, testExpiry()); err != nil {
 			t.Fatalf("AddPublicKey: %v", err)
 		}
 	}
 
+	content := readKeys(t, baseDir, "testuser")
+	if fused := fusedLines(content); len(fused) > 0 {
+		t.Errorf("a key line was fused with a login comment, so that key can never be revoked "+
+			"again (#165): %q", fused)
+	}
+	if !strings.HasSuffix(content, "\n") || strings.HasSuffix(content, "\n\n") {
+		t.Errorf("the file does not end in exactly one newline; tail is %q", tail(content))
+	}
+	// Re-installing the same entry replaces it rather than adding a second copy: a
+	// duplicate would survive the revocation of the one the broker knows about.
+	if got := strings.Count(content, "SECONDLOGIN"); got != 1 {
+		t.Errorf("the third install left %d copies of the same entry, not 1; file is %q", got, content)
+	}
 	oidcKeys, err := akm.ListOIDCKeys("testuser")
 	if err != nil {
 		t.Fatalf("ListOIDCKeys: %v", err)
 	}
-	if len(oidcKeys) != 1 {
-		t.Errorf("after two logins the user has %d broker-issued keys, not 1: %q", len(oidcKeys), oidcKeys)
-	}
-
-	content := readKeys(t, baseDir, "testuser")
-	if strings.Contains(content, "FIRSTLOGIN") {
-		t.Error("the first login's key is still in authorized_keys, so it still authenticates " +
-			"after the session that owned it ended")
-	}
-	if !strings.Contains(content, "SECONDLOGIN") {
-		t.Error("the second login's key is missing, so the login cannot be used")
+	if len(oidcKeys) != 2 {
+		t.Errorf("three installs of two distinct keys left %d broker-issued entries, want 2: %q",
+			len(oidcKeys), oidcKeys)
 	}
 	if !strings.Contains(content, own) {
 		t.Errorf("the user's own key was removed; the broker only owns its own entries. file is %q", content)
 	}
-	// The superseded key must no longer authorize anything: that is what makes
-	// revoking the live one a revocation of access.
-	authorized, err := akm.KeyIsAuthorized("testuser", first)
-	if err != nil {
-		t.Fatalf("KeyIsAuthorized: %v", err)
-	}
-	if authorized {
-		t.Error("the first login's key still authorizes access")
-	}
-	// Exactly one provenance comment, not one per login.
-	if got := strings.Count(content, "# Added by OIDC PAM on"); got != 1 {
-		t.Errorf("authorized_keys carries %d broker comments, not 1; file is %q", got, content)
+	// One provenance comment per entry, not one per login.
+	if got := strings.Count(content, "# Added by OIDC PAM on"); got != len(oidcKeys) {
+		t.Errorf("authorized_keys carries %d broker comments for %d broker entries; file is %q",
+			got, len(oidcKeys), content)
 	}
 }
 

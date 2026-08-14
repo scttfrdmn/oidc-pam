@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -717,8 +718,9 @@ func (akm *AuthorizedKeysManager) SetLockTimeout(d time.Duration) {
 	akm.lockTimeout = d
 }
 
-// AddPublicKey installs the broker's key in a user's authorized_keys, as the
-// user's only broker-issued key, carrying the expiry sshd will enforce on it.
+// AddPublicKey installs the broker's key in a user's authorized_keys, carrying the
+// expiry sshd will enforce on it, alongside the entries the account's other live
+// sessions are using.
 //
 // expiresAt must be in the future: an entry with no expiry, or one already expired,
 // is not something to write into a key list and hope something removes later.
@@ -730,8 +732,9 @@ func (akm *AuthorizedKeysManager) SetLockTimeout(d time.Duration) {
 //     timestamp, so no two logins ever produced one. A user who logged in daily
 //     accumulated one permanently valid key per login, each independently
 //     sufficient to authenticate, and revoking the current session's key left all
-//     the others in place. Now every broker-issued entry for that user is dropped
-//     before the new one is written: one live key, so revoking it revokes access.
+//     the others in place. What bounds that now is the expiry on every entry, the
+//     removal of expired entries below, and maxConcurrentOIDCKeys — not the removal
+//     of entries that still belong to a live session, which is what #227 undid.
 //   - The expiry existed only in the broker's memory and in a comment nothing but
 //     this broker reads. sshd now enforces it itself, which is what makes a key
 //     survive neither a broker restart nor a broker that never gets around to
@@ -783,23 +786,19 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 			return err
 		}
 
-		// Keep everything that is not the broker's. A key the user put there
-		// themselves is none of the broker's business, whatever it authorizes; only
-		// entries carrying the broker's own marker, or a re-add of this very entry,
-		// are dropped.
-		kept := make([]string, 0, len(existing)+2)
-		superseded := 0
-		for _, line := range existing {
-			entry, isEntry := parseKeyEntry(line)
-			if isEntry && (entry.brokerIssued() || entry.isSameEntryAs(newEntry)) {
-				superseded++
-				continue
-			}
-			kept = append(kept, line)
+		plan := akm.planInstall(existing, newEntry, time.Now())
+		if plan.evicted > 0 {
+			// The only case in which this write takes a key a live session may still be
+			// using, so it is said out loud: whoever is holding that session will see its
+			// next connection refused, and this line is the only thing that explains it.
+			log.Warn().
+				Str("username", username).
+				Int("evicted_keys", plan.evicted).
+				Int("limit", maxConcurrentOIDCKeys).
+				Msg("Dropped the oldest broker-issued keys to stay within the per-account limit; " +
+					"sessions holding them cannot open new connections")
 		}
-		kept = dropStrandedBrokerComments(kept)
-
-		kept = append(kept,
+		kept := append(plan.kept,
 			fmt.Sprintf("%s %s", brokerCommentPrefix, time.Now().Format("2006-01-02 15:04:05")),
 			brokerEntryLine(publicKey, expiresAt))
 
@@ -810,12 +809,156 @@ func (akm *AuthorizedKeysManager) AddPublicKey(username string, publicKey []byte
 		log.Info().
 			Str("username", username).
 			Str("authorized_keys_path", authorizedKeysPath).
-			Int("superseded_keys", superseded).
+			Int("replaced_keys", plan.replaced).
+			Int("expired_keys", plan.expired).
+			Int("evicted_keys", plan.evicted).
+			Int("other_live_keys", plan.retained).
 			Time("expires_at", expiresAt).
 			Msg("Public key added to authorized_keys")
 
 		return nil
 	})
+}
+
+// maxConcurrentOIDCKeys is how many broker-issued entries one account may hold at
+// once, and so how many of its sessions can be authorized at the same time.
+//
+// (#227) There used to be one, because an install dropped every broker-issued entry it
+// found before writing its own. That is the ordinary case for anyone with more than one
+// machine: a user logged in from their laptop and then from a jump host, and the second
+// login removed the key the first session was using. The laptop's open connection
+// survived — sshd had already authenticated it — but the next connection was refused,
+// and so was the reconnect a ControlMaster re-dial or a resumed laptop makes, while the
+// broker went on reporting that session as live and unexpired. Nothing in the file, the
+// log or the audit trail said the key had been taken away.
+//
+// "Never evict" is not the answer either. Every login mints a key, so a user who logs
+// in hourly — or a script that logs in in a loop — would grow authorized_keys without
+// limit, and the growth ends somewhere much worse than an untidy file: past
+// maxAuthorizedKeysBytes the broker refuses to read the file at all, at which point no
+// login can be provisioned and no sweep can remove anything for that account until an
+// operator edits it by hand.
+//
+// Sixteen because it is well beyond the number of sessions a person holds at once — a
+// workstation, a laptop, a phone, a handful of jump hosts, each re-authenticating a few
+// times a day — while bounding the broker's own entries to about two kilobytes. Beyond
+// that the account is in a login loop rather than in use, and the newest key is the one
+// worth keeping.
+const maxConcurrentOIDCKeys = 16
+
+// installPlan is what an install decides about the lines already in authorized_keys:
+// the ones that survive it, and a count of each reason the others did not, so that the
+// install can say in its log what it took away.
+type installPlan struct {
+	kept     []string
+	replaced int // this very entry, being rewritten with the current expiry
+	expired  int // broker entries sshd has already stopped honouring
+	evicted  int // live broker entries dropped to stay within maxConcurrentOIDCKeys
+	retained int // broker entries carried through, belonging to the account's other sessions
+}
+
+// planInstall works out which of an account's existing authorized_keys lines survive
+// an install. The new entry is not in the plan: the caller appends it.
+//
+// The rules, in the order they are applied to each line:
+//
+//   - A line that is not an entry the broker installed is kept, whatever it
+//     authorizes. A key the user put there themselves is none of the broker's
+//     business.
+//   - The entry being installed, if it is already in the file, is dropped, because the
+//     line about to be appended is the same entry carrying the current expiry.
+//   - A broker entry whose expiry has passed is dropped. sshd stopped honouring it
+//     already, and an install is a chance to tidy the file without waiting for
+//     RemoveExpiredKeys to reach this account — which only happens when some session
+//     of this user's expires (see the broker's sweepExpiredAuthorizedKeys).
+//   - Every remaining broker entry belongs to one of the account's other sessions and
+//     is kept (#227), up to maxConcurrentOIDCKeys.
+func (akm *AuthorizedKeysManager) planInstall(existing []string, newEntry keyEntry, now time.Time) installPlan {
+	plan := installPlan{kept: make([]string, 0, len(existing)+2)}
+
+	// Which entry to evict cannot be decided a line at a time — it depends on how the
+	// live entries compare with each other — so the first pass only classifies.
+	type liveEntry struct {
+		index    int
+		deadline time.Time
+		dated    bool
+	}
+	drop := make(map[int]bool, len(existing))
+	live := make([]liveEntry, 0, len(existing))
+	for i, line := range existing {
+		entry, isEntry := parseKeyEntry(line)
+		if !isEntry {
+			continue
+		}
+		if entry.isSameEntryAs(newEntry) {
+			drop[i] = true
+			plan.replaced++
+			continue
+		}
+		if !entry.brokerIssued() {
+			continue
+		}
+		deadline, dated := akm.entryDeadline(entry)
+		if dated && now.After(deadline) {
+			drop[i] = true
+			plan.expired++
+			continue
+		}
+		live = append(live, liveEntry{index: i, deadline: deadline, dated: dated})
+	}
+
+	// The entry being installed takes one of the slots, so the existing ones may fill
+	// the rest. The nearest to its expiry goes first: it is the session closest to
+	// ending anyway, and evicting the one with the longest left would take a key that
+	// had the most use still in it.
+	if excess := len(live) - (maxConcurrentOIDCKeys - 1); excess > 0 {
+		sort.SliceStable(live, func(a, b int) bool {
+			if live[a].dated != live[b].dated {
+				// An entry carrying the broker's marker whose expiry cannot be read
+				// either way goes first. RemoveExpiredKeys deliberately retains such an
+				// entry — cleanup fails safe, never early — so if it also outranked keys
+				// known to be live here, a handful of mangled or hand-written lines would
+				// hold the limit permanently and evict every real session's key instead.
+				return !live[a].dated
+			}
+			return live[a].deadline.Before(live[b].deadline)
+		})
+		for _, victim := range live[:excess] {
+			drop[victim.index] = true
+			plan.evicted++
+		}
+		live = live[excess:]
+	}
+	plan.retained = len(live)
+
+	for i, line := range existing {
+		if _, isEntry := parseKeyEntry(line); isEntry && drop[i] {
+			continue
+		}
+		plan.kept = append(plan.kept, line)
+	}
+	// A dropped entry leaves its provenance comment behind, and with several entries in
+	// the file that comment would go on to claim a date for whichever one follows it.
+	plan.kept = pruneBrokerComments(plan.kept)
+	return plan
+}
+
+// entryDeadline returns the moment a broker-issued entry stops authorizing anything,
+// and whether that could be determined at all.
+//
+// It is the entry's own `expiry-time=` option where there is one, because that is what
+// sshd itself honours, and for an entry written by a broker from before that option the
+// issue time in the comment plus the configured lifetime (SetKeyLifetime). An entry
+// that says neither yields false, and every caller treats that as an entry it cannot
+// make claims about.
+func (akm *AuthorizedKeysManager) entryDeadline(entry keyEntry) (time.Time, bool) {
+	if expiry, ok := entry.expiryTime(); ok {
+		return expiry, true
+	}
+	if issued, ok := entry.issuedAt(); ok {
+		return issued.Add(akm.keyLifetime), true
+	}
+	return time.Time{}, false
 }
 
 // RemovePublicKey removes a public key from a user's authorized_keys file. It
@@ -878,7 +1021,7 @@ func (akm *AuthorizedKeysManager) RemovePublicKey(username string, publicKey []b
 
 		// Write filtered content back atomically, refusing to follow symlinks (C-2).
 		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath,
-			dropStrandedBrokerComments(filteredLines), account); err != nil {
+			pruneBrokerComments(filteredLines), account); err != nil {
 			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
@@ -980,7 +1123,7 @@ func (akm *AuthorizedKeysManager) RemoveOIDCKeys(username string) (int, error) {
 		if removed == 0 {
 			return nil
 		}
-		return writeAuthorizedKeysLines(sshDir, authorizedKeysPath, dropStrandedBrokerComments(kept), account)
+		return writeAuthorizedKeysLines(sshDir, authorizedKeysPath, pruneBrokerComments(kept), account)
 	})
 	if err != nil {
 		return 0, err
@@ -1050,7 +1193,7 @@ func (akm *AuthorizedKeysManager) RemoveExpiredKeys(username string) error {
 		// Line splitting has stripped every line's newline, so the shared writer is
 		// what puts the file's final one back (#165).
 		if err := writeAuthorizedKeysLines(sshDir, authorizedKeysPath,
-			dropStrandedBrokerComments(filteredLines), account); err != nil {
+			pruneBrokerComments(filteredLines), account); err != nil {
 			return fmt.Errorf("failed to write authorized_keys file: %w", err)
 		}
 
@@ -1071,16 +1214,8 @@ func (akm *AuthorizedKeysManager) entryHasExpired(line string, now time.Time) bo
 	if !ok || !entry.brokerIssued() {
 		return false
 	}
-	// The option is what sshd itself honours, so it wins where both are present.
-	if expiry, ok := entry.expiryTime(); ok {
-		return now.After(expiry)
-	}
-	// An entry from a broker that predates expiry-time=: the comment records when it
-	// was issued, and the configured lifetime says how long that was good for.
-	if issued, ok := entry.issuedAt(); ok {
-		return now.After(issued.Add(akm.keyLifetime))
-	}
-	return false
+	deadline, dated := akm.entryDeadline(entry)
+	return dated && now.After(deadline)
 }
 
 // ListOIDCKeys lists all OIDC PAM keys in a user's authorized_keys file.

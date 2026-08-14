@@ -219,19 +219,26 @@ expect_no_module_log() {
 }
 
 expect_oidc_key_for() {
-    local user="$1" keys="/home/$1/.ssh/authorized_keys"
+    expect_oidc_key_count "$1" 1
+}
+
+# expect_oidc_key_count is expect_oidc_key_for for an account with more than one
+# session: since #227 the broker keeps a live entry per session, so the number of
+# them a case expects is the number of logins it has driven.
+expect_oidc_key_count() {
+    local user="$1" want="$2" keys="/home/$1/.ssh/authorized_keys"
     if [[ ! -f "${keys}" ]]; then
         fail "${keys} does not exist: the broker did not install a login key"
         return 1
     fi
     local count
     count="$(grep -c '@oidc-pam-' "${keys}")"
-    if [[ "${count}" -ne 1 ]]; then
-        fail "${keys} has ${count} @oidc-pam- key(s), expected exactly 1"
+    if [[ "${count}" -ne "${want}" ]]; then
+        fail "${keys} has ${count} @oidc-pam- key(s), expected exactly ${want}"
         sed 's/^/      authorized_keys: /' "${keys}"
         return 1
     fi
-    log "${user} has exactly one @oidc-pam- key in authorized_keys"
+    log "${user} has exactly ${want} @oidc-pam- key(s) in authorized_keys"
 }
 
 expect_no_oidc_key_for() {
@@ -244,11 +251,16 @@ expect_no_oidc_key_for() {
     fi
 }
 
-# oidc_key_blob prints the base64 blob of the account's broker-issued key, which
-# is what identifies one issued key against another across logins.
-oidc_key_blob() {
-    awk '/@oidc-pam-/ { for (i = 1; i <= NF; i++) if ($i ~ /^AAAA/) { print $i; exit } }' \
+# oidc_key_blobs prints the base64 blob of every broker-issued entry, one per line,
+# which is what identifies one issued key against another across logins.
+oidc_key_blobs() {
+    awk '/@oidc-pam-/ { for (i = 1; i <= NF; i++) if ($i ~ /^AAAA/) { print $i; next } }' \
         "/home/$1/.ssh/authorized_keys" 2>/dev/null
+}
+
+# oidc_key_blob is oidc_key_blobs for an account with a single broker-issued entry.
+oidc_key_blob() {
+    oidc_key_blobs "$1" | head -1
 }
 
 # PERSONAL_KEY stands in for a key the user put in their own authorized_keys. The
@@ -746,11 +758,18 @@ case_long_verification_uri() {
     expect_no_module_log 'does not fit this module'
 }
 
-# One live broker-issued key per account, however many times the user logs in
-# (#171). The old code appended one on every login and only ever deduplicated
-# byte-identical lines, so an account that logged in daily accumulated a working
-# credential per login, each outliving the session it was issued for.
-case_second_login_supersedes_key() {
+# Two concurrent sessions for one account, both authorized (#227). This case used
+# to assert the opposite — one live key per account, the second login replacing the
+# first — which is the ordinary case for anyone with more than one machine: the
+# laptop's session kept its open connection, because sshd had already authenticated
+# it, and then every new connection and every ControlMaster re-dial from it was
+# refused while the broker went on reporting that session as live and unexpired.
+#
+# What bounds the entries instead is the expiry each one carries (checked below, and
+# the subject of case_orphan_keys_swept), the removal of expired entries by the next
+# login and by the sweep, and a per-account limit far above the number of sessions a
+# person holds at once.
+case_second_login_keeps_the_first_key() {
     reset_state alice || return 1
     plant_personal_key alice
 
@@ -763,6 +782,10 @@ case_second_login_supersedes_key() {
 
     local first
     first="$(oidc_key_blob alice)"
+    if [[ -z "${first}" ]]; then
+        fail "the first login installed no key, so there is nothing for the second to preserve"
+        return 1
+    fi
 
     # A second login, from scratch: a new device flow, a new approval, a new key.
     reset_state alice || return 1
@@ -772,22 +795,31 @@ case_second_login_supersedes_key() {
     reap_login
     expect_login_ok || return 1
 
-    # Exactly one, still.
-    expect_oidc_key_for alice
+    # One entry per session now, not one per account.
+    expect_oidc_key_count alice 2 || return 1
     expect_personal_key_for alice
 
-    local second
-    second="$(oidc_key_blob alice)"
-    if [[ -z "${second}" ]]; then
-        fail "the second login installed no key"
-    elif [[ "${second}" == "${first}" ]]; then
-        fail "the second login reused the first login's key; each session must get its own"
-    else
-        log "the second login replaced the first login's key rather than adding to it"
-    fi
     if grep -qF "${first}" "/home/alice/.ssh/authorized_keys"; then
-        fail "the first login's key is still authorized after a second login (#171)"
+        log "the first session's key is still authorized after a second login"
+    else
+        fail "the second login removed the first session's key: that session cannot open another connection, and neither the file nor the broker says why (#227)"
         sed 's/^/      authorized_keys: /' "/home/alice/.ssh/authorized_keys"
+    fi
+
+    # Distinct key material, so that revoking one session does not revoke the other.
+    local distinct
+    distinct="$(oidc_key_blobs alice | sort -u | wc -l)"
+    if [[ "${distinct}" -ne 2 ]]; then
+        fail "the two sessions share key material (${distinct} distinct blob(s) across 2 entries); revoking either would revoke both"
+    fi
+
+    # Both entries must carry the expiry sshd enforces: with several live at once, that
+    # option is the only thing that removes one if this broker never runs again.
+    if grep '@oidc-pam-' "/home/alice/.ssh/authorized_keys" | grep -qv 'expiry-time="'; then
+        fail "a broker-issued entry has no expiry-time option, so nothing but this broker limits it (#171)"
+        sed 's/^/      authorized_keys: /' "/home/alice/.ssh/authorized_keys"
+    else
+        log "both entries carry the expiry-time option sshd enforces"
     fi
 }
 
@@ -876,7 +908,7 @@ CASES=(
     nonroot_ipc_rejected
     rate_limit_is_per_account
     home_lock_does_not_block_login
-    second_login_supersedes_key
+    second_login_keeps_the_first_key
     orphan_keys_swept
     broker_down
 )
