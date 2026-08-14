@@ -11,13 +11,16 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Config represents the complete configuration for the OIDC PAM broker
+// Config represents the complete configuration for the OIDC PAM broker.
+//
+// Every key a configuration file may contain is a field below: the loader
+// refuses keys it does not read (see unmarshalStrict, #170), so adding a
+// section to a shipped config means adding it here too.
 type Config struct {
 	Server         ServerConfig         `mapstructure:"server"`
 	OIDC           OIDCConfig           `mapstructure:"oidc"`
 	Authentication AuthenticationConfig `mapstructure:"authentication"`
 	Security       SecurityConfig       `mapstructure:"security"`
-	Cloud          CloudConfig          `mapstructure:"cloud"`
 	Audit          AuditConfig          `mapstructure:"audit"`
 }
 
@@ -62,25 +65,70 @@ type OIDCProvider struct {
 	VerificationOnly  bool              `mapstructure:"verification_only"`
 	RequirePKCE       bool              `mapstructure:"require_pkce"`
 	AllowMissingNonce bool              `mapstructure:"allow_missing_nonce"`
+
+	// RequireIDToken refuses a device-grant token response that carries no
+	// id_token. The ID token is the only part of that response the broker can
+	// check: the signature, the issuer, the audience, the expiry and the nonce it
+	// sent are all in there. Without one the identity comes from /userinfo — a
+	// JSON body authenticated by nothing but TLS and the bearer token — and no
+	// signature, aud or exp check happens at all (#167).
+	//
+	// A pointer because the default is *on*: nil means required, so a provider
+	// whose configuration has never heard of the key still gets verification, in
+	// configs built in Go as well as loaded YAML. Read it through IDTokenRequired.
+	RequireIDToken *bool `mapstructure:"require_id_token"`
+}
+
+// IDTokenRequired reports whether a token response with no id_token must be
+// refused for this provider. Unset means required (#167): set
+// require_id_token: false only for a provider that genuinely does not issue an ID
+// token for the device grant, accepting that its identities are then asserted by
+// /userinfo alone.
+func (p OIDCProvider) IDTokenRequired() bool {
+	return p.RequireIDToken == nil || *p.RequireIDToken
 }
 
 // UserMapping defines how to map OIDC claims to user attributes
 type UserMapping struct {
-	UsernameClaim       string            `mapstructure:"username_claim"`
-	EmailClaim          string            `mapstructure:"email_claim"`
-	NameClaim           string            `mapstructure:"name_claim"`
-	GroupsClaim         string            `mapstructure:"groups_claim"`
-	RolesClaim          string            `mapstructure:"roles_claim"`
-	DepartmentClaim     string            `mapstructure:"department_claim"`
-	OrganizationClaim   string            `mapstructure:"organization_claim"`
-	InstitutionClaim    string            `mapstructure:"institution_claim"`
-	OrcidClaim          string            `mapstructure:"orcid_claim"`
+	UsernameClaim     string `mapstructure:"username_claim"`
+	EmailClaim        string `mapstructure:"email_claim"`
+	NameClaim         string `mapstructure:"name_claim"`
+	GroupsClaim       string `mapstructure:"groups_claim"`
+	RolesClaim        string `mapstructure:"roles_claim"`
+	DepartmentClaim   string `mapstructure:"department_claim"`
+	OrganizationClaim string `mapstructure:"organization_claim"`
+	InstitutionClaim  string `mapstructure:"institution_claim"`
+	OrcidClaim        string `mapstructure:"orcid_claim"`
+	// StripEmailDomain allows the local part of an email-shaped username claim to
+	// bind to a local account: "alice@example.com" may log in as "alice". It is off
+	// by default and requires AllowedEmailDomains to be set, because on its own it
+	// lets anyone who can choose the local part of their address — a guest identity,
+	// a second verified domain, self-service alias editing — pick which local
+	// account they bind to. See Broker.verifyIdentityBinding (#159).
+	StripEmailDomain bool `mapstructure:"username_claim_strip_domain"`
+
+	// AllowedEmailDomains pins the domains whose local part may be stripped. A
+	// claim from any other domain is refused even when StripEmailDomain is set.
+	// Required when StripEmailDomain is set; ignored otherwise.
+	AllowedEmailDomains []string `mapstructure:"allowed_email_domains"`
+
 	UsernameTemplate    string            `mapstructure:"username_template"`
 	DisplayNameTemplate string            `mapstructure:"display_name_template"`
 	GroupPrefix         string            `mapstructure:"group_prefix"`
 	GroupMappings       map[string]string `mapstructure:"group_mappings"`
-	AllowedGroups       []string          `mapstructure:"allowed_groups"`
-	AllowedRoles        []string          `mapstructure:"allowed_roles"`
+
+	// AllowedGroups and AllowedRoles gate the login: when either is non-empty the
+	// identity must hold at least one of the names in it, or the authentication is
+	// refused with GROUP_NOT_ALLOWED. Empty means no restriction. Matching is
+	// case-insensitive, and both are enforced in addition to — not instead of —
+	// authentication.require_groups, which demands *every* group it names.
+	//
+	// Until #166 these filtered the group and role lists instead of deciding the
+	// login, so an identity in none of the allowed groups authenticated with an
+	// empty group list. They no longer alter what the session or the audit trail
+	// records the identity as holding; see Broker.verifyGroupAuthorization.
+	AllowedGroups []string `mapstructure:"allowed_groups"`
+	AllowedRoles  []string `mapstructure:"allowed_roles"`
 }
 
 // ResearchPolicies contains research computing specific policies
@@ -122,6 +170,14 @@ type AuthenticationConfig struct {
 	RiskPolicies          []RiskPolicy                    `mapstructure:"risk_policies"`
 	GeoIPDatabasePath     string                          `mapstructure:"geoip_database_path"`
 	LocationHistory       LocationHistoryConfig           `mapstructure:"location_history"`
+
+	// AllowPrivilegedAccounts names the privileged local accounts an OIDC identity
+	// may log in as. By default no identity may bind to uid 0 or to any account with
+	// uid < PrivilegedUIDThreshold, whatever the token says, because that binding is
+	// the highest-value target on the host and every other check in front of it is
+	// operator-configurable. Listing an account here is a deliberate exception.
+	// See Broker.verifyLocalAccountIsBindable (#159).
+	AllowPrivilegedAccounts []string `mapstructure:"allow_privileged_accounts"`
 }
 
 // AuthenticationPolicy defines access control policies
@@ -148,7 +204,28 @@ type NetworkRequirements struct {
 	TailscaleAPIKey       string `mapstructure:"tailscale_api_key"`
 	ValidateDeviceTrust   bool   `mapstructure:"validate_device_trust"`
 	RequirePrivateNetwork bool   `mapstructure:"require_private_network"`
+
+	// UnknownSourceIP decides what the requirements above do with a login the
+	// broker cannot place on any network: one that arrived with no source_ip.
+	// That is neither rare nor an attack — a login at the physical console has no
+	// peer address, and neither does one whose PAM_RHOST is a resolved hostname
+	// rather than an address, since source_ip carries an address or nothing.
+	//
+	// (#169) It is required, and has no default, whenever a requirement above is
+	// enabled: the implicit answer was the defect. An absent source_ip went
+	// through isPrivateIP(""), came back false, and denied every login on the
+	// host. "Unknown" and "on a public network" are different facts, and the
+	// operator is the only one who can say which way an unknown falls.
+	UnknownSourceIP string `mapstructure:"unknown_source_ip"`
 }
+
+// The values UnknownSourceIP takes. Deny is the fail-closed answer and the one
+// to prefer; Allow is for a host whose console logins matter more than the
+// requirement, and every login it lets through is audited as a waiver.
+const (
+	UnknownSourceIPDeny  = "deny"
+	UnknownSourceIPAllow = "allow"
+)
 
 // TimeBasedPolicies defines time-based access controls
 type TimeBasedPolicies struct {
@@ -226,54 +303,24 @@ type TLSVerification struct {
 
 // RateLimiting contains rate limiting settings
 type RateLimiting struct {
+	// MaxRequestsPerMinute is the budget for starting an authentication, per
+	// requested account — not a host-wide total. (#160) It was applied per peer
+	// uid, which is always 0 on a socket that only root may use, so a single
+	// bucket governed the whole machine and any caller could spend every login's
+	// budget. Requests about an existing session (check_session and friends) draw
+	// on a separate, larger budget so that a login already in flight can finish.
 	MaxRequestsPerMinute int `mapstructure:"max_requests_per_minute"`
-	MaxConcurrentAuths   int `mapstructure:"max_concurrent_auths"`
+
+	// MaxConcurrentAuths caps authentications in progress at once, host-wide.
+	MaxConcurrentAuths int `mapstructure:"max_concurrent_auths"`
 }
 
-// CloudConfig contains cloud provider integration settings
-type CloudConfig struct {
-	Provider        string      `mapstructure:"provider"`
-	AutoDiscovery   bool        `mapstructure:"auto_discovery"`
-	Sources         []string    `mapstructure:"sources"`
-	AWS             AWSConfig   `mapstructure:"aws"`
-	Azure           AzureConfig `mapstructure:"azure"`
-	GCP             GCPConfig   `mapstructure:"gcp"`
-	MetadataSources []string    `mapstructure:"metadata_sources"`
-}
-
-// AWSConfig contains AWS-specific configuration
-type AWSConfig struct {
-	Region         string                  `mapstructure:"region"`
-	ParameterStore AWSParameterStoreConfig `mapstructure:"parameter_store"`
-}
-
-// AWSParameterStoreConfig contains AWS Parameter Store settings
-type AWSParameterStoreConfig struct {
-	Prefix     string            `mapstructure:"prefix"`
-	Parameters map[string]string `mapstructure:"parameters"`
-}
-
-// AzureConfig contains Azure-specific configuration
-type AzureConfig struct {
-	KeyVault AzureKeyVaultConfig `mapstructure:"key_vault"`
-}
-
-// AzureKeyVaultConfig contains Azure Key Vault settings
-type AzureKeyVaultConfig struct {
-	VaultName string            `mapstructure:"vault_name"`
-	Secrets   map[string]string `mapstructure:"secrets"`
-}
-
-// GCPConfig contains GCP-specific configuration
-type GCPConfig struct {
-	ProjectID     string                 `mapstructure:"project_id"`
-	SecretManager GCPSecretManagerConfig `mapstructure:"secret_manager"`
-}
-
-// GCPSecretManagerConfig contains GCP Secret Manager settings
-type GCPSecretManagerConfig struct {
-	Secrets map[string]string `mapstructure:"secrets"`
-}
+// (#170) The cloud: section — provider, auto_discovery, AWS Parameter Store,
+// Azure Key Vault, GCP Secret Manager — was deleted rather than implemented.
+// Nothing in the repository ever read a field of it, there is no cloud SDK in
+// go.mod, and it appeared in the shipped configs as though secrets could be
+// fetched from a parameter store. Use the "env:" and "file:" secret prefixes
+// (resolveSecretValue) with whatever your platform already injects.
 
 // AuditConfig contains audit logging configuration
 type AuditConfig struct {
@@ -341,8 +388,8 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	var config Config
-	if err := v.Unmarshal(&config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	if err := unmarshalStrict(v, &config); err != nil {
+		return nil, err
 	}
 
 	if err := resolveSecretReferences(&config); err != nil {
@@ -354,6 +401,47 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// AllowUnknownKeysEnv names the environment variable that turns the unknown-key
+// error below into a warning.
+const AllowUnknownKeysEnv = "OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS"
+
+// unmarshalStrict decodes the configuration and refuses any key no field reads.
+//
+// (#170) The loader used viper.Unmarshal, so every unrecognised key at every
+// depth was discarded without a word. That is not a tidiness problem: the keys
+// operators had actually written included `pin_certificates` (the field is
+// `pinned_certificates`), so certificate pinning was off in every configuration
+// that switched it on, and whole `policy:` and `ssh:` blocks that read as the
+// access-control rules of the system were inert. A key that turns a security
+// check off has to be louder than the check being off, and startup is the only
+// moment anybody is looking.
+//
+// The escape hatch exists because refusing to start is not free: the shipped PAM
+// stack has no password fallback (#160), so a broker that will not load is a
+// host nobody can log into. An operator who meets this on upgrade can set
+// OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true in the unit, get the same list of
+// keys as a warning, and clean the file up without being locked out first. It
+// cannot weaken a setting the broker does read.
+func unmarshalStrict(v *viper.Viper, config *Config) error {
+	err := v.UnmarshalExact(config)
+	if err == nil {
+		return nil
+	}
+
+	if strings.ToLower(os.Getenv(AllowUnknownKeysEnv)) == "true" {
+		log.Printf("WARNING: configuration contains keys the broker does not read; they have NO effect: %v "+
+			"(continuing because %s=true)", err, AllowUnknownKeysEnv)
+		// UnmarshalExact aborts part-way through, so decode again permissively.
+		if err := v.Unmarshal(config); err != nil {
+			return fmt.Errorf("failed to unmarshal config: %w", err)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to unmarshal config: %w (a key the broker does not read is a setting that does "+
+		"nothing — remove it, or set %s=true to start anyway)", err, AllowUnknownKeysEnv)
 }
 
 // loadFromEnvironment loads configuration from environment variables
@@ -384,6 +472,12 @@ func loadFromEnvironment(v *viper.Viper) (*Config, error) {
 				ClientID: clientID,
 				Scopes:   []string{"openid", "email", "profile"},
 				UserMapping: UserMapping{
+					// (#159) No StripEmailDomain here, deliberately. Enabling it requires
+					// pinning allowed_email_domains, and an environment-derived config has
+					// no way to know the operator's domain. So an "email" claim must equal
+					// the local account name; if it does not, verifyIdentityBinding refuses
+					// the login and names the two keys to set. That is the fail-closed
+					// direction: the alternative is guessing a domain pin.
 					UsernameClaim: "email",
 					EmailClaim:    "email",
 					NameClaim:     "name",
@@ -426,10 +520,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.require_auth_time", false)
 	v.SetDefault("security.max_token_age", "24h")
 	v.SetDefault("security.clock_skew_tolerance", "5m")
-
-	// Cloud defaults
-	v.SetDefault("cloud.auto_discovery", true)
-	v.SetDefault("cloud.metadata_sources", []string{"aws", "azure", "gcp"})
 
 	// Audit defaults
 	v.SetDefault("audit.enabled", true)
@@ -493,6 +583,37 @@ func (c *Config) Validate() error {
 		if !hasOpenID {
 			return fmt.Errorf("provider[%d].scopes must include 'openid'", i)
 		}
+
+		// (#159) Stripping the domain off an email-shaped claim lets the identity
+		// provider decide which local account a login binds to, so the domains it may
+		// come from have to be pinned. Refused here rather than at first login: an
+		// operator who mis-set this should find out when the broker starts, not when
+		// somebody discovers what it admits.
+		m := provider.UserMapping
+		if m.StripEmailDomain && len(m.AllowedEmailDomains) == 0 {
+			return fmt.Errorf("provider[%d] (%s) sets username_claim_strip_domain but no allowed_email_domains; "+
+				"pin the domains whose local part may become a local username", i, provider.Name)
+		}
+		for _, d := range m.AllowedEmailDomains {
+			if strings.TrimSpace(d) == "" {
+				return fmt.Errorf("provider[%d] (%s) has an empty entry in allowed_email_domains", i, provider.Name)
+			}
+			if strings.ContainsAny(d, "*?") {
+				return fmt.Errorf("provider[%d] (%s) allowed_email_domains entry %q contains a wildcard; "+
+					"domains are matched exactly, since a wildcard re-opens the subdomain an attacker can "+
+					"get a verified address under", i, provider.Name, d)
+			}
+			if strings.Contains(d, "@") {
+				return fmt.Errorf("provider[%d] (%s) allowed_email_domains entry %q looks like an address; "+
+					"list the domain part only", i, provider.Name, d)
+			}
+		}
+	}
+
+	for _, account := range c.Authentication.AllowPrivilegedAccounts {
+		if strings.TrimSpace(account) == "" {
+			return fmt.Errorf("authentication.allow_privileged_accounts has an empty entry")
+		}
 	}
 
 	// Validate authentication configuration
@@ -510,7 +631,41 @@ func (c *Config) Validate() error {
 			c.Authentication.RefreshThreshold, c.Authentication.TokenLifetime)
 	}
 
+	if err := validateNetworkRequirements(c.Authentication.NetworkRequirements); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// validateNetworkRequirements refuses a network requirement whose behaviour on a
+// login with no source_ip has been left implicit.
+//
+// (#169) A requirement is evaluated against source_ip, and some logins have none
+// — the console, and any PAM_RHOST that is a hostname rather than an address.
+// Until the operator says so, the broker cannot tell whether such a login is
+// meant to pass or to be refused, and the answer it used to reach on its own
+// (isPrivateIP("") is false, therefore deny) refused every login on the host.
+// Refused at startup rather than at first login, for the same reason as the
+// email-domain check above: an operator who mis-set this should find out when the
+// broker starts.
+func validateNetworkRequirements(nr NetworkRequirements) error {
+	switch nr.UnknownSourceIP {
+	case UnknownSourceIPDeny, UnknownSourceIPAllow:
+		return nil
+	case "":
+		if !nr.RequirePrivateNetwork && !nr.RequireTailscale {
+			return nil // nothing consults it
+		}
+		return fmt.Errorf("authentication.network_requirements.unknown_source_ip must be %q or %q "+
+			"when require_private_network or require_tailscale is enabled: a login with no source_ip "+
+			"(one at the console, or one whose PAM_RHOST is a hostname rather than an address) cannot "+
+			"satisfy a network requirement, and leaving that implicit denied every login",
+			UnknownSourceIPDeny, UnknownSourceIPAllow)
+	default:
+		return fmt.Errorf("authentication.network_requirements.unknown_source_ip is %q; must be %q or %q",
+			nr.UnknownSourceIP, UnknownSourceIPDeny, UnknownSourceIPAllow)
+	}
 }
 
 // validateHTTPSEndpoint ensures a configured OIDC endpoint URL uses HTTPS.
@@ -565,10 +720,6 @@ func bindSafeEnvironmentVariables(v *viper.Viper) {
 		"authentication.token_lifetime",
 		"authentication.refresh_threshold",
 		"authentication.max_concurrent_sessions",
-
-		// Cloud settings (safe)
-		"cloud.provider",
-		"cloud.auto_discovery",
 
 		// Audit settings (safe)
 		"audit.format",

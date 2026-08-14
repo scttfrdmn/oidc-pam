@@ -20,7 +20,9 @@ Select the appropriate template based on your environment:
 
 - **`broker-minimal.yaml`** - Simple production setup with security defaults
 - **`broker-enterprise.yaml`** - Enterprise setup with advanced features
-- **`broker-cloud.yaml`** - Cloud-native deployment with environment variables
+
+Both are loaded, validated and audit-checked by `TestShippedConfigsLoad` on every
+build, so a template that cannot start the broker cannot ship (#170).
 
 ### 2. Configure Your OIDC Provider
 
@@ -119,31 +121,31 @@ authentication:
 - Environment-specific policies (production, staging, development)
 - Advanced security settings
 - Comprehensive audit configuration
-- SSH key management
-- Policy engine configuration
 
-### Cloud-Native (`broker-cloud.yaml`)
+### Keeping Secrets Out of the File
 
-**Use for:**
-- Kubernetes deployments
-- Container orchestration
-- Cloud-native applications
-- Microservices architectures
+Any `client_secret`, and `security.token_encryption_key`, may be written as a
+reference instead of a literal:
 
-**Features:**
-- Environment variable configuration
-- Cloud provider integration (AWS, Azure, GCP)
-- Container-friendly logging
-- Health checks and metrics
-- Kubernetes deployment examples
-
-**Environment Variables:**
-```bash
-OIDC_ISSUER_URL=https://your-provider.com
-OIDC_CLIENT_ID=your-client-id
-OIDC_CLIENT_SECRET=your-client-secret
-TOKEN_ENCRYPTION_KEY=your-encryption-key
+```yaml
+oidc:
+  providers:
+    - name: "primary"
+      client_secret: "env:OIDC_CLIENT_SECRET"      # from the process environment
+security:
+  token_encryption_key: "file:/etc/oidc-auth/key"  # from a file, whitespace-trimmed
 ```
+
+`env:` reads the named variable — put it in the unit's `EnvironmentFile`, which is
+how a container or a secrets agent injects it — and `file:` reads a file your
+secrets manager writes. A missing variable or unreadable file is a startup error,
+not an empty secret.
+
+There was a third template, `broker-cloud.yaml`, offering `${VAR:-default}` shell
+interpolation and a `cloud:` section for AWS Parameter Store, Azure Key Vault and
+GCP Secret Manager. Both were fiction: nothing expanded `${VAR}`, so the file
+could not be parsed at all, and no field of the configuration read `cloud:`. The
+file and the section were deleted in #170 — use the two prefixes above.
 
 ## Provider-Specific Setup
 
@@ -390,10 +392,26 @@ Use proper SSL/TLS certificates:
 ```yaml
 security:
   tls_verification:
-    pin_certificates: true
-    trusted_ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
     skip_tls_verify: false
+    trusted_ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
+    # Optional pinning: SHA-256 fingerprints (lowercase hex, colons optional)
+    # that must appear in the provider's TLS chain.
+    pinned_certificates:
+      - "a1b2c3...your-provider-fingerprint"
 ```
+
+Pinning takes **fingerprints, not a boolean**. This guide and five configuration
+files used to say `pin_certificates: true`, which is not the name of any setting;
+it was discarded in silence, so pinning was off everywhere it was switched on
+(#170). Get a fingerprint with:
+
+```bash
+openssl s_client -connect idp.example.com:443 </dev/null 2>/dev/null |
+  openssl x509 -noout -fingerprint -sha256
+```
+
+A pinned certificate that rotates refuses every connection to the provider, and
+with it every login, so pin deliberately and rotate the list with the certificate.
 
 ### 5. Audit Logging
 
@@ -411,14 +429,171 @@ audit:
     - "policy_violations"
 ```
 
+### 6. How Far the Provider Is Trusted
+
+Two things about a device-flow login are checked by the broker rather than taken on
+the provider's word, and both are on by default.
+
+**An ID token is required.** The ID token is the only part of a token response the
+broker can verify: the signature, the issuing `iss`, the `aud` that says the token was
+minted for *this* client, the expiry, and the nonce that makes a replayed token
+useless are all claims inside it. A response without one leaves the identity coming
+from `/userinfo`, which is authenticated by nothing but TLS and the bearer token, so
+the broker refuses it and audits `ID_TOKEN_MISSING`. Where the two sources disagree
+the ID token wins; claims that only `/userinfo` returns are still used, since the
+signed token says nothing about them.
+
+Set `require_id_token: false` only for a provider that genuinely does not issue an ID
+token for the device grant, understanding that its logins are then authorized by an
+unsigned JSON body:
+
+```yaml
+oidc:
+  providers:
+    - name: legacy-idp
+      issuer: "https://idp.example.com"
+      client_id: "oidc-pam"
+      scopes: ["openid", "email", "profile"]
+      # Accepts an identity asserted only by /userinfo: no signature, audience,
+      # expiry or replay check is then possible. Check the scopes first — a missing
+      # `openid` scope is the usual reason a provider returns no id_token.
+      require_id_token: false
+      enabled_for_login: true
+```
+
+**Every endpoint must be HTTPS.** The token, userinfo and device authorization
+endpoints all come out of the provider's `/.well-known/openid-configuration` (or, under
+`skip_discovery`, out of this file), and each of them receives either the device code
+or an access token. The broker refuses at startup to use one that names `http://`,
+because a plaintext connection silently bypasses `trusted_ca_bundle` and the
+certificate pins — those only apply to a connection that negotiates TLS. Loopback
+(`localhost`, `127.0.0.1`, `::1`) is the sole exception, for local development.
+
+The host is not required to match the issuer: a token endpoint on a different host is
+ordinary — Google's issuer is `accounts.google.com` and its token endpoint is on
+`oauth2.googleapis.com`. Only the scheme is enforced.
+
+## Binding an OIDC Identity to a Local Account
+
+`user_mapping.username_claim` names the claim whose value must equal the local
+account being logged into. By default the comparison is against the **whole**
+value, case-insensitively.
+
+When that claim is an email address or a UPN — `email` anywhere, and
+`preferred_username` on Entra ID — the whole value never equals a Unix account
+name, so nothing matches until you say what should happen:
+
+```yaml
+user_mapping:
+  username_claim: "email"
+  username_claim_strip_domain: true
+  allowed_email_domains: ["example.com", "eng.example.com"]
+```
+
+That permits `alice@example.com` to log in as `alice`, and refuses
+`alice@partner.example` and `root@anything`. Both keys are required together;
+enabling the first without the second is a startup error.
+
+Domains are matched exactly — no wildcards. A wildcard would re-open what the
+pin exists to close: a subdomain under which an attacker can get a verified
+address. Every domain you list is a domain whose local parts choose local
+accounts on this host, so list only domains whose addresses you control.
+
+The claim you name is the only claim consulted. If the token does not carry it,
+the login is refused and audited as `USERNAME_CLAIM_MISSING` naming the claim —
+there is no fallback to `sub` or to any other claim, because an identifier you
+did not choose is not one you have audited. If your provider puts the login name
+in `sub`, say so with `username_claim: "sub"`.
+
+### Privileged accounts
+
+No OIDC identity may log in as uid 0, or as any account with uid below 1000,
+regardless of what the token says or how the mapping is configured. This holds
+even for an exact claim match, because whether `root` is a legitimate destination
+for a federated login does not depend on the mapping being right.
+
+To make a deliberate exception:
+
+```yaml
+authentication:
+  allow_privileged_accounts: ["deploy"]
+```
+
+Each exception is named individually — allowing `deploy` does not allow `root` —
+and the broker logs a warning every time one is used. Refusals are audited as
+`PRIVILEGED_ACCOUNT_DENIED`, distinct from the `IDENTITY_MISMATCH` recorded when
+the claim itself does not match.
+
+## Unknown Keys Are a Startup Error
+
+Every key a configuration file may contain is a field of `config.Config`. Since
+#170 the broker refuses to start on a key it does not read, and the error names
+the key's full path — `'security.tls_verification' has invalid keys:
+pin_certificates`.
+
+It used to discard them silently, which is how `pin_certificates` disabled
+certificate pinning in every file that set it, and how whole sections (`ssh:`,
+`policy:`, `cloud:`, `logging:`) sat in the shipped templates reading as the
+access-control rules of the system while doing nothing at all.
+
+If an upgrade rejects a file you cannot edit at that moment, set
+`OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true` in the unit: the same list of keys is
+logged as a warning and the broker starts. It is a way to stay logged in while
+you clean the file up, not a setting to leave on — the keys still do nothing.
+
+## Settings the Templates Do Not Show
+
+These are read by the broker and are security-relevant, but appeared in no
+configuration file and no document before #170. Defaults apply when the key is
+absent.
+
+| Key | Default | What it does |
+|---|---|---|
+| `server.socket_mode` | `0660` | Permission bits on the broker's Unix socket. |
+| `server.socket_group` | *(unset)* | Group that owns the socket. With `0660` this is what decides who may open it at all. |
+| `server.require_peer_auth` | `true` | Verify the peer's credentials over `SO_PEERCRED` and accept uid 0 only. Turning this off lets any local process talk to the broker; there is no reason to. |
+| `server.metrics_addr` | *(unset)* | TCP address for the Prometheus `/metrics` endpoint, e.g. `127.0.0.1:9090`. Unset means no listener. The endpoint is unauthenticated — bind it to loopback. |
+| `authentication.idle_timeout` | *(unset)* | Expire a session this long after its last use, in addition to `token_lifetime`. Unset means only `token_lifetime` applies. |
+| `authentication.allow_privileged_accounts` | *(empty)* | The named exceptions to "no OIDC identity may log in as uid < 1000". See above. |
+| `authentication.geoip_database_path` | *(unset)* | MaxMind GeoLite2 database for `geo_restrictions`. Without it every country code is empty, so an `allowed_countries` restriction denies everyone. |
+| `authentication.location_history.*` | 90d, 10 entries, memory | Window, per-user cap and `persist_path` for the "unusual location" risk signal. |
+| `security.tls_verification.pinned_certificates` | *(empty)* | SHA-256 fingerprints required in the provider's TLS chain. |
+| `security.tls_verification.trusted_ca_bundle` | *(unset)* | PEM bundle that replaces the system trust store for provider connections. |
+| `audit.buffer_size` | `1000` | Capacity of the in-memory audit event channel. |
+| `audit.overflow_strategy` | `block` | What happens when that channel is full: `block` (backpressure), `sync` (write inline), or `drop` (discard and count). `drop` loses audit records and must be chosen deliberately. |
+| `audit.outputs[].type` | — | `file`, `stdout`, `syslog` or `http`. Any other value is refused at startup. |
+
+## Authentication Policies
+
+An `authentication.policies` entry is selected by its **name**:
+
+- `default` applies to **every host**. Use this unless you need per-host rules.
+- Any other name is matched against the **hostname of the machine being logged
+  into** — exactly, or as a domain component. A policy named `production`
+  applies on `production` and on `api.production.example.com`, but not on
+  `prod-login-01`.
+
+The name is the only selector a policy has. There is no way to scope a policy to
+an operation (`sudo`, `su`) or to an environment that is not part of the
+hostname; a policy whose name matches no host is inert, and the broker logs a
+warning naming it at startup.
+
+Every matching policy applies. `require_groups` is the union of the global
+`authentication.require_groups` and every matching policy's, and
+`max_session_duration` is the smallest — so an additional matching policy can
+only further restrict access.
+
 ## Environment-Specific Configurations
+
+Deploy one configuration per environment and name its policy `default`, so that
+it applies to the hosts in that environment regardless of what they are called.
 
 ### Development Environment
 
 ```yaml
 authentication:
   policies:
-    development:
+    default:
       require_groups: ["developers"]
       max_session_duration: "8h"
       allow_untrusted_devices: true
@@ -434,7 +609,7 @@ security:
 ```yaml
 authentication:
   policies:
-    staging:
+    default:
       require_groups: ["developers", "qa-team"]
       max_session_duration: "4h"
       require_device_trust: true
@@ -446,7 +621,7 @@ authentication:
 ```yaml
 authentication:
   policies:
-    production:
+    default:
       require_groups: ["production-access"]
       max_session_duration: "2h"
       require_device_trust: true
@@ -485,14 +660,10 @@ Enable debug logging:
 ```yaml
 server:
   log_level: "debug"
-
-logging:
-  level: "debug"
-  components:
-    auth: "debug"
-    policy: "debug"
-    security: "debug"
 ```
+
+`server.log_level` is the only verbosity control; there is no per-component
+logging configuration.
 
 ### Test Configuration
 

@@ -3,6 +3,8 @@ package auth
 import (
 	"fmt"
 	"net"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,11 @@ type PolicyEngine struct {
 	geoipDB         *geoip2.Reader
 	locationHistory *LocationHistory
 	metrics         *oidcmetrics.Metrics // nil when metrics are disabled
+
+	// resourceHost is the host a per-resource policy is matched against: this
+	// machine, the resource being logged into. It is deliberately not taken from
+	// the request — see applyResourcePolicies (#158).
+	resourceHost string
 }
 
 // SetMetrics attaches a Metrics instance to the policy engine.
@@ -56,7 +63,61 @@ func NewPolicyEngine(cfg *config.Config) (*PolicyEngine, error) {
 		pe.locationHistory = NewLocationHistory(config.LocationHistoryConfig{})
 	}
 
+	// Resolve this host once. A per-resource policy names the resource it governs,
+	// and the resource is this machine.
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		// Not fatal, but say so loudly: with no hostname, no per-resource policy can
+		// match, and a policy that does not match enforces nothing — including its
+		// require_groups.
+		log.Warn().
+			Err(err).
+			Msg("Could not determine this host's name; per-resource policies cannot match and will not be enforced")
+	}
+	pe.resourceHost = hostname
+	pe.warnAboutInertPolicies()
+
 	return pe, nil
+}
+
+// DefaultPolicyName is the policy that governs every host. A policy under this
+// name is always in effect; any other name is matched against this host's name.
+//
+// This exists because the name is the only selector a policy has, and the
+// configuration every doc hands operators (QUICK-START.md, DEPLOYMENT.md) is
+// `policies.default.require_groups` — a name intended as "all hosts", not as a
+// hostname. Without a catch-all the documented configuration would match no host
+// and enforce nothing.
+const DefaultPolicyName = "default"
+
+// warnAboutInertPolicies logs any configured policy that cannot match this host.
+//
+// A policy's name is its only selector, so a policy named for an environment
+// ("production", "staging") matches only a host actually named that. Such a
+// policy is silently inert — including its require_groups — which is how #158
+// went unnoticed. Saying so at startup makes it visible instead.
+func (pe *PolicyEngine) warnAboutInertPolicies() {
+	if pe.config == nil {
+		return
+	}
+
+	var inert []string
+	for name := range pe.config.Authentication.Policies {
+		if !pe.matchesResourcePolicy(pe.resourceHost, name) {
+			inert = append(inert, name)
+		}
+	}
+	if len(inert) == 0 {
+		return
+	}
+	sort.Strings(inert)
+
+	log.Warn().
+		Strs("inert_policies", inert).
+		Str("this_host", pe.resourceHost).
+		Msgf("These authentication.policies entries do not apply to this host and will not be enforced. "+
+			"A policy name must be %q (all hosts) or match this host's name; rename them or move their "+
+			"require_groups to authentication.require_groups", DefaultPolicyName)
 }
 
 // RecordLocation records a successful login from sourceIP for userID so that
@@ -150,9 +211,39 @@ func (pe *PolicyEngine) applyGlobalPolicies(req *AuthRequest, result *PolicyResu
 	return nil
 }
 
+// MetadataSourceIPUnknown marks a result the network requirements let through
+// only because the operator chose unknown_source_ip: allow. The broker audits
+// it: a waived requirement is a security-relevant event, not a detail.
+const MetadataSourceIPUnknown = "source_ip_unknown"
+
 // applyNetworkPolicies applies network-related policies
 func (pe *PolicyEngine) applyNetworkPolicies(req *AuthRequest, result *PolicyResult) error {
 	netReq := pe.config.Authentication.NetworkRequirements
+
+	if !netReq.RequireTailscale && !netReq.RequirePrivateNetwork {
+		return nil
+	}
+
+	// (#169) An absent source_ip means the broker does not know where this login
+	// came from — not that it came from somewhere bad. Both checks below ask
+	// net.ParseIP a question about a string, and both answer "no" for "", so an
+	// unknown origin used to be reported as a public one and every login on the
+	// host was refused. What happens instead is the operator's decision, made in
+	// config and validated at startup (validateNetworkRequirements).
+	if req.SourceIP == "" {
+		if netReq.UnknownSourceIP == config.UnknownSourceIPAllow {
+			result.RiskFactors = append(result.RiskFactors, "Network requirement waived: origin unknown")
+			result.Metadata[MetadataSourceIPUnknown] = true
+			log.Warn().
+				Str("user_id", req.UserID).
+				Str("login_type", req.LoginType).
+				Msg("Login reported no source_ip; network requirements waived by unknown_source_ip: allow")
+			return nil
+		}
+		result.Allowed = false
+		result.Reason = "Access requires a known network origin; this login reported no source IP"
+		return nil
+	}
 
 	// Check if Tailscale is required
 	if netReq.RequireTailscale {
@@ -250,11 +341,35 @@ func (pe *PolicyEngine) applyRiskPolicies(req *AuthRequest, result *PolicyResult
 	return nil
 }
 
-// applyResourcePolicies applies resource-specific policies
+// applyResourcePolicies applies resource-specific policies.
+//
+// (#158) Policies are matched against pe.resourceHost — this machine — and not
+// against req.TargetHost. Despite its name, TargetHost is populated from PAM's
+// PAM_RHOST by both clients (cmd/pam-module/cgo_bridge_linux.c get_user_info,
+// pkg/pam/pam.go), which is the address of the host the user is connecting *from*.
+// Matching policy names against that meant a policy named "production" only ever
+// matched a client literally named "production", so the whole policies: block —
+// its require_groups, its ip_whitelist, its max_session_duration — never fired.
+//
+// (#158) Every matching policy is applied, not just the first one found. The old
+// loop ranged over a map and broke on the first match, so when more than one
+// policy matched — which is now normal, since DefaultPolicyName matches every
+// host — which policy took effect varied between runs of the same binary on the
+// same host. Applying all of them is both deterministic and the safer reading:
+// require_groups unions and max_session_duration takes the minimum, so more
+// matching policies can only ever restrict access further.
 func (pe *PolicyEngine) applyResourcePolicies(req *AuthRequest, result *PolicyResult) error {
-	// Find matching policy for target resource
-	for policyName, policy := range pe.config.Authentication.Policies {
-		if pe.matchesResourcePolicy(req.TargetHost, policyName) {
+	// Sorted so that the denial reported for an ip_whitelist miss names the same
+	// policy every time.
+	names := make([]string, 0, len(pe.config.Authentication.Policies))
+	for name := range pe.config.Authentication.Policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, policyName := range names {
+		policy := pe.config.Authentication.Policies[policyName]
+		if pe.matchesResourcePolicy(pe.resourceHost, policyName) {
 			// Apply policy requirements
 			if len(policy.RequireGroups) > 0 {
 				result.RequiredGroups = append(result.RequiredGroups, policy.RequireGroups...)
@@ -289,8 +404,6 @@ func (pe *PolicyEngine) applyResourcePolicies(req *AuthRequest, result *PolicyRe
 					return nil
 				}
 			}
-
-			break
 		}
 	}
 
@@ -445,8 +558,15 @@ func (pe *PolicyEngine) calculateRiskScore(req *AuthRequest, result *PolicyResul
 		result.RiskFactors = append(result.RiskFactors, "Unknown device")
 	}
 
-	// Network-based risk
-	if !pe.isPrivateIP(req.SourceIP) {
+	// Network-based risk. (#169) An unknown origin scores the same as a public one
+	// — it is not evidence of safety — but it is named for what it is, because the
+	// risk factors are what an operator reads out of the audit trail to work out
+	// why a login scored what it did.
+	switch {
+	case req.SourceIP == "":
+		score += 25
+		result.RiskFactors = append(result.RiskFactors, "Unknown network origin")
+	case !pe.isPrivateIP(req.SourceIP):
 		score += 25
 		result.RiskFactors = append(result.RiskFactors, "Public network access")
 	}
@@ -476,6 +596,12 @@ func (pe *PolicyEngine) evaluateRiskCondition(condition string, req *AuthRequest
 }
 
 func (pe *PolicyEngine) matchesResourcePolicy(targetHost, policyName string) bool {
+	// DefaultPolicyName governs every host, including one whose name could not be
+	// determined. See the constant's doc comment.
+	if policyName == DefaultPolicyName {
+		return true
+	}
+
 	// Match exact hostname or hosts in a subdomain of policyName.
 	// e.g. policy "production" matches "production" and "api.production.example.com"
 	// but NOT "not-production" or "production-test".

@@ -20,8 +20,29 @@ RestartSec=10s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth
+# ProtectHome must stay off: the broker installs each login's SSH key in that
+# account's ~/.ssh/authorized_keys, and ProtectHome=true makes /home an empty
+# tmpfs to this service, so every provisioning attempt failed with "no such
+# directory" while the login itself was reported as successful (#171).
+ProtectHome=false
+# /var/lib/oidc-pam holds the broker's own state: the SSH keys it issues
+# (ssh-keys/) and the per-user locks that serialize its authorized_keys writes
+# (locks/, see #161). ProtectSystem=strict makes the whole hierarchy read-only, so
+# every path the broker writes has to be listed here — including /home, for the
+# authorized_keys writes above.
+#
+# Sites whose home directories are not under /home (autofs, NFS, /home/<domain>/…
+# is fine, but /export/home is not) must add that path here as well.
+#
+# /home carries a "-" prefix so that a host which has no /home at all — the same
+# site that keeps homes on /export/home — still starts. Without it systemd fails
+# the unit outright when a listed path is missing, which would turn a misconfigured
+# home path into a broker that never runs.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
+# Creates /var/lib/oidc-pam (0700, root) before ExecStart, so a first start on a
+# host installed by hand does not fail on a missing state directory.
+StateDirectory=oidc-pam
+StateDirectoryMode=0700
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Logging

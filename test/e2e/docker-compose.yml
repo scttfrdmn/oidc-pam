@@ -1,0 +1,63 @@
+# The end-to-end harness: a fake identity provider, the broker, and an sshd with
+# pam_oidc.so in its auth stack. Driven by run-tests.sh.
+#
+# The split is the trust boundary. fakeoidc and broker share an image (they are
+# the server side, and the certificate one presents is the certificate the other
+# trusts); the client is a separate image because it is the only place cgo, the
+# shared object and PAM exist. The Unix socket between broker and client is a
+# volume, which is exactly how a real deployment joins them.
+
+name: oidc-pam-e2e
+
+services:
+  fakeoidc:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.broker
+    command:
+      - /usr/local/bin/fakeoidc
+      - -issuer=https://fakeoidc:8443
+      - -client-id=oidc-pam-e2e
+    healthcheck:
+      # The control API answering is the signal that the OIDC listener is up too:
+      # both are started before either is served, and the broker fails at
+      # startup if discovery is unreachable.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/control/state"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  broker:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.broker
+    depends_on:
+      fakeoidc:
+        condition: service_healthy
+    volumes:
+      - brokersock:/var/run/oidc-auth
+      - homes:/home
+      - audit:/harness/audit
+
+  client:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.client
+    depends_on:
+      - broker
+    volumes:
+      - brokersock:/var/run/oidc-auth
+      - homes:/home
+      - audit:/harness/audit
+
+volumes:
+  # The broker's IPC socket. The client mounts it read-write because connecting
+  # to a Unix socket is a write.
+  brokersock:
+  # /home, so a case can look at the authorized_keys file the broker wrote for
+  # the user the client logged in as.
+  homes:
+  # The broker's audit log, so a case can assert on the event the broker
+  # recorded (IDENTITY_MISMATCH, GROUP_DENIED, authentication_successful) and not
+  # only on what SSH did.
+  audit:

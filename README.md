@@ -2,14 +2,14 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
-[![Version](https://img.shields.io/badge/Version-0.4.2-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
+[![Version](https://img.shields.io/badge/Version-0.5.0-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
-A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH, console, and GUI logins with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
+A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH login — and any other interactive PAM service you wire it into — with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
 ## 🚀 Features
 
 - **Modern Authentication**: Replace SSH keys with OIDC + Passkeys
-- **Universal PAM Integration**: Works with SSH, console, and GUI logins
+- **PAM Integration**: SSH is tested end-to-end; `configs/pam/` also carries example stacks for console `login`, `su` and `sudo`. Not for display managers, and never for the host-wide `common-auth`/`system-auth` stack — a device flow needs a terminal and a user in front of it
 - **Automatic SSH Key Management**: Generate, rotate, and revoke SSH keys automatically
 - **Enterprise Identity Integration**: Support for Okta, Azure AD, Auth0, Google Workspace, AWS IAM Identity Center, and any OIDC provider
 - **Mobile-First UX**: Authenticate via QR codes and mobile passkeys
@@ -48,7 +48,7 @@ OIDC PAM provides a modern, secure, and user-friendly alternative.
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     PAM Integration Layer                   │
-│    SSH • Console • GUI • Automatic Key Provisioning       │
+│    SSH • Console • su/sudo • Automatic Key Provisioning   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -114,10 +114,18 @@ oidc:
       # match, preventing an IdP user from logging in as another local account.
       user_mapping:
         username_claim: "preferred_username"
+        # If that claim is an email or a UPN, the whole value must equal the local
+        # username by default. To let the local part match instead — alice@example.com
+        # logging in as "alice" — opt in and pin the domains it may come from:
+        # username_claim_strip_domain: true
+        # allowed_email_domains: ["example.com"]
 
 authentication:
   token_lifetime: "8h"
   require_groups: ["linux-users"]    # enforced against the user's OIDC groups
+  # No OIDC identity may log in as uid 0 or any account with uid < 1000. List an
+  # account here to make a deliberate exception:
+  # allow_privileged_accounts: ["deploy"]
 
 security:
   audit_enabled: true
@@ -161,9 +169,12 @@ ssh user@server.company.com
 # 3. Authenticates with passkey (Face ID/Touch ID)
 # 4. SSH key automatically provisioned
 # 5. SSH session established
-
-# Subsequent access uses cached SSH key
 ```
+
+Every login runs the device flow. `pam_oidc.so` sends no session ID with its
+authentication request, so the broker has nothing to match a login against and
+starts a new flow each time; the SSH key it provisions belongs to that session.
+There is no cached credential that lets the next `ssh` skip the prompt.
 
 ## 📚 Documentation
 
@@ -199,12 +210,12 @@ sudo make install-dev
 # Unit tests
 make test
 
-# Integration tests
-make test-integration
-
-# End-to-end tests
+# End-to-end: real sshd, real PAM stack, real broker, in Docker
 make test-e2e
 ```
+
+`make test-e2e` is the one that exercises the module as PAM sees it — every case
+is an actual SSH login. See [test/e2e/README.md](test/e2e/README.md).
 
 ## 🤝 Contributing
 
@@ -230,14 +241,39 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📊 Supported Platforms
 
-| Platform | SSH | Console | GUI | Status |
-|----------|-----|---------|-----|--------|
-| Ubuntu 22.04+ | ✅ | ✅ | ✅ | Stable |
-| Ubuntu 20.04+ | ✅ | ✅ | ✅ | Stable |
-| RHEL 8+ | ✅ | ✅ | ✅ | Stable |
-| CentOS 8+ | ✅ | ✅ | ✅ | Stable |
-| Fedora 35+ | ✅ | ✅ | ✅ | Stable |
-| Debian 11+ | ✅ | ✅ | ✅ | Beta |
+| Platform | OpenSSH | SSH (`sshd`) | Console (`login`), `su`, `sudo` | Display manager |
+|----------|---------|--------------|---------------------------------|-----------------|
+| Debian 12 (bookworm) | 9.2p1 | ✅ Tested in CI | Example config, untested | Not supported |
+| Debian 11, Ubuntu 20.04+, Ubuntu 22.04+ | 8.4p1 / 8.2p1 / 8.9p1 | Expected to work | Example config, untested | Not supported |
+| RHEL 8+, CentOS Stream 8+, Fedora 35+ | 8.0p1 / 8.0p1 / 8.7p1+ | Expected to work | Example config, untested | Not supported |
+| Amazon Linux 2, RHEL/CentOS 7 | 7.4p1 | ❌ Not supported | Not supported | Not supported |
+
+**Requires OpenSSH 7.7 or newer.** The broker writes each login's key with an
+`expiry-time="…"` option so that sshd, not the broker, enforces the key's lifetime.
+That option was added in OpenSSH 7.7, and an sshd that does not recognise an
+authorized_keys option refuses the whole entry — so on an older sshd every key the
+broker installs is rejected and the account is authenticated and then cannot log
+in. The version column above is what each platform ships; check anything not listed
+with `ssh -V`. Nothing detects this for you yet
+([#199](https://github.com/scttfrdmn/oidc-pam/issues/199)).
+
+**Tested in CI** means `test/e2e` performs real SSH logins against the built
+`pam_oidc.so` on that image, with the stack `configs/pam/ssh` ships. That harness
+runs on Debian 12 and covers `sshd` and nothing else.
+
+**Expected to work** means the module builds against that distribution's libpam and
+json-c, the platform's sshd is new enough for the `expiry-time=` option above, and
+nothing else about it is known to differ — not that a login has been run on it.
+
+**Example config, untested** means `configs/pam/` carries a stack for the service
+but nobody has verified that its PAM conversation displays the verification URL.
+Deploy those one service at a time, from a host you can still get back into, and
+never by way of `common-auth`/`system-auth` — see
+[configs/pam/README.md](configs/pam/README.md).
+
+**Not supported**: no `gdm`/`sddm`/`lightdm` stack is shipped. The module shows
+the device-flow instructions with `PAM_TEXT_INFO`, which a graphical greeter would
+render as a block of ASCII art if it shows it at all.
 
 ## 🛡️ Security
 

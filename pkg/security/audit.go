@@ -11,6 +11,7 @@ import (
 	"log/syslog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,10 @@ type AuditLogger struct {
 	// writeMu serializes all writes to outputs so that synchronous critical-event
 	// writes (from any goroutine) don't race with the async processEvents goroutine.
 	writeMu sync.Mutex
+	// stopOnce makes Stop idempotent: it closes stopChan, and a second close
+	// would panic. Callers that stop the logger on both a shutdown path and a
+	// deferred cleanup are the normal case, not a mistake (#188).
+	stopOnce sync.Once
 }
 
 // DroppedEvents returns the cumulative number of audit events dropped because
@@ -112,10 +117,24 @@ const (
 	httpAuditTimeout    = 10 * time.Second
 )
 
+// auditDrainBudget caps how long Stop spends writing the events still queued.
+// It is a variable only so tests can shorten it; nothing outside this package
+// sets it. Five seconds is chosen against the slowest output: one unreachable
+// HTTP sink costs up to 33s for a single event, so the budget bounds shutdown at
+// roughly one such event rather than the whole buffer.
+var auditDrainBudget = 5 * time.Second
+
 // NewAuditLogger creates a new audit logger
 func NewAuditLogger(cfg config.AuditConfig) (*AuditLogger, error) {
 	if !cfg.Enabled {
 		return &AuditLogger{config: cfg}, nil
+	}
+
+	// (#170) Check every output before opening any of them, so a config naming
+	// an output type that does not exist reports all of them at once instead of
+	// failing on the first after the earlier ones are already on disk.
+	if err := ValidateAuditConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	var outputs []AuditOutput
@@ -163,20 +182,84 @@ func (al *AuditLogger) Stop() error {
 		return nil
 	}
 
-	log.Info().Msg("Stopping audit logger")
+	al.stopOnce.Do(func() {
+		log.Info().Msg("Stopping audit logger")
 
-	// Stop event processing
-	close(al.stopChan)
-	al.wg.Wait()
+		// Stop event processing
+		close(al.stopChan)
+		al.wg.Wait()
 
-	// Close outputs
-	for _, output := range al.outputs {
-		if err := output.Close(); err != nil {
-			log.Error().Err(err).Msg("Failed to close audit output")
+		// The worker drains on its way out, but it may never have been started
+		// (Stop without Start) or may already have returned on a cancelled
+		// context, in which case what is queued is still unwritten. Draining
+		// here as well makes "Stop returned" mean "every accepted event has
+		// been written", which is what the rest of the code assumes.
+		al.drain()
+
+		// Close outputs
+		for _, output := range al.outputs {
+			if err := output.Close(); err != nil {
+				log.Error().Err(err).Msg("Failed to close audit output")
+			}
 		}
-	}
+	})
 
 	return nil
+}
+
+// drain writes the events already queued when the logger was told to stop.
+//
+// Without this, Stop discarded them: processEvents selected on stopChan and
+// returned, and everything still buffered in eventChan went to the garbage
+// collector unwritten (#188). The events most likely to be sitting in that
+// buffer are the ones logged immediately before shutdown — the tail of the
+// audit trail, and the part an investigation into why a host went down would
+// want. Losing records quietly is the one behaviour an audit trail may not
+// have, which is also why the default overflow strategy is "block".
+//
+// Draining is bounded twice over. By the buffer, because LogAuthEvent's callers
+// have stopped by the time Stop is called, so no new events arrive and the
+// default branch ends the loop as soon as the buffer is empty. And by
+// auditDrainBudget, because an output can be arbitrarily slow: an unreachable
+// HTTP sink costs up to httpAuditMaxRetries timeouts plus backoff per event, so
+// draining a full 1000-event buffer into one could hold shutdown for hours. A
+// shutdown that does not finish is worse than a lost record, so the budget wins
+// and what it abandons is counted and logged rather than silently forgotten.
+func (al *AuditLogger) drain() {
+	deadline := time.Now().Add(auditDrainBudget)
+	for {
+		select {
+		case event := <-al.eventChan:
+			al.writeMu.Lock()
+			al.writeEvent(event)
+			al.writeMu.Unlock()
+			// Checked after a write, so the budget can never stop the drain
+			// before it has made progress.
+			if time.Now().After(deadline) {
+				al.abandonQueue()
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// abandonQueue accounts for the events the drain budget left unwritten, so
+// DroppedEvents and the shutdown log tell an operator that the end of the audit
+// trail is incomplete. A gap nobody is told about is indistinguishable from
+// nothing having happened.
+func (al *AuditLogger) abandonQueue() {
+	remaining := len(al.eventChan)
+	if remaining == 0 {
+		return
+	}
+	total := al.droppedEvents.Add(int64(remaining))
+	log.Error().
+		Int("abandoned", remaining).
+		Int64("total_dropped", total).
+		Dur("budget", auditDrainBudget).
+		Msg("Audit drain budget exhausted at shutdown; queued events were not written")
 }
 
 // LogAuthEvent logs an authentication event
@@ -247,8 +330,10 @@ func (al *AuditLogger) processEvents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			al.drain()
 			return
 		case <-al.stopChan:
+			al.drain()
 			return
 		case event := <-al.eventChan:
 			al.writeMu.Lock()
@@ -296,19 +381,81 @@ func isCriticalEvent(event AuditEvent) bool {
 
 // Helper functions
 
+// auditOutputConstructors is the set of audit output types that exist. Both
+// createAuditOutput and ValidateAuditConfig read it, so what the broker accepts
+// and what a configuration check reports can never drift apart (#170).
+var auditOutputConstructors = map[string]func(config.AuditOutput) (AuditOutput, error){
+	"file":   func(c config.AuditOutput) (AuditOutput, error) { return NewFileAuditOutput(c) },
+	"stdout": func(c config.AuditOutput) (AuditOutput, error) { return NewStdoutAuditOutput(c) },
+	"syslog": func(c config.AuditOutput) (AuditOutput, error) { return NewSyslogAuditOutput(c) },
+	"http":   func(c config.AuditOutput) (AuditOutput, error) { return NewHTTPAuditOutput(c) },
+}
+
 func createAuditOutput(config config.AuditOutput) (AuditOutput, error) {
-	switch config.Type {
-	case "file":
-		return NewFileAuditOutput(config)
-	case "stdout":
-		return NewStdoutAuditOutput(config)
-	case "syslog":
-		return NewSyslogAuditOutput(config)
-	case "http":
-		return NewHTTPAuditOutput(config)
-	default:
-		return nil, fmt.Errorf("unsupported audit output type: %s", config.Type)
+	newOutput, ok := auditOutputConstructors[config.Type]
+	if !ok {
+		return nil, fmt.Errorf("unsupported audit output type %q (supported: %s)", config.Type, SupportedAuditOutputTypes())
 	}
+	return newOutput(config)
+}
+
+// SupportedAuditOutputTypes lists the values audit.outputs[].type accepts,
+// sorted, for use in error messages and documentation.
+func SupportedAuditOutputTypes() string {
+	types := make([]string, 0, len(auditOutputConstructors))
+	for t := range auditOutputConstructors {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return strings.Join(types, ", ")
+}
+
+// ValidateAuditConfig reports everything wrong with an audit configuration
+// without opening a file, connecting to syslog or reaching the network, so a
+// configuration can be checked by a test running as an ordinary user (#170).
+//
+// configs/production/broker-enterprise.yaml — recommended as a template by
+// CONFIGURATION-GUIDE.md — named the output types "remote_syslog" and "webhook",
+// neither of which exists. createAuditOutput's error reaches log.Fatal in
+// cmd/broker, so that file was fatal at startup for as long as it has shipped.
+func ValidateAuditConfig(cfg config.AuditConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	var problems []string
+	for i, out := range cfg.Outputs {
+		if _, ok := auditOutputConstructors[out.Type]; !ok {
+			problems = append(problems, fmt.Sprintf("audit.outputs[%d]: unsupported type %q (supported: %s)",
+				i, out.Type, SupportedAuditOutputTypes()))
+			continue
+		}
+		switch out.Type {
+		case "file":
+			if out.Path == "" {
+				problems = append(problems, fmt.Sprintf("audit.outputs[%d] (file): path is required", i))
+			}
+		case "http":
+			if out.URL == "" {
+				problems = append(problems, fmt.Sprintf("audit.outputs[%d] (http): url is required", i))
+			}
+		}
+	}
+
+	// An unrecognised strategy falls through to "drop" in writeAuditEvent, which
+	// discards records under load — the one behaviour an operator has to opt into
+	// explicitly. A typo must not choose it.
+	switch cfg.OverflowStrategy {
+	case "", "block", "sync", "drop":
+	default:
+		problems = append(problems, fmt.Sprintf("audit.overflow_strategy %q is not one of block, sync, drop",
+			cfg.OverflowStrategy))
+	}
+
+	if len(problems) > 0 {
+		return fmt.Errorf("invalid audit configuration: %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func generateEventID() string {

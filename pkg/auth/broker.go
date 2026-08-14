@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
+	"os/user"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +40,28 @@ type Broker struct {
 	pendingFlows          int64                // atomic counter of in-progress device authorization goroutines
 	version               string               // build version, set via SetVersion; reported by Status
 	startedAt             time.Time            // when Start ran; zero until then. Reported by Status
+
+	// pollIntervalUnit is how much real time one second of a provider's
+	// polling interval is worth. Zero means time.Second, which is what
+	// production always uses; tests shrink it so a flow that must survive
+	// several authorization_pending polls finishes in milliseconds instead of
+	// the ~15 s that RFC 8628's 5 s floor would otherwise cost.
+	pollIntervalUnit time.Duration
+
+	// lookupLocalUID resolves a local account name to its uid, reporting whether the
+	// account exists. Nil means the real getpwnam-backed lookup; tests substitute a
+	// fixed passwd table so that the privileged-account guard can be exercised
+	// without depending on the uids of whatever host runs the suite (#159).
+	lookupLocalUID func(name string) (int, bool, error)
+}
+
+// pollUnit is the real-time duration of one second of a device flow's polling
+// interval. See the pollIntervalUnit field.
+func (b *Broker) pollUnit() time.Duration {
+	if b.pollIntervalUnit <= 0 {
+		return time.Second
+	}
+	return b.pollIntervalUnit
 }
 
 // SetMetrics attaches a Metrics instance to the broker and its policy engine.
@@ -189,6 +214,19 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		providers[providerConfig.Name] = provider
 	}
 
+	keyManager := sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys")
+	authorizedKeysManager := sshpkg.NewAuthorizedKeysManager(sshpkg.DefaultLockDir)
+
+	// (#171) An SSH key must not outlive the session it was issued for. Both
+	// managers defaulted to 24 hours and neither was ever told otherwise, so a site
+	// that had deliberately configured token_lifetime: 1h still handed out keys good
+	// for a day — and the sweep meant to remove them measured against the same
+	// hardcoded 24 hours.
+	if lifetime := cfg.Authentication.TokenLifetime; lifetime > 0 {
+		keyManager.SetExpiration(lifetime)
+		authorizedKeysManager.SetKeyLifetime(lifetime)
+	}
+
 	broker := &Broker{
 		config:                cfg,
 		providers:             providers,
@@ -196,8 +234,8 @@ func NewBroker(cfg *config.Config) (*Broker, error) {
 		policyEngine:          policyEngine,
 		auditLogger:           auditLogger,
 		sessions:              make(map[string]*Session),
-		keyManager:            sshpkg.NewKeyManager("/var/lib/oidc-pam/ssh-keys"),
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager("/home"),
+		keyManager:            keyManager,
+		authorizedKeysManager: authorizedKeysManager,
 		stopChan:              make(chan struct{}),
 	}
 
@@ -220,12 +258,93 @@ func (b *Broker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start audit logger: %w", err)
 	}
 
+	// Revoke the keys of the sessions this broker lost when it last stopped (#171).
+	b.reconcileIssuedKeys()
+
 	// Start session cleanup goroutine
 	b.wg.Add(1)
 	go b.sessionCleanup(ctx)
 
 	log.Info().Msg("Authentication broker services started successfully")
 	return nil
+}
+
+// reconcileIssuedKeys revokes every key left over from a previous run of the
+// broker.
+//
+// Sessions live only in memory. A broker that stops — a restart, a crash, a
+// package upgrade — therefore forgets every key it issued, while the
+// authorized_keys entries stay exactly where they are and keep authenticating.
+// Nothing removed them: revocation is driven from the session that no longer
+// exists, and the expiry sweep only ran for users who happened to have another
+// session expire afterwards, so a user who never logged in again kept a working
+// credential indefinitely (#171).
+//
+// The broker's own key store is the record of what it issued, and it does survive
+// a restart, so it is the list to work from. Anything in it at startup belongs to
+// no live session by definition.
+func (b *Broker) reconcileIssuedKeys() {
+	if b.keyManager == nil || b.authorizedKeysManager == nil {
+		return
+	}
+
+	infos, unreadable, err := b.keyManager.ListKeyInfo()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list stored SSH keys at startup; orphaned keys may remain authorized")
+		return
+	}
+	if len(infos) == 0 && unreadable == 0 {
+		return
+	}
+
+	// One pass per account, not per key: RemoveOIDCKeys clears every broker-issued
+	// entry the account has, so a user with several orphans is handled once.
+	usernames := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		if info.Username != "" {
+			usernames[info.Username] = struct{}{}
+		}
+		if delErr := b.keyManager.DeleteKey(info.KeyID); delErr != nil {
+			log.Warn().Err(delErr).Str("key_id", info.KeyID).
+				Msg("Failed to delete an orphaned stored SSH key at startup")
+		}
+	}
+
+	removedTotal := 0
+	for username := range usernames {
+		removed, remErr := b.authorizedKeysManager.RemoveOIDCKeys(username)
+		if remErr != nil {
+			// Audited, not just logged: an entry that could not be removed is a
+			// credential still granting access to a session nobody is tracking.
+			log.Error().Err(remErr).Str("user_id", username).
+				Msg("Failed to remove orphaned authorized_keys entries at startup")
+			if b.auditLogger != nil {
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType:    "ssh_key_revocation_incomplete",
+					UserID:       username,
+					Success:      false,
+					ErrorCode:    "ORPHANED_KEYS_NOT_REMOVED",
+					ErrorMessage: remErr.Error(),
+					Timestamp:    time.Now(),
+				})
+			}
+			if b.metrics != nil {
+				b.metrics.RecordSSHKeyOp("revoke", "failure")
+			}
+			continue
+		}
+		removedTotal += removed
+		if removed > 0 && b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("revoke", "success")
+		}
+	}
+
+	log.Info().
+		Int("stored_keys", len(infos)).
+		Int("unreadable_stored_keys", unreadable).
+		Int("accounts", len(usernames)).
+		Int("authorized_keys_entries_removed", removedTotal).
+		Msg("Reconciled SSH keys left over from a previous broker run")
 }
 
 // DroppedAuditEvents returns the cumulative count of audit events dropped by
@@ -329,6 +448,25 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		}, nil
 	}
 
+	// (#169) A network requirement that was configured and then not applied is an
+	// event in its own right, not a detail of a successful login: the operator
+	// asked for unknown_source_ip: allow, and this is the record of what that
+	// admitted. Without it, "require_private_network is on" and "this login was
+	// never checked against it" are indistinguishable in the audit trail.
+	if waived, ok := policyResult.Metadata[MetadataSourceIPUnknown].(bool); ok && waived {
+		b.auditLogger.LogAuthEvent(security.AuditEvent{
+			EventType:    "network_requirement_waived",
+			UserID:       req.UserID,
+			TargetHost:   req.TargetHost,
+			Success:      true,
+			RiskScore:    policyResult.RiskScore,
+			RiskFactors:  policyResult.RiskFactors,
+			ErrorMessage: "login reported no source_ip; network requirements waived by unknown_source_ip: allow",
+			Metadata:     map[string]interface{}{"login_type": req.LoginType},
+			Timestamp:    time.Now(),
+		})
+	}
+
 	// Select appropriate provider
 	provider := b.selectProvider()
 	if provider == nil {
@@ -405,7 +543,12 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 
 	// Start polling for device authorization in background
 	b.wg.Add(1)
-	go b.pollDeviceAuthorization(session, provider, deviceFlow)
+	// policyResult.RequiredGroups is the union of the global
+	// authentication.require_groups and every matching per-resource policy's
+	// require_groups. It has to be carried into the goroutine: the group check
+	// happens when the flow completes, long after this function has returned, and
+	// re-evaluating policy there would evaluate it against a different clock.
+	go b.pollDeviceAuthorization(session, provider, deviceFlow, policyResult.RequiredGroups)
 
 	return &AuthResponse{
 		Success:        true,
@@ -794,11 +937,14 @@ func providerPriority(provider *OIDCProvider) int {
 	return provider.Config.Priority
 }
 
-func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow) {
+func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvider, deviceFlow *DeviceFlow, requiredGroups []string) {
 	defer b.wg.Done()
 	defer atomic.AddInt64(&b.pendingFlows, -1)
 
-	ticker := time.NewTicker(time.Duration(deviceFlow.PollingInterval) * time.Second)
+	// interval is not fixed: RFC 8628 §3.5 lets the provider ask for a slower
+	// poll rate mid-flow with slow_down, and requires the client to comply.
+	interval := deviceFlow.PollingInterval
+	ticker := time.NewTicker(time.Duration(interval) * b.pollUnit())
 	defer ticker.Stop()
 
 	timeout := time.NewTimer(time.Until(deviceFlow.ExpiresAt))
@@ -818,10 +964,30 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			token, err := provider.PollDeviceAuthorization(pollCtx, deviceFlow.DeviceCode, deviceFlow.Nonce)
 			pollCancel()
 			if err != nil {
-				// Handle specific error types
-				if err.Error() == "authorization_pending" {
-					continue // Keep polling
+				// The user has not finished at the IdP yet. This is the normal
+				// answer to every poll before the last one, so it must not end the
+				// flow — only the deadline above does. (#150: this used to be a
+				// string comparison against an error that never matched, so the
+				// first pending poll deleted the session, roughly five seconds
+				// after the verification URL was displayed.)
+				if errors.Is(err, ErrAuthorizationPending) {
+					continue
 				}
+
+				// The provider is asking to be polled less often, and RFC 8628 §3.5
+				// requires compliance rather than a retry at the old rate.
+				if errors.Is(err, ErrSlowDown) {
+					if interval < maxPollingInterval {
+						interval = min(interval+slowDownIncrement, maxPollingInterval)
+						ticker.Reset(time.Duration(interval) * b.pollUnit())
+					}
+					log.Debug().
+						Str("session_id", session.ID).
+						Int("polling_interval", interval).
+						Msg("Provider asked to slow down device authorization polling")
+					continue
+				}
+
 				// Other errors mean failure. Use a bounded error-code enum for the
 				// metric label (never the raw error string) to avoid Prometheus
 				// cardinality explosion and leaking transient infra detail.
@@ -829,10 +995,15 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					b.metrics.RecordAuth(provider.Name, "failure", classifyPollError(err))
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
-					EventType:    "device_authorization_failed",
-					UserID:       session.UserID,
-					SessionID:    session.ID,
-					Success:      false,
+					EventType: "device_authorization_failed",
+					UserID:    session.UserID,
+					SessionID: session.ID,
+					Provider:  provider.Name,
+					Success:   false,
+					// The same bounded code the metric is labelled with, so the audit
+					// trail can be filtered and correlated with the metric instead of
+					// only carrying a free-text message.
+					ErrorCode:    classifyPollError(err),
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -859,14 +1030,33 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			// could authenticate as any local account (including root). Fail
 			// closed on any mismatch or misconfiguration.
 			if err := b.verifyIdentityBinding(provider, userInfo, session.UserID); err != nil {
+				// (#159) A privileged-account refusal is not a mismatch: the identity
+				// matched, and the local account is simply not one an OIDC login may
+				// become. Audited separately so an operator is not sent looking for a
+				// claim problem that is not there.
+				errCode := "IDENTITY_MISMATCH"
+				message := "Rejected authentication: OIDC identity does not match requested local user"
+				switch {
+				case errors.Is(err, ErrPrivilegedAccount):
+					errCode = "PRIVILEGED_ACCOUNT_DENIED"
+					message = "Rejected authentication: refusing to bind an OIDC identity to a privileged local account"
+				case errors.Is(err, ErrUsernameClaimMissing):
+					// (#164) Also not a mismatch: there was nothing to compare. The claim the
+					// operator configured never arrived, so every login through this provider
+					// is failing for the same reason and the fix is in the provider or the
+					// config, not in this user's identity.
+					errCode = "USERNAME_CLAIM_MISSING"
+					message = "Rejected authentication: the configured username_claim is absent from the token, so the identity could not be bound"
+				}
 				log.Warn().
 					Err(err).
 					Str("session_id", session.ID).
 					Str("requested_user", session.UserID).
 					Str("oidc_subject", userInfo.Subject).
-					Msg("Rejected authentication: OIDC identity does not match requested local user")
+					Str("error_code", errCode).
+					Msg(message)
 				if b.metrics != nil {
-					b.metrics.RecordAuth(provider.Name, "failure", "IDENTITY_MISMATCH")
+					b.metrics.RecordAuth(provider.Name, "failure", errCode)
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "authentication_denied",
@@ -874,7 +1064,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					Email:        userInfo.Email,
 					SessionID:    session.ID,
 					Success:      false,
-					ErrorCode:    "IDENTITY_MISMATCH",
+					ErrorCode:    errCode,
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -884,14 +1074,35 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 
 			// SECURITY (H-1): enforce required group membership. RequiredGroups
 			// was previously collected by the policy engine but never checked.
-			if err := b.verifyRequiredGroups(userInfo.Groups); err != nil {
+			//
+			// (#158) Enforce the list the policy engine resolved, not
+			// config.Authentication.RequireGroups. Reading the global key directly
+			// meant require_groups written under authentication.policies.<name> —
+			// the form QUICK-START.md and DEPLOYMENT.md both tell operators to use —
+			// was collected into PolicyResult.RequiredGroups and then never read by
+			// anything, so the documented config enforced no groups at all.
+			//
+			// (#166) The provider's allowed_groups/allowed_roles are decided here too,
+			// so there is one group-authorization decision on the login path rather
+			// than a second, weaker one buried in claim extraction.
+			if err := b.verifyGroupAuthorization(provider.Config.UserMapping, requiredGroups, userInfo); err != nil {
+				// The two refusals point at different config keys and at opposite
+				// mistakes — "missing a mandatory group" against "in none of the
+				// permitted ones" — so they are audited apart (#166).
+				errCode := "GROUP_DENIED"
+				message := "Rejected authentication: required group membership not satisfied"
+				if errors.Is(err, ErrGroupNotAllowed) {
+					errCode = "GROUP_NOT_ALLOWED"
+					message = "Rejected authentication: identity is in none of the allowed groups or roles"
+				}
 				log.Warn().
 					Err(err).
 					Str("session_id", session.ID).
 					Str("requested_user", session.UserID).
-					Msg("Rejected authentication: required group membership not satisfied")
+					Str("error_code", errCode).
+					Msg(message)
 				if b.metrics != nil {
-					b.metrics.RecordAuth(provider.Name, "failure", "GROUP_DENIED")
+					b.metrics.RecordAuth(provider.Name, "failure", errCode)
 				}
 				b.auditLogger.LogAuthEvent(security.AuditEvent{
 					EventType:    "authentication_denied",
@@ -900,7 +1111,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					Groups:       userInfo.Groups,
 					SessionID:    session.ID,
 					Success:      false,
-					ErrorCode:    "GROUP_DENIED",
+					ErrorCode:    errCode,
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
@@ -953,10 +1164,40 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 						Err(err).
 						Str("session_id", updated.ID).
 						Msg("Failed to generate SSH key")
-				} else {
-					updated.SSHKeyID = sshKey.ID
-					updated.SSHPublicKey = sshKey.PublicKey
+					// Audit it too. A login whose key could not be provisioned is
+					// authenticated but cannot actually be used, and #152 stayed
+					// hidden for eleven releases precisely because this failure
+					// only ever reached the broker's own log.
+					b.auditLogger.LogAuthEvent(security.AuditEvent{
+						EventType:    "ssh_key_provisioning_failed",
+						UserID:       updated.UserID,
+						Email:        updated.Email,
+						Groups:       updated.Groups,
+						SessionID:    updated.ID,
+						Provider:     provider.Name,
+						Success:      false,
+						ErrorCode:    "SSH_KEY_PROVISIONING_FAILED",
+						ErrorMessage: err.Error(),
+						Timestamp:    time.Now(),
+					})
+					if b.metrics != nil {
+						b.metrics.RecordAuth(provider.Name, "failure", "SSH_KEY_PROVISIONING_FAILED")
+					}
+					// (#171) The login is denied, not completed. It used to be
+					// completed: the session was activated and reported as a
+					// successful authentication with no key installed anywhere, so
+					// the user was told they were authenticated and then could not
+					// log in — and, worse, the *reason* they could not was that the
+					// broker had written the key to a directory that was not their
+					// home, or had failed to at all. Dropping the session makes the
+					// module report the denial it already has a code for
+					// (SESSION_NOT_FOUND on the next poll), so no wire change is
+					// needed to carry this.
+					b.removeSession(updated.ID)
+					return
 				}
+				updated.SSHKeyID = sshKey.ID
+				updated.SSHPublicKey = sshKey.PublicKey
 			}
 
 			b.setSession(&updated)
@@ -968,16 +1209,28 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 
 			// Record the login location so future logins from the same
 			// /24 subnet or country are not flagged as unusual.
-			b.policyEngine.RecordLocation(session.UserID, session.SourceIP)
+			b.policyEngine.RecordLocation(updated.UserID, updated.SourceIP)
 
-			// Audit log
+			// Audit log.
+			//
+			// Read from `updated`, not `session`: the identity this flow resolved was
+			// written to the clone above, and `session` is still the pre-mutation
+			// original with an empty Email and nil Groups. Auditing it recorded every
+			// successful login without the identity it authenticated (#153) — while
+			// the denial paths, which build their events from `userInfo` directly,
+			// carried it correctly.
+			// (#169) source_ip is on the event because it is where the login that was
+			// admitted came from, and until it was populated by the clients this
+			// record could only ever have carried an empty one — so it carried
+			// nothing, while every denial path recorded it.
 			b.auditLogger.LogAuthEvent(security.AuditEvent{
 				EventType: "authentication_successful",
-				UserID:    session.UserID,
-				Email:     session.Email,
-				Groups:    session.Groups,
-				SessionID: session.ID,
+				UserID:    updated.UserID,
+				Email:     updated.Email,
+				Groups:    updated.Groups,
+				SessionID: updated.ID,
 				Provider:  provider.Name,
+				SourceIP:  updated.SourceIP,
 				Success:   true,
 				Timestamp: time.Now(),
 			})
@@ -1142,8 +1395,9 @@ func (b *Broker) generateSSHKey(session *Session) (*SSHKey, error) {
 		return nil, fmt.Errorf("failed to save SSH key: %w", err)
 	}
 
-	// Append the public key to the user's authorized_keys file
-	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey); err != nil {
+	// Install the public key in the user's authorized_keys, as their only
+	// broker-issued key, carrying the expiry sshd will enforce on it (#171).
+	if err := b.authorizedKeysManager.AddPublicKey(session.UserID, sshKey.PublicKey, sshKey.ExpiresAt); err != nil {
 		// Best-effort cleanup: remove the stored key if we couldn't authorize it
 		_ = b.keyManager.DeleteKey(session.ID)
 		if b.metrics != nil {
@@ -1187,7 +1441,8 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 	}
 
 	// Remove from authorized_keys (best effort — do not abort on failure)
-	if err := b.authorizedKeysManager.RemovePublicKey(session.UserID, sshKey.PublicKey); err != nil {
+	removed, err := b.authorizedKeysManager.RemovePublicKey(session.UserID, sshKey.PublicKey)
+	if err != nil {
 		log.Warn().
 			Err(err).
 			Str("session_id", session.ID).
@@ -1203,11 +1458,83 @@ func (b *Broker) revokeSSHKey(session *Session) error {
 		return fmt.Errorf("failed to delete SSH key files: %w", err)
 	}
 
+	// The authorized_keys line is what grants the access, so only its removal is a
+	// revocation. A no-match means the credential is still authorized, and #165 was
+	// exactly this outcome being reported as "SSH key revoked" with a success metric:
+	// the audit trail asserted a revocation that had not happened, for a line that
+	// (having been fused with a comment) could no longer be removed by anything.
+	// Still best effort — the session is gone either way — but audited as the failure
+	// it is, so an operator can find the host and the file.
+	//
+	// (#171) "Nothing matched" now has a second, innocent cause: a later login for
+	// the same user supersedes the earlier entry, because there is one live
+	// broker-issued key per user. Ask whether the key material still authorizes
+	// anything before raising the alarm, so that the alarm keeps meaning what it says
+	// — the key was already gone, which is the outcome revocation wanted.
+	if !removed {
+		if authorized, checkErr := b.authorizedKeysManager.KeyIsAuthorized(session.UserID, sshKey.PublicKey); checkErr == nil && !authorized {
+			log.Info().
+				Str("session_id", session.ID).
+				Str("user_id", session.UserID).
+				Str("ssh_key_id", session.SSHKeyID).
+				Msg("SSH key was already absent from authorized_keys at revocation (superseded by a later login)")
+
+			if b.auditLogger != nil {
+				b.auditLogger.LogAuthEvent(security.AuditEvent{
+					EventType: "ssh_key_revoked",
+					UserID:    session.UserID,
+					Email:     session.Email,
+					SessionID: session.ID,
+					Success:   true,
+					Timestamp: time.Now(),
+				})
+			}
+			if b.metrics != nil {
+				b.metrics.RecordSSHKeyOp("revoke", "success")
+			}
+			return nil
+		}
+
+		log.Warn().
+			Str("session_id", session.ID).
+			Str("user_id", session.UserID).
+			Str("ssh_key_id", session.SSHKeyID).
+			Msg("SSH key files deleted but no matching authorized_keys entry was removed")
+
+		if b.auditLogger != nil {
+			b.auditLogger.LogAuthEvent(security.AuditEvent{
+				EventType:    "ssh_key_revocation_incomplete",
+				UserID:       session.UserID,
+				Email:        session.Email,
+				SessionID:    session.ID,
+				Success:      false,
+				ErrorCode:    "AUTHORIZED_KEYS_ENTRY_NOT_REMOVED",
+				ErrorMessage: "no authorized_keys line matched the revoked key; it may still authorize access",
+				Timestamp:    time.Now(),
+			})
+		}
+		if b.metrics != nil {
+			b.metrics.RecordSSHKeyOp("revoke", "failure")
+		}
+
+		return nil
+	}
+
 	log.Info().
 		Str("session_id", session.ID).
 		Str("ssh_key_id", session.SSHKeyID).
 		Msg("SSH key revoked")
 
+	if b.auditLogger != nil {
+		b.auditLogger.LogAuthEvent(security.AuditEvent{
+			EventType: "ssh_key_revoked",
+			UserID:    session.UserID,
+			Email:     session.Email,
+			SessionID: session.ID,
+			Success:   true,
+			Timestamp: time.Now(),
+		})
+	}
 	if b.metrics != nil {
 		b.metrics.RecordSSHKeyOp("revoke", "success")
 	}
@@ -1252,9 +1579,9 @@ func sanitizeErrorForClient(err error) string {
 // arbitrary local account. It fails closed — any misconfiguration or mismatch
 // returns an error rather than allowing the login.
 //
-// The expected local username is resolved from the configured username_claim
-// (falling back to the standard "preferred_username" claim). Comparison is
-// case-insensitive on the local-part, matching typical POSIX/login behavior.
+// The expected local username is resolved from the configured username_claim, and
+// from no other claim (#164). Comparison is case-insensitive, and on the local-part
+// only where the provider has opted in (#159).
 func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInfo, requestedUser string) error {
 	if userInfo == nil {
 		return fmt.Errorf("no user info available")
@@ -1273,47 +1600,194 @@ func (b *Broker) verifyIdentityBinding(provider *OIDCProvider, userInfo *UserInf
 
 	mapped, err := claimToUsername(userInfo, claimName)
 	if err != nil {
-		return err
+		return fmt.Errorf("provider %q: %w", provider.Config.Name, err)
 	}
 	mapped = strings.TrimSpace(strings.ToLower(mapped))
 	if mapped == "" {
 		return fmt.Errorf("username_claim %q produced an empty username", claimName)
 	}
 
-	// If the claim is an email (e.g. preferred_username/email), allow matching
-	// either the full value or its local-part against the requested user.
+	// No OIDC identity binds to a privileged account, however well it matches.
+	// Checked before the claim comparison so that it holds even when the claim is an
+	// exact match and the domain is pinned.
+	if err := b.verifyLocalAccountIsBindable(requested); err != nil {
+		return err
+	}
+
+	// The whole claim value must equal the requested account.
 	if mapped == requested {
 		return nil
 	}
-	if local, _, found := strings.Cut(mapped, "@"); found && local == requested {
-		return nil
+
+	// (#159) The local part of an email-shaped claim binds only when the operator
+	// has asked for it *and* pinned the domains it may come from. This used to be
+	// unconditional, which meant anyone able to choose the local part of their
+	// address — a B2B guest from another tenant, a second verified domain,
+	// self-service alias editing — chose which local account they logged in as, by
+	// setting it to e.g. "root@their.tld".
+	local, domain, isEmail := strings.Cut(mapped, "@")
+	mapping := provider.Config.UserMapping
+	if isEmail && local == requested {
+		switch {
+		case !mapping.StripEmailDomain:
+			return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q; "+
+				"its local part does, but binding on the local part is off by default because it lets the "+
+				"identity provider choose the local account. To allow it, set "+
+				"username_claim_strip_domain: true and allowed_email_domains: [%q] on provider %q",
+				mapped, claimName, requested, domain, provider.Config.Name)
+		case len(mapping.AllowedEmailDomains) == 0:
+			return fmt.Errorf("provider %q sets username_claim_strip_domain but no allowed_email_domains; "+
+				"refusing to bind %q to local user %q, since an unpinned domain lets any federated or guest "+
+				"identity claim any local account", provider.Config.Name, mapped, requested)
+		case !domainIsAllowed(domain, mapping.AllowedEmailDomains):
+			return fmt.Errorf("authenticated identity %q is from domain %q, which is not in "+
+				"allowed_email_domains for provider %q; refusing to bind it to local user %q",
+				mapped, domain, provider.Config.Name, requested)
+		default:
+			return nil
+		}
 	}
+
 	return fmt.Errorf("authenticated identity %q (claim %q) does not match requested local user %q", mapped, claimName, requested)
 }
 
-// claimToUsername extracts a string username from the resolved claims using the
-// configured claim name, with sensible fallbacks to well-known UserInfo fields.
-func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
-	if userInfo.Claims != nil {
-		if v, ok := userInfo.Claims[claimName]; ok {
-			if s, ok := v.(string); ok {
-				return s, nil
+// domainIsAllowed reports whether domain is pinned in allowed. Comparison is exact
+// and case-insensitive: no wildcards, because a wildcard on an email domain
+// re-opens exactly what allowed_email_domains exists to close (a subdomain an
+// attacker can get a verified address under).
+func domainIsAllowed(domain string, allowed []string) bool {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return false
+	}
+	for _, a := range allowed {
+		if domain == strings.TrimSpace(strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrPrivilegedAccount is returned when an OIDC identity is refused because the
+// local account it would bind to is privileged, rather than because the identity
+// did not match. The two are audited under different error codes: the identity in
+// the privileged case matched perfectly, and reporting it as a mismatch would send
+// an operator looking for a claim problem that is not there.
+var ErrPrivilegedAccount = errors.New("local account is privileged")
+
+// PrivilegedUIDThreshold is the uid below which a local account is treated as
+// privileged and is not bindable by an OIDC identity unless explicitly allowed.
+// 1000 is the first non-system uid on every distribution this project targets
+// (Debian/Ubuntu, RHEL/Fedora, SUSE, Arch).
+const PrivilegedUIDThreshold = 1000
+
+// verifyLocalAccountIsBindable refuses to bind an OIDC identity to a privileged
+// local account: uid 0, or any uid below PrivilegedUIDThreshold, unless the account
+// is named in authentication.allow_privileged_accounts.
+//
+// (#159) This is the check that holds when the others are misconfigured. Identity
+// binding depends on username_claim being set correctly, on the provider not letting
+// the user edit that claim, and on allowed_email_domains being pinned — three things
+// the operator can get wrong. Whether "root" is a legitimate destination for a
+// federated login does not depend on any of them.
+//
+// An account that does not exist locally is not refused here: there is no privilege
+// to escalate to, and the login cannot succeed anyway. "root" is refused by name
+// even if the lookup fails, since that is the case worth being sure about.
+func (b *Broker) verifyLocalAccountIsBindable(requested string) error {
+	if b.config != nil {
+		for _, allowed := range b.config.Authentication.AllowPrivilegedAccounts {
+			if strings.EqualFold(strings.TrimSpace(allowed), requested) {
+				log.Warn().
+					Str("local_user", requested).
+					Msg("Binding an OIDC identity to a privileged local account, permitted by authentication.allow_privileged_accounts")
+				return nil
 			}
-			return "", fmt.Errorf("username_claim %q is not a string", claimName)
 		}
 	}
-	// Fallbacks for the common standard claims even if not present in the raw map.
-	switch claimName {
-	case "preferred_username", "sub":
-		if userInfo.Subject != "" {
-			return userInfo.Subject, nil
-		}
-	case "email":
-		if userInfo.Email != "" {
-			return userInfo.Email, nil
-		}
+
+	if requested == "root" {
+		return fmt.Errorf("refusing to bind an OIDC identity to local user %q: it is uid 0. "+
+			"Log in as an unprivileged account and escalate, or add it to "+
+			"authentication.allow_privileged_accounts to override: %w", requested, ErrPrivilegedAccount)
 	}
-	return "", fmt.Errorf("username_claim %q not present in token claims", claimName)
+
+	lookup := b.lookupLocalUID
+	if lookup == nil {
+		lookup = lookupLocalUID
+	}
+	uid, exists, err := lookup(requested)
+	if err != nil {
+		// Neither "it exists and is privileged" nor "it does not exist": we could not
+		// tell. Do not silently allow a check we did not perform.
+		return fmt.Errorf("could not determine whether local user %q is privileged: %w", requested, err)
+	}
+	if !exists {
+		// Logged because "no such account here" and "account exists and is
+		// unprivileged" reach the same conclusion by different routes, and the first
+		// one means the guard did not really run. If the broker's passwd view differs
+		// from the authenticating host's — a container, a chroot, an sssd domain the
+		// broker cannot see — every account looks unprivileged.
+		log.Debug().
+			Str("local_user", requested).
+			Msg("Requested account does not exist in the broker's passwd view; privileged-account guard has nothing to check")
+		return nil
+	}
+	if uid < PrivilegedUIDThreshold {
+		return fmt.Errorf("refusing to bind an OIDC identity to local user %q: it is a system account "+
+			"(uid %d < %d). Add it to authentication.allow_privileged_accounts to override: %w",
+			requested, uid, PrivilegedUIDThreshold, ErrPrivilegedAccount)
+	}
+	return nil
+}
+
+// lookupLocalUID resolves a local account name to its numeric uid. The second
+// return value is false when there is no such account, which is not an error.
+func lookupLocalUID(name string) (int, bool, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		var unknown user.UnknownUserError
+		if errors.As(err, &unknown) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, false, fmt.Errorf("local user %q has a non-numeric uid %q: %w", name, u.Uid, err)
+	}
+	return uid, true, nil
+}
+
+// ErrUsernameClaimMissing is returned when the configured username_claim is not
+// in the token's claims at all. Distinguished from a mismatch because nothing about
+// the identity was wrong: the claim the operator named was never delivered, which is
+// a configuration or provider problem and is audited as one.
+var ErrUsernameClaimMissing = errors.New("configured username_claim is absent from the token claims")
+
+// claimToUsername extracts the string value of the configured claim. The claim the
+// operator named is the only claim consulted.
+//
+// (#164) There used to be a fallback here: an absent "preferred_username" or "sub"
+// substituted userInfo.Subject, and an absent "email" substituted userInfo.Email. So
+// if an IdP stopped returning preferred_username — a scope change, a claim-mapper
+// edit, a tenant migration — the authorization decision moved silently to `sub`, an
+// identifier the operator never chose and never audited, and for the many IdPs whose
+// `sub` is an email or a username it was then matched against local account names. A
+// `sub`-based deployment is expressible as username_claim: sub, which reaches
+// Claims["sub"] directly (extractUserInfoFromClaims always populates it).
+func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
+	v, ok := userInfo.Claims[claimName]
+	if !ok {
+		return "", fmt.Errorf("username_claim %q is absent from the token claims for this identity; "+
+			"check the provider's scopes and claim mapping, or set username_claim to a claim it does "+
+			"return: %w", claimName, ErrUsernameClaimMissing)
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("username_claim %q is not a string", claimName)
+	}
+	return s, nil
 }
 
 // classifyPollError maps a device-authorization polling error to a small, fixed
@@ -1325,6 +1799,14 @@ func classifyPollError(err error) string {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	// A grant carrying no id_token at all (#167). Its own code, because nothing
+	// was wrong with an ID token — there was none to check — and the operator's
+	// next move is a provider scope or claim-mapping change, not an
+	// investigation of this user. Matched on the underscore spelling, and first,
+	// so that the wording of a message that has to explain what could not be
+	// verified cannot land it in one of the cases below.
+	case strings.Contains(msg, "no id_token"):
+		return "ID_TOKEN_MISSING"
 	case strings.Contains(msg, "nonce"):
 		return "NONCE_INVALID"
 	case strings.Contains(msg, "verify id token"), strings.Contains(msg, "claim validation"):
@@ -1344,12 +1826,79 @@ func classifyPollError(err error) string {
 	}
 }
 
-// verifyRequiredGroups enforces that the authenticated user is a member of all
-// globally required groups (Authentication.RequireGroups). Returns nil when no
-// groups are required. Comparison is exact and case-sensitive (group names are
-// provider-defined identifiers).
-func (b *Broker) verifyRequiredGroups(userGroups []string) error {
-	required := b.config.Authentication.RequireGroups
+// ErrGroupNotAllowed marks a refusal by a provider's allowed_groups or
+// allowed_roles, as opposed to one by require_groups. The caller audits the two
+// with different error codes because they send an operator to different config
+// keys (#166).
+var ErrGroupNotAllowed = errors.New("identity is in none of the allowed groups or roles")
+
+// verifyGroupAuthorization is the single point at which a login is accepted or
+// refused on group membership. Two independently configured lists meet here, and
+// they are not the same gate:
+//
+//   - required — authentication.require_groups plus the require_groups of every
+//     matching per-resource policy, as resolved by the policy engine — is a
+//     conjunction: the user must be in all of them.
+//   - mapping.AllowedGroups / AllowedRoles, set per provider under user_mapping,
+//     is a disjunction: the user must be in at least one.
+//
+// In both cases an empty list means no restriction, and a non-empty list the
+// identity satisfies nothing in means the login is refused. They cannot be folded
+// into one list — "all of these" and "at least one of these" are different
+// questions, and an operator who writes both means both — so they are enforced
+// side by side rather than in two places. #166 was exactly the cost of the second
+// arrangement: allowed_groups was applied during claim extraction, where the only
+// thing it could do was shrink the group list, so a user in none of the allowed
+// groups logged in with no groups at all.
+//
+// The one asymmetry left is case: require_groups compares exactly, the allowlists
+// case-insensitively. Each keeps the comparison it already had, so this fix changes
+// no operator's matching, only what a non-match does.
+func (b *Broker) verifyGroupAuthorization(mapping config.UserMapping, required []string, userInfo *UserInfo) error {
+	if err := b.verifyRequiredGroups(required, userInfo.Groups); err != nil {
+		return err
+	}
+	if err := verifyGroupAllowlist("group", mapping.AllowedGroups, userInfo.Groups); err != nil {
+		return err
+	}
+	return verifyGroupAllowlist("role", mapping.AllowedRoles, userInfo.Roles)
+}
+
+// verifyGroupAllowlist refuses an identity that holds none of the allowed names.
+// An empty allowlist permits everything: that is the shipped default, and every
+// deployment that has never heard of the key depends on it.
+//
+// Matching is case-insensitive, which is what the old projection did. Only the
+// consequence of a non-match changes here; changing the comparison rule at the
+// same time would be a second, silent behaviour change for anyone who did set the
+// key.
+func verifyGroupAllowlist(kind string, allowed, have []string) error {
+	if len(allowed) == 0 {
+		return nil
+	}
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		permitted[strings.ToLower(a)] = struct{}{}
+	}
+	for _, h := range have {
+		if _, ok := permitted[strings.ToLower(h)]; ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: user is in none of the allowed %ss: %s",
+		ErrGroupNotAllowed, kind, strings.Join(allowed, ", "))
+}
+
+// verifyRequiredGroups enforces that the authenticated user is a member of every
+// group in required. Returns nil when no groups are required. Comparison is exact
+// and case-sensitive (group names are provider-defined identifiers).
+//
+// required is supplied by the caller rather than read from config here, because the
+// effective list is the union of the global authentication.require_groups and the
+// require_groups of every matching per-resource policy — a union only the policy
+// engine can compute. See PolicyEngine.applyGlobalPolicies and
+// applyResourcePolicies.
+func (b *Broker) verifyRequiredGroups(required, userGroups []string) error {
 	if len(required) == 0 {
 		return nil
 	}

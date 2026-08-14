@@ -11,6 +11,10 @@ PAM_DIR="/lib/security"
 CONFIG_DIR="/etc/oidc-auth"
 RUN_DIR="/var/run/oidc-auth"
 LOG_DIR="/var/log/oidc-auth"
+# The broker's own state: SSH keys it issues, and the per-user locks that
+# serialize its authorized_keys writes. 0700 and root-owned, because a lock a
+# user can take is a lock a user can hold (#161).
+STATE_DIR="/var/lib/oidc-pam"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Colors for output
@@ -110,7 +114,10 @@ create_directories() {
     
     mkdir -p "$LOG_DIR"
     chmod 755 "$LOG_DIR"
-    
+
+    mkdir -p "$STATE_DIR/ssh-keys" "$STATE_DIR/locks"
+    chmod 700 "$STATE_DIR" "$STATE_DIR/ssh-keys" "$STATE_DIR/locks"
+
     print_info "Directories created"
 }
 
@@ -184,26 +191,38 @@ install_config() {
 }
 
 # Configure PAM
+#
+# Only /etc/pam.d/sshd is touched, and only that file. The host-wide stacks
+# (common-auth on Debian/Ubuntu, system-auth on RHEL) are @included by every
+# service on the machine — su, sudo, the display manager, polkit, cron — and a
+# device flow in one of those makes each of them wait up to 90 s for a human with
+# a phone, several with no way to show that human the verification URL (#172).
 configure_pam() {
     print_info "Configuring PAM..."
-    
-    # Backup existing PAM configuration
-    if [[ -f "/etc/pam.d/sshd" ]]; then
-        cp "/etc/pam.d/sshd" "/etc/pam.d/sshd.backup.$(date +%Y%m%d-%H%M%S)"
+
+    if [[ ! -f "/etc/pam.d/sshd" ]]; then
+        print_warn "/etc/pam.d/sshd not found, skipping PAM configuration"
+        return
     fi
-    
+
+    # Backup existing PAM configuration
+    cp "/etc/pam.d/sshd" "/etc/pam.d/sshd.backup.$(date +%Y%m%d-%H%M%S)"
+
     # Check if OIDC PAM is already configured
-    if grep -q "pam_oidc.so" /etc/pam.d/sshd 2>/dev/null; then
+    if grep -q "pam_oidc.so" /etc/pam.d/sshd; then
         print_info "OIDC PAM already configured in SSH"
     else
-        # Add OIDC PAM to SSH configuration
+        # Add OIDC PAM to SSH configuration. 'sufficient' with no pam_deny.so
+        # after it, so the rest of the existing sshd stack still decides if OIDC
+        # is unavailable: an install must not be able to lock the operator out.
         sed -i '1i# OIDC PAM Authentication' /etc/pam.d/sshd
-        sed -i '2i@include common-auth' /etc/pam.d/sshd
-        sed -i '3iauth sufficient pam_oidc.so' /etc/pam.d/sshd
+        sed -i '2iauth sufficient pam_oidc.so' /etc/pam.d/sshd
         print_info "OIDC PAM configured for SSH"
     fi
-    
+
     print_warn "PAM configuration updated. Please review /etc/pam.d/sshd"
+    print_warn "Keep an emergency session open. Wire pam_oidc.so per service only, never into the"
+    print_warn "host-wide stack every service includes -- see configs/pam/README.md."
 }
 
 # Enable and start services

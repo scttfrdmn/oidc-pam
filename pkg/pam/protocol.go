@@ -4,14 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/scttfrdmn/oidc-pam/internal/brokerclient"
 )
 
-// AuthRequest represents an authentication request
+// AuthRequest represents an authentication request.
+//
+// SourceIP is where the login came from and TargetHost is where it is going: this
+// host. See BuildAuthRequest (#169).
 type AuthRequest struct {
 	Type       string            `json:"type"`
 	UserID     string            `json:"user_id"`
 	LoginType  string            `json:"login_type"`
-	TargetHost string            `json:"target_host"`
+	SourceIP   string            `json:"source_ip,omitempty"`
+	TargetHost string            `json:"target_host,omitempty"`
 	Metadata   map[string]string `json:"metadata"`
 }
 
@@ -72,7 +78,12 @@ func GetLoginType(service, tty string) string {
 	}
 }
 
-// BuildAuthRequest builds an authentication request
+// BuildAuthRequest builds an authentication request.
+//
+// (#169) rhost is PAM_RHOST — where the login is coming from — so it becomes
+// source_ip, and only when it really is an address; target_host is this machine.
+// This used to put rhost in target_host and send no source_ip, which is the
+// inversion the broker's policies were then evaluated against.
 func BuildAuthRequest(username, service, rhost, tty string) *AuthRequest {
 	loginType := GetLoginType(service, tty)
 
@@ -81,12 +92,16 @@ func BuildAuthRequest(username, service, rhost, tty string) *AuthRequest {
 		"tty":     tty,
 		"pid":     fmt.Sprintf("%d", os.Getpid()),
 	}
+	if rhost != "" {
+		metadata["rhost"] = rhost
+	}
 
 	return &AuthRequest{
 		Type:       "authenticate",
 		UserID:     username,
 		LoginType:  loginType,
-		TargetHost: rhost,
+		SourceIP:   brokerclient.SourceIPFromRHost(rhost),
+		TargetHost: brokerclient.ThisHost(),
 		Metadata:   metadata,
 	}
 }

@@ -8,8 +8,10 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +22,49 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/scttfrdmn/oidc-pam/pkg/config"
 	"golang.org/x/oauth2"
+)
+
+// The two non-terminal responses the token endpoint gives while a device
+// authorization is still in progress (RFC 8628 §3.5). They are the *normal*
+// answer to any poll made before the user has finished with the browser, not
+// failures: the first poll happens a full polling interval after the code is
+// displayed, so the honest expectation is several pending answers and then a
+// grant. Callers match them with errors.Is; treating them as failures means no
+// device flow can ever complete, which is what #150 was.
+var (
+	ErrAuthorizationPending = errors.New("authorization_pending")
+	ErrSlowDown             = errors.New("slow_down")
+)
+
+// Polling interval bounds, in seconds. RFC 8628 §3.5 requires clients to wait at
+// least the interval the provider asks for, and to add slowDownIncrement to it on
+// each slow_down. The minimum also keeps time.NewTicker from panicking on a
+// provider-supplied 0, and the maximum bounds what a provider can make the broker
+// wait.
+const (
+	minPollingInterval = 5
+	maxPollingInterval = 3600
+	slowDownIncrement  = 5
+)
+
+// Bounds on the provider-supplied strings that end up in the response the PAM
+// module reads.
+//
+// The module reads a response into a fixed-size buffer (MAX_RESPONSE_SIZE, 16 KiB),
+// and the verification URI is in there twice over: as device_url, and inside the
+// formatted instructions as both text and QR art whose size grows with the URI. A
+// provider (or anything that can answer as one) returning a kilobyte-long
+// verification_uri therefore pushes an ordinary login response past what the module
+// can parse, and every login on the host fails with nothing in syslog but "Failed
+// to parse broker response" (#162). internal/ipc bounds the response it sends as
+// well; this bounds the input, where the error can still name the provider and the
+// field.
+//
+// 512 bytes is far above anything real: the longest verification URIs in the wild
+// are around 100 characters, and the user code is meant to be typed by a human.
+const (
+	maxVerificationURILen = 512
+	maxUserCodeLen        = 64
 )
 
 // DeviceFlow represents an OAuth2 device authorization flow
@@ -187,6 +232,20 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 		}
 	}
 
+	// Every endpoint the broker is about to send credentials to has to be checked,
+	// not just the device authorization endpoint (#167). The token endpoint and
+	// /userinfo come straight out of the discovery document, and a discovery
+	// response naming http:// meant the access token went over the wire in
+	// cleartext — with the CA bundle, the skip-verify flag and the certificate pins
+	// above all bypassed, since none of them apply to a plaintext connection.
+	//
+	// Load time is the place for it: all three URLs are fixed when the provider is
+	// built, so checking here refuses at broker startup rather than mid-login, and
+	// there is no later moment at which they can change.
+	if err := validateProviderEndpoints(providerCfg.Name, provider); err != nil {
+		return nil, err
+	}
+
 	return &OIDCProvider{
 		Name:           providerCfg.Name,
 		Config:         providerCfg,
@@ -251,6 +310,77 @@ func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+// validateProviderEndpoints refuses a provider whose token, userinfo or device
+// authorization endpoint is not reachable over TLS. The three URLs are whatever
+// discovery returned (or, under skip_discovery, whatever was configured), and each
+// one receives either the device code, the client's credentials or the access
+// token.
+//
+// Only the scheme is checked, deliberately, and not the host: a token endpoint on
+// a different host from the issuer is normal rather than suspicious — Google's
+// issuer is accounts.google.com and its token endpoint is on
+// oauth2.googleapis.com, and Cognito's userinfo lives on a different domain again.
+// Requiring an issuer-host match here (as the device authorization endpoint does,
+// where it has always held) would refuse those providers outright. What it cannot
+// be is plaintext, because that is what silently disables every TLS control the
+// operator configured.
+func validateProviderEndpoints(name string, provider *oidc.Provider) error {
+	if provider == nil {
+		return fmt.Errorf("provider %q was not initialized", name)
+	}
+	endpoints := []struct {
+		label string
+		url   string
+	}{
+		{"token_endpoint", provider.Endpoint().TokenURL},
+		{"userinfo_endpoint", provider.UserInfoEndpoint()},
+		{"device_authorization_endpoint", provider.Endpoint().DeviceAuthURL},
+	}
+	for _, e := range endpoints {
+		// An absent endpoint is a different problem, handled where it is needed:
+		// a missing userinfo endpoint falls back to the ID token's claims, and a
+		// missing device endpoint is rediscovered by StartDeviceFlow.
+		if e.url == "" {
+			continue
+		}
+		if err := requireTLSEndpoint(e.url); err != nil {
+			return fmt.Errorf("provider %q: %s %w", name, e.label, err)
+		}
+	}
+	return nil
+}
+
+// requireTLSEndpoint reports whether an endpoint URL can be spoken to without
+// giving up the transport. Loopback is exempt so the test issuer (and a local
+// development provider) can be served over plain HTTP without a certificate;
+// nothing else is, in any mode.
+func requireTLSEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid URL: %w", endpoint, err)
+	}
+	if u.Scheme == "https" || isLoopbackHost(u.Host) {
+		return nil
+	}
+	return fmt.Errorf("%q must use HTTPS, got scheme %q", endpoint, u.Scheme)
+}
+
+// isLoopbackHost reports whether a URL host (which may carry a port) is the local
+// machine. Matched exactly rather than by prefix: "localhost.attacker.example" is
+// not loopback.
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 // StartDeviceFlow initiates the OAuth2 device authorization flow
 func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	// Get device authorization endpoint
@@ -300,13 +430,11 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 		return nil, fmt.Errorf("provider returned invalid expires_in value: %d (must be 1–%d seconds)", deviceResp.ExpiresIn, maxDeviceCodeExpiry)
 	}
 
-	// RFC 8628 §3.5: clients MUST wait at least the interval seconds between polls.
-	// Clamp to [5, 3600]: prevents time.NewTicker panic on ≤0 and resource
-	// exhaustion from provider-supplied sub-second intervals.
-	const (
-		minPollingInterval = 5
-		maxPollingInterval = 3600
-	)
+	if err := validateDeviceAuthLengths(&deviceResp); err != nil {
+		return nil, err
+	}
+
+	// Clamp the provider's interval to [minPollingInterval, maxPollingInterval].
 	if deviceResp.Interval < minPollingInterval {
 		deviceResp.Interval = minPollingInterval
 	} else if deviceResp.Interval > maxPollingInterval {
@@ -340,6 +468,32 @@ func (p *OIDCProvider) StartDeviceFlow(req *AuthRequest) (*DeviceFlow, error) {
 	return deviceFlow, nil
 }
 
+// validateDeviceAuthLengths rejects a device authorization response whose
+// user-facing strings are too long to fit in the response the PAM module reads
+// (#162). Refusing here fails the login for the one user whose provider misbehaves,
+// with the provider and field named in the error; letting it through fails every
+// login on the host with an unparseable response.
+func validateDeviceAuthLengths(resp *DeviceAuthResponse) error {
+	fields := []struct {
+		name  string
+		value string
+		max   int
+	}{
+		{"verification_uri", resp.VerificationURI, maxVerificationURILen},
+		{"verification_uri_complete", resp.VerificationURIComplete, maxVerificationURILen},
+		{"user_code", resp.UserCode, maxUserCodeLen},
+	}
+
+	for _, field := range fields {
+		if len(field.value) > field.max {
+			return fmt.Errorf("provider returned a %s of %d bytes, over the %d-byte limit",
+				field.name, len(field.value), field.max)
+		}
+	}
+
+	return nil
+}
+
 // PollDeviceAuthorization polls for device authorization completion.
 // ctx is used for ID token verification so callers can apply deadlines.
 func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, expectedNonce string) (*Token, error) {
@@ -367,12 +521,27 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 
 	// Handle error responses
 	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("token error: %s", tokenResp.Error)
+		return nil, tokenEndpointError(tokenResp.Error)
 	}
 
 	// Check if we have a valid response
 	if tokenResp.AccessToken == "" {
 		return nil, fmt.Errorf("no access token in response")
+	}
+
+	// (#167) No ID token used to mean no verification of any kind: the whole block
+	// below — signature, issuer, audience, expiry, the nonce replay check and
+	// validateIDTokenClaims — is conditional on there being one, so a response
+	// without an id_token produced an identity read out of /userinfo and vouched
+	// for by nothing but TLS and the bearer token. Refuse it by default instead,
+	// and let an operator whose provider really does not issue ID tokens for the
+	// device grant say so explicitly.
+	if tokenResp.IDToken == "" && p.Config.IDTokenRequired() {
+		return nil, fmt.Errorf("provider %q granted the device authorization but returned no id_token, "+
+			"so this authorization cannot be verified at all — the signature, audience, expiry and "+
+			"replay check all live in the ID token. Request the openid scope, or set "+
+			"require_id_token: false on this provider to accept an identity asserted only by /userinfo",
+			p.Name)
 	}
 
 	// Parse and verify ID token if present
@@ -426,6 +595,21 @@ func (p *OIDCProvider) PollDeviceAuthorization(ctx context.Context, deviceCode, 
 	return token, nil
 }
 
+// tokenEndpointError maps an OAuth error code from the token endpoint onto an
+// error value, wrapping the two non-terminal codes so a caller can recognise them
+// with errors.Is instead of comparing strings. The message keeps the
+// "token error: <code>" shape that the audit log and classifyPollError read.
+func tokenEndpointError(code string) error {
+	switch code {
+	case "authorization_pending":
+		return fmt.Errorf("token error: %w", ErrAuthorizationPending)
+	case "slow_down":
+		return fmt.Errorf("token error: %w", ErrSlowDown)
+	default:
+		return fmt.Errorf("token error: %s", code)
+	}
+}
+
 // GetUserInfo retrieves user information using the access token
 func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 	// Get userinfo endpoint
@@ -461,13 +645,16 @@ func (p *OIDCProvider) GetUserInfo(token *Token) (*UserInfo, error) {
 		return nil, fmt.Errorf("failed to decode userinfo response: %w", err)
 	}
 
-	// Merge with ID token claims if available
-	if token.Claims != nil {
-		for key, value := range token.Claims {
-			if _, exists := userInfoClaims[key]; !exists {
-				userInfoClaims[key] = value
-			}
-		}
+	// Merge the two claim sets, with the ID token winning wherever they disagree
+	// (#167). It used to be the other way round — /userinfo filled gaps *and* took
+	// precedence — which meant the value that authorizes the login, username_claim,
+	// could come from this unsigned JSON body even when a signed ID token said
+	// something else. The ID token is the assertion the provider actually signed
+	// and the verifier checked; /userinfo is authenticated by TLS and a bearer
+	// token, and is often the richer of the two, so claims it alone carries are
+	// still kept.
+	for key, value := range token.Claims {
+		userInfoClaims[key] = value
 	}
 
 	return p.extractUserInfoFromClaims(userInfoClaims)
@@ -619,16 +806,17 @@ func (p *OIDCProvider) getDeviceAuthorizationEndpoint() (string, error) {
 		return "", fmt.Errorf("invalid issuer URL: %w", err)
 	}
 
-	// validateEndpoint ensures the endpoint uses HTTPS (or localhost/127.0.0.1 for testing)
-	// and that its host matches the issuer host.
+	// validateEndpoint ensures the endpoint uses HTTPS (or loopback for testing)
+	// and that its host matches the issuer host. The scheme half is shared with the
+	// token and userinfo endpoints, which are checked when the provider is built
+	// (#167); the issuer-host half is specific to this endpoint.
 	validateEndpoint := func(endpoint string) error {
+		if err := requireTLSEndpoint(endpoint); err != nil {
+			return fmt.Errorf("endpoint %w", err)
+		}
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return fmt.Errorf("invalid endpoint URL: %w", err)
-		}
-		isLocalhost := strings.HasPrefix(u.Host, "localhost") || strings.HasPrefix(u.Host, "127.0.0.1")
-		if u.Scheme != "https" && !isLocalhost {
-			return fmt.Errorf("endpoint must use HTTPS, got %q", u.Scheme)
 		}
 		if u.Host != issuerURL.Host {
 			return fmt.Errorf("endpoint host %q does not match issuer host %q", u.Host, issuerURL.Host)
@@ -755,17 +943,12 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 						}
 					}
 
-					// Enforce allowlist if configured — drop groups not in the set.
-					if len(mapping.AllowedGroups) > 0 {
-						allowed := make(map[string]bool, len(mapping.AllowedGroups))
-						for _, g := range mapping.AllowedGroups {
-							allowed[strings.ToLower(g)] = true
-						}
-						if !allowed[strings.ToLower(groupStr)] {
-							continue
-						}
-					}
-
+					// allowed_groups is deliberately *not* applied here. It used to drop
+					// every group outside the set, which left a user who was in none of
+					// them holding an empty group list and authenticating normally — an
+					// option named allowed_* that denied nothing (#166). It is a login
+					// gate now, enforced once in Broker.verifyGroupAuthorization, and
+					// this function's job is only to report the identity as it is.
 					userInfo.Groups = append(userInfo.Groups, groupStr)
 				}
 			}
@@ -777,16 +960,8 @@ func (p *OIDCProvider) extractUserInfoFromClaims(claims map[string]interface{}) 
 		if roles, ok := claims[mapping.RolesClaim].([]interface{}); ok {
 			for _, role := range roles {
 				if roleStr, ok := role.(string); ok {
-					// Enforce allowlist if configured — drop roles not in the set.
-					if len(mapping.AllowedRoles) > 0 {
-						allowed := make(map[string]bool, len(mapping.AllowedRoles))
-						for _, r := range mapping.AllowedRoles {
-							allowed[strings.ToLower(r)] = true
-						}
-						if !allowed[strings.ToLower(roleStr)] {
-							continue
-						}
-					}
+					// As with allowed_groups above: allowed_roles denies the login in
+					// the broker rather than trimming this list (#166).
 					userInfo.Roles = append(userInfo.Roles, roleStr)
 				}
 			}

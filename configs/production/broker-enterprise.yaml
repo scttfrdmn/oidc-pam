@@ -27,6 +27,13 @@ oidc:
       
       user_mapping:
         username_claim: "email"
+        # (#159) An email-shaped claim binds on its local part only when you ask for it
+        # and pin the domains it may come from: with these settings alice@example.com can
+        # log in as "alice", while alice@partner.example and root@anything cannot.
+        # Replace example.com with your domain(s). Privileged accounts (uid < 1000)
+        # are refused regardless; see authentication.allow_privileged_accounts.
+        username_claim_strip_domain: true
+        allowed_email_domains: ["example.com"]
         email_claim: "email"
         name_claim: "name"
         groups_claim: "groups"
@@ -48,6 +55,13 @@ oidc:
       
       user_mapping:
         username_claim: "email"
+        # (#159) An email-shaped claim binds on its local part only when you ask for it
+        # and pin the domains it may come from: with these settings alice@example.com can
+        # log in as "alice", while alice@partner.example and root@anything cannot.
+        # Replace example.com with your domain(s). Privileged accounts (uid < 1000)
+        # are refused regardless; see authentication.allow_privileged_accounts.
+        username_claim_strip_domain: true
+        allowed_email_domains: ["example.com"]
         email_claim: "email"
         name_claim: "name"
         groups_claim: "groups"
@@ -84,6 +98,13 @@ oidc:
       
       user_mapping:
         username_claim: "email"
+        # (#159) An email-shaped claim binds on its local part only when you ask for it
+        # and pin the domains it may come from: with these settings alice@example.com can
+        # log in as "alice", while alice@partner.example and root@anything cannot.
+        # Replace example.com with your domain(s). Privileged accounts (uid < 1000)
+        # are refused regardless; see authentication.allow_privileged_accounts.
+        username_claim_strip_domain: true
+        allowed_email_domains: ["example.com"]
         email_claim: "email"
         name_claim: "name"
         groups_claim: "contractor-groups"
@@ -103,6 +124,13 @@ authentication:
   require_groups: ["company-employees"]
   
   # Environment-specific policies
+  # A policy is selected by its NAME: "default" applies to every host, any other
+  # name must match this host's name (exactly, or as a domain component, so
+  # "production" matches "api.production.example.com" but not "prod-login-01").
+  # A policy that matches no host never applies — the broker logs a warning
+  # naming it at startup. Rename the tier that applies to these hosts to
+  # "default", or name your hosts to match. Every matching policy applies:
+  # require_groups is the union of all matches and the global setting.
   policies:
     # Production environment - maximum security
     production:
@@ -161,6 +189,14 @@ authentication:
     tailscale_api_key: "tskey-api-your-key-here"
     validate_device_trust: true
     require_private_network: true
+    # What the two requirements above do with a login that reports no source_ip:
+    # one at the physical console, or one whose PAM_RHOST is a hostname rather
+    # than an address. Required whenever either is enabled, and "deny" is the
+    # fail-closed answer — on these hosts a console login is expected to go
+    # through the same network requirements as any other, and there is no address
+    # to check it against. Set it to "allow" only if console logins must work,
+    # and expect a network_requirement_waived audit event for each one.
+    unknown_source_ip: "deny"
 
   # Time-based access controls
   time_based_policies:
@@ -217,32 +253,34 @@ security:
   
   # TLS verification
   tls_verification:
-    pin_certificates: true
     trusted_ca_bundle: "/etc/ssl/certs/company-ca-bundle.pem"
     skip_tls_verify: false
+    # Certificate pinning is a list of SHA-256 fingerprints that must appear in
+    # the provider's TLS chain, not a boolean. (#170) This file used to say
+    # `pin_certificates: true`, which is not the name of any setting, so pinning
+    # was off in the very configuration that claimed to enable it. Get the
+    # fingerprint with:
+    #   openssl s_client -connect sso.company.com:443 </dev/null 2>/dev/null |
+    #     openssl x509 -noout -fingerprint -sha256
+    # A wrong or stale fingerprint refuses every connection to the provider, so
+    # this is left empty — pinning is off until you put your own values here.
+    pinned_certificates: []
   
-  # Strict rate limiting
+  # Rate limiting. max_requests_per_minute is the budget for *starting* an
+  # authentication, per requested account — not a host-wide total, so traffic for
+  # one account cannot deny logins to another. check_session polls are charged
+  # against a separate budget 20x this size, so a login that has been allowed to
+  # start can always finish polling.
   rate_limiting:
     max_requests_per_minute: 30
     max_concurrent_auths: 5
 
-# Cloud Integration (AWS example)
-cloud:
-  provider: "aws"
-  auto_discovery: true
-  metadata_sources: ["aws"]
-  
-  aws:
-    region: "us-west-2"
-    parameter_store:
-      prefix: "/company/oidc/production/"
-      parameters:
-        provider_url: "primary-provider-url"
-        client_id: "primary-client-id"
-        client_secret: "primary-client-secret"
-        backup_provider_url: "backup-provider-url"
-        backup_client_id: "backup-client-id"
-        backup_client_secret: "backup-client-secret"
+# Secrets: any client_secret, and security.token_encryption_key, may be written
+# as "env:VAR_NAME" or "file:/path/to/secret" instead of a literal, so the value
+# comes from your systemd unit's EnvironmentFile or from a file your secrets
+# manager writes. (#170) There is no built-in Parameter Store / Key Vault /
+# Secret Manager integration; the cloud: section this file used to carry had no
+# readers at all.
 
 # Comprehensive Audit Configuration
 audit:
@@ -263,31 +301,29 @@ audit:
     - "data_access"
     - "system_events"
     
-  # Multiple output destinations
+  # Multiple output destinations.
+  # The supported types are file, stdout, syslog and http; anything else is
+  # refused at startup. (#170) This file used to name "remote_syslog" and
+  # "webhook", neither of which exists, and the broker died on it.
   outputs:
     # Local file with rotation
     - type: "file"
       path: "/var/log/oidc-auth/audit.log"
       rotation: "daily"
-      
-    # Syslog for centralized logging
+
+    # Local syslog. To reach a SIEM, forward from the host's syslog daemon
+    # (rsyslog/journald) — the broker writes to the local socket only.
     - type: "syslog"
       facility: "auth"
       severity: "info"
-      
-    # Remote syslog for SIEM
-    - type: "remote_syslog"
-      url: "syslog://siem.company.com:514"
-      facility: "auth"
-      severity: "info"
-      
-    # Webhook for real-time alerts
-    - type: "webhook"
+
+    # HTTP POST of each event as JSON, for a SIEM collector or alert endpoint
+    - type: "http"
       url: "https://alerts.company.com/webhook/oidc-auth"
       headers:
         Authorization: "Bearer your-webhook-token"
         Content-Type: "application/json"
-  
+
   # Enterprise compliance
   compliance_frameworks: ["SOC2", "HIPAA", "PCI-DSS", "ISO27001", "NIST"]
   
@@ -296,113 +332,23 @@ audit:
   include_device_fingerprint: true
   include_network_path: true
 
-# SSH Key Management (if using SSH integration)
-ssh:
-  key_management:
-    enabled: true
-    key_type: "rsa"
-    key_size: 4096
-    key_lifetime: "4h"
-    storage_path: "/etc/oidc-auth/ssh-keys"
-    authorized_keys_path: "/etc/oidc-auth/authorized_keys"
-    cleanup_interval: "1h"
-    backup_keys: true
-  
-  certificate_authority:
-    enabled: true
-    ca_public_key_path: "/etc/oidc-auth/ca.pub"
-    ca_private_key_path: "/etc/oidc-auth/ca.key"
-    certificate_lifetime: "4h"
-    principals_source: "groups"
-
-# Policy Engine Configuration
-policy:
-  global:
-    enabled: true
-    default_allow: false  # Deny by default for security
-    max_session_duration: "4h"
-    require_device_trust: true
-  
-  network:
-    enabled: true
-    allowed_networks:
-      - "10.0.0.0/8"
-      - "172.16.0.0/12"
-      - "192.168.0.0/16"
-    blocked_networks:
-      - "0.0.0.0/0"  # Block all by default, whitelist specific networks
-    require_vpn: true
-    tailscale_integration: true
-  
-  risk_assessment:
-    enabled: true
-    max_risk_score: 60
-    thresholds:
-      low: 20
-      medium: 40
-      high: 60
-    factors:
-      new_device_weight: 30
-      unusual_location_weight: 35
-      after_hours_weight: 20
-      public_network_weight: 40
-      failed_attempts_weight: 45
-      contractor_weight: 25
-      service_account_weight: 15
-  
-  resource_access:
-    enabled: true
-    rules:
-      - name: "production-databases"
-        resources:
-          - "prod-db-*"
-          - "*.prod.db.company.com"
-        required_groups:
-          - "dba-team"
-          - "senior-engineers"
-        required_mfa: true
-        session_recording: true
-        time_restrictions:
-          business_hours_only: true
-        max_session_duration: "2h"
-      
-      - name: "production-servers"
-        resources:
-          - "prod-*"
-          - "*.prod.company.com"
-        required_groups:
-          - "production-access"
-          - "sre-team"
-        required_mfa: true
-        session_recording: true
-        max_session_duration: "4h"
-      
-      - name: "customer-data"
-        resources:
-          - "customer-*"
-          - "*.customer.company.com"
-        required_groups:
-          - "customer-data-access"
-        required_mfa: true
-        session_recording: true
-        no_data_export: true
-        require_approval: true
-        max_session_duration: "2h"
-
-# Logging Configuration
-logging:
-  level: "info"
-  format: "json"
-  output: "stdout"
-  
-  # Component-specific logging
-  components:
-    auth: "debug"
-    policy: "info"
-    ssh: "info"
-    ipc: "info"
-    audit: "info"
-    security: "debug"
+# (#170) Three sections were removed from this file — ssh: (key management and
+# an SSH certificate authority), policy: (a deny-by-default switch, network
+# allowlists, risk-score weights and per-resource rules) and logging: — because
+# no field of the broker's configuration reads any of them. They had never been
+# loaded: this file is now checked by TestShippedConfigsLoad, and an unknown key
+# is a startup error rather than silence. What is enforced lives above:
+#
+#   * require_groups, max_session_duration, require_device_trust,
+#     require_additional_mfa and ip_whitelist under authentication.policies.<name>
+#     (see the note on policy names there — ip_whitelist matches the SOURCE
+#     address of the login, which is the network allowlist this file wanted)
+#   * risk thresholds under authentication.risk_policies
+#   * network requirements under authentication.network_requirements
+#   * log verbosity under server.log_level, and the audit trail under audit:
+#
+# SSH keys are issued per session and cleaned up by the broker; their type, size
+# and location are not configurable.
 
 # ENTERPRISE DEPLOYMENT NOTES:
 # 1. Use a proper secrets management system (AWS Secrets Manager, HashiCorp Vault, etc.)

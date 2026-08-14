@@ -1,0 +1,23 @@
+# /etc/pam.d/sshd for the harness.
+#
+# The auth stack is deliberately the one configs/pam/ssh ships — 'sufficient'
+# followed by 'requisite pam_deny.so' — because that is the shape the device-flow
+# bypass (#120) exploited: a module that returns PAM_SUCCESS while the user is
+# still deciding ends the auth phase there and then, and pam_deny.so below it is
+# never reached. A harness running a stricter stack than the documented one would
+# not have caught it.
+auth        sufficient  pam_oidc.so socket=/var/run/oidc-auth/broker.sock timeout=15 debug
+auth        requisite   pam_deny.so
+
+# pam_oidc.so has no account-phase opinion (PAM_IGNORE), so it is listed only to
+# exercise that path; pam_permit.so is what actually decides here.
+# /harness/pam-sshd-account-deny replaces the permit with a deny, to check that
+# an account module below pam_oidc.so can still refuse a login the auth phase
+# accepted (#122).
+account     optional    pam_oidc.so
+account     required    pam_permit.so
+
+session     required    pam_permit.so
+session     optional    pam_oidc.so
+
+password    required    pam_deny.so

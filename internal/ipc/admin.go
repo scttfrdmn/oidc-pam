@@ -81,6 +81,7 @@ func (s *Server) handleKeysList() *adminapi.KeyListResponse {
 		}
 		out = append(out, adminapi.SSHKeyInfo{
 			Username:  key.Username,
+			SessionID: key.KeyID,
 			KeyType:   key.KeyType,
 			KeySize:   key.KeySize,
 			Status:    status,

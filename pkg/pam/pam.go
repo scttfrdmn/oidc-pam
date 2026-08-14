@@ -30,7 +30,15 @@ import (
 type PAMResultCode int
 
 const (
-	PAMSuccess         PAMResultCode = 0  // PAM_SUCCESS
+	PAMSuccess PAMResultCode = 0 // PAM_SUCCESS
+
+	// PAMServiceError is "error in service module": the module and the broker
+	// disagree about something, as opposed to the broker being unreachable
+	// (PAMAuthInfoUnavail) or the user being refused (PAMAuthError). The module
+	// returns it when a broker response does not fit its response buffer, so that
+	// an operator can tell those three apart in auth.log (#162).
+	PAMServiceError PAMResultCode = 3 // PAM_SERVICE_ERR
+
 	PAMSystemError     PAMResultCode = 4  // PAM_SYSTEM_ERR
 	PAMPermDenied      PAMResultCode = 6  // PAM_PERM_DENIED
 	PAMAuthError       PAMResultCode = 7  // PAM_AUTH_ERR
@@ -180,15 +188,27 @@ func (p *PAMModule) AuthenticateUserContext(ctx context.Context, username, servi
 		timeout = brokerclient.DefaultAuthTimeout
 	}
 
+	// (#169) rhost is PAM_RHOST: where the login is coming from, so it is the
+	// request's source_ip — the input to every network policy, the IP allowlists
+	// and the location history. target_host is this machine. Sending rhost as
+	// target_host, and nothing as source_ip, is what made require_private_network
+	// refuse every login. The unabridged rhost goes in metadata for the audit
+	// trail, since source_ip carries only an address.
+	metadata := map[string]interface{}{
+		"service": service,
+		"tty":     tty,
+		"pid":     os.Getpid(),
+	}
+	if rhost != "" {
+		metadata["rhost"] = rhost
+	}
+
 	resp, err := client.AuthenticateAndWait(ctx, &brokerclient.Request{
 		UserID:     username,
-		TargetHost: rhost,
+		SourceIP:   brokerclient.SourceIPFromRHost(rhost),
+		TargetHost: brokerclient.ThisHost(),
 		LoginType:  GetLoginType(service, tty),
-		Metadata: map[string]interface{}{
-			"service": service,
-			"tty":     tty,
-			"pid":     os.Getpid(),
-		},
+		Metadata:   metadata,
 	}, timeout)
 	if err != nil {
 		return p.authFailure(err)

@@ -13,11 +13,43 @@ This directory contains example PAM configuration files for integrating OIDC aut
 ## Configuration Files
 
 ### Core Authentication
-- **`common-auth`** - Common authentication stack for Debian/Ubuntu systems
-- **`ssh`** - SSH daemon authentication configuration
-- **`login`** - Console/TTY login authentication
-- **`su`** - Switch user authentication
-- **`sudo`** - Sudo privilege escalation authentication
+
+Every file here is one service's `/etc/pam.d/<service>`. There is deliberately no
+`common-auth` or `system-auth` example — see
+[Why no host-wide stack is shipped](#why-no-host-wide-stack-is-shipped).
+
+| File | Service | Exercised by CI |
+|---|---|---|
+| **`ssh`** | `sshd`, over keyboard-interactive | Yes — `test/e2e` performs real SSH logins against the built module |
+| **`login`** | console/TTY login | No |
+| **`su`** | `su` | No |
+| **`sudo`** | `sudo` | No |
+
+The three CI does not exercise are examples. A device flow needs a terminal to
+print the verification URL on and a user waiting in front of it, and whether a
+given service's PAM conversation displays `PAM_TEXT_INFO` at all is a property of
+that service. Test them on a host you can still get back into.
+
+### Why no host-wide stack is shipped
+
+`/etc/pam.d/common-auth` (Debian/Ubuntu) and `/etc/pam.d/system-auth` (RHEL,
+Fedora, SUSE) are `@include`d by every PAM service on the machine. `pam_oidc.so`
+in one of those is `pam_oidc.so` at the front of the auth stack of `su`, `sudo`,
+`gdm`/`sddm`, `polkit`, `login`, `cron` and everything else linked against
+libpam — each of which then waits up to `timeout` seconds (90 by default) for a
+human with a phone before falling through.
+
+Several of those callers can never satisfy a device flow: no controlling terminal,
+a conversation function that discards `PAM_TEXT_INFO`, or a graphical prompt that
+renders the QR code as a block of ASCII art. Nothing is admitted that should not
+be — these stacks fail closed — but `sudo` hangs for 90 seconds, the display
+manager shows ASCII art, and cron jobs pay the timeout. Since the shipped stacks
+have no password fallback, an auth stack that cannot complete is an operator
+locked out of their own machine.
+
+Releases up to and including v0.4.2 shipped a `common-auth` example.
+**If you installed it, take `pam_oidc.so` out of `/etc/pam.d/common-auth`** and
+put it in the per-service file for the service you actually want it in.
 
 ### Usage Instructions
 
@@ -33,15 +65,15 @@ This directory contains example PAM configuration files for integrating OIDC aut
 sudo cp -r /etc/pam.d /etc/pam.d.backup
 ```
 
-**Install configurations:**
+**Install configurations, one service at a time:**
 ```bash
-# For specific services
 sudo cp configs/pam/ssh /etc/pam.d/ssh
 sudo cp configs/pam/sudo /etc/pam.d/sudo
-
-# For system-wide (be careful!)
-sudo cp configs/pam/common-auth /etc/pam.d/common-auth
 ```
+
+Start with `ssh` and nothing else, with SSH public-key access already working as
+the break-glass path. Never install `pam_oidc.so` into `/etc/pam.d/common-auth`
+or `/etc/pam.d/system-auth`.
 
 #### 3. Testing
 
@@ -89,6 +121,11 @@ auth    required    pam_oidc.so
 ```
 auth    sufficient  pam_oidc.so debug
 ```
+
+`debug` is for diagnosing a login you are watching, and belongs in the stack only
+while you are watching it. It makes the module log the details of every
+authentication that service handles to `LOG_AUTHPRIV`. It applies to the stack that
+carries it and to nothing else — the shipped stacks do not carry it.
 
 ## Which PAM phases the module participates in
 
@@ -158,7 +195,7 @@ not consult the PAM auth stack at all.
 
 | Argument | Meaning |
 |---|---|
-| `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`). Remove in production. |
+| `debug` | Log at `LOG_DEBUG` to syslog (`LOG_AUTHPRIV`), for the stack that carries it only. Remove in production. |
 | `socket=<path>` | Absolute path to the broker's Unix socket. Defaults to `/var/run/oidc-auth/broker.sock`, matching the broker's own default for `server.socket_path`. Only needed if you changed that. |
 | `timeout=<seconds>` | How long to wait for the user to finish the device flow before refusing the login. Default `90`, accepted range `10`–`900`. |
 

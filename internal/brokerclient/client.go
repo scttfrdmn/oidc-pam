@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -41,6 +43,13 @@ const (
 )
 
 // Request is an IPC request. It mirrors ipc.Request.
+//
+// SourceIP is where the login came from and TargetHost is where it is going: this
+// machine. (#169) Both clients used to send PAM_RHOST — the address the user is
+// connecting *from* — as TargetHost and send no SourceIP at all, which left every
+// audit record naming the client as the host being logged into and every policy
+// that reads source_ip evaluating the empty string. Use SourceIPFromRHost and
+// ThisHost rather than filling them in by hand.
 type Request struct {
 	Type       string                 `json:"type"`
 	UserID     string                 `json:"user_id,omitempty"`
@@ -53,6 +62,49 @@ type Request struct {
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// MaxSourceIPLen is the wire contract's bound on source_ip: an IPv6 literal with
+// a zone. The broker refuses anything longer.
+const MaxSourceIPLen = 45
+
+// SourceIPFromRHost derives the request's source_ip from PAM's PAM_RHOST.
+//
+// source_ip carries an address or nothing, so an rhost that is a hostname — which
+// is what sshd supplies with UseDNS on — yields "". Passing the hostname through
+// would be worse than omitting it: a policy would evaluate a string that is not a
+// location, and no downstream check re-resolves it. The unabridged rhost still
+// reaches the broker in metadata.rhost, where it is audit context and nothing
+// consults it for a decision.
+//
+// An empty result therefore means "this login has no address the broker can act
+// on", which is a state the broker handles deliberately
+// (network_requirements.unknown_source_ip) rather than one it infers.
+func SourceIPFromRHost(rhost string) string {
+	if rhost == "" || len(rhost) > MaxSourceIPLen {
+		return ""
+	}
+	// A zone ("fe80::1%eth0") names an interface on the sending host, and
+	// net.ParseIP rejects it, so it is validated without and returned with.
+	addr := rhost
+	if i := strings.IndexByte(addr, '%'); i >= 0 {
+		addr = addr[:i]
+	}
+	if net.ParseIP(addr) == nil {
+		return ""
+	}
+	return rhost
+}
+
+// ThisHost is the request's target_host: the host being logged into. A hostname
+// that cannot be determined is omitted rather than guessed, since a wrong one
+// selects the wrong per-resource policy.
+func ThisHost() string {
+	name, err := os.Hostname()
+	if err != nil || len(name) > 253 {
+		return ""
+	}
+	return name
+}
+
 // Response is an IPC response. It mirrors ipc.Response.
 type Response struct {
 	Success          bool                   `json:"success"`
@@ -62,7 +114,6 @@ type Response struct {
 	SessionID        string                 `json:"session_id,omitempty"`
 	DeviceCode       string                 `json:"device_code,omitempty"`
 	DeviceURL        string                 `json:"device_url,omitempty"`
-	QRCode           string                 `json:"qr_code,omitempty"`
 	ExpiresAt        time.Time              `json:"expires_at,omitempty"`
 	SSHPublicKey     string                 `json:"ssh_public_key,omitempty"`
 	RequiresDevice   bool                   `json:"requires_device,omitempty"`

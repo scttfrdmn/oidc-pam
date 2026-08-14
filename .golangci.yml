@@ -1,0 +1,27 @@
+# golangci-lint configuration.
+#
+# This file exists so that a local `make lint` and the CI Lint job run the same
+# checks. Without it both fall back to whatever the installed binary defaults to,
+# which means the linter set is decided by the tool version rather than by this
+# repository — a contributor on a different version sees different results, and a
+# tool upgrade can quietly add or drop a linter (#142).
+#
+# The standard set — errcheck, govet, ineffassign, staticcheck, unused — is what
+# this codebase is clean against. Declaring it changes nothing today; it makes the
+# choice explicit, so adding a linter is a deliberate act with a diff attached.
+#
+# The tool version itself is pinned in .golangci-version, which the CI Lint job
+# and test/docker/Dockerfile.verify both read.
+version: "2"
+
+linters:
+  default: standard
+
+  exclusions:
+    rules:
+      # cgo-generated wrappers are not this project's code to fix.
+      - path: _cgo_.*\.go
+        linters:
+          - errcheck
+          - staticcheck
+          - unused

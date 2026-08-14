@@ -4,12 +4,22 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strings"
 	"unicode"
 )
 
 const (
-	// maxRequestSize is the maximum allowed size for a JSON request (1 MB).
-	maxRequestSize = 1 << 20
+	// maxRequestSize is the maximum allowed size for a JSON request (64 KiB).
+	//
+	// The largest request these limits permit is around 40 KiB: 32 metadata entries
+	// of maxMetadataKeyLen + maxMetadataValueLen, plus the fixed fields. 64 KiB
+	// leaves room for JSON syntax and for a field to grow, and nothing legitimate
+	// comes close.
+	//
+	// It was 1 MiB, which mattered once rate limiting moved to after the decode
+	// (#160): this bound times maxConcurrentConnections is how much a peer can make
+	// the broker allocate before any limit has an opinion. 8 MiB, not 128 MiB.
+	maxRequestSize = 64 << 10
 
 	// maxUserIDLen is the maximum length for a Unix user ID.
 	maxUserIDLen = 32
@@ -19,6 +29,13 @@ const (
 
 	// maxFieldLen is the maximum length for generic string fields.
 	maxFieldLen = 256
+
+	// maxSourceIPLen and maxTargetHostLen are the wire contract's bounds for these
+	// two fields: 45 bytes is an IPv6 literal with a zone, 253 a DNS name. They are
+	// what Broker.Authenticate already enforces, applied at the boundary instead so
+	// an over-long value is refused before it is copied anywhere.
+	maxSourceIPLen   = 45
+	maxTargetHostLen = 253
 
 	// maxMetadataKeys is the maximum number of entries in the metadata map.
 	maxMetadataKeys = 32
@@ -54,7 +71,7 @@ func validateRequest(req *Request) error {
 		if err := validateStringField(req.UserAgent, "user_agent", maxFieldLen); err != nil {
 			return err
 		}
-		if err := validateStringField(req.TargetHost, "target_host", maxFieldLen); err != nil {
+		if err := validateStringField(req.TargetHost, "target_host", maxTargetHostLen); err != nil {
 			return err
 		}
 		if err := validateStringField(req.LoginType, "login_type", maxFieldLen); err != nil {
@@ -114,13 +131,30 @@ func validateUserID(id string) error {
 	return nil
 }
 
-// validateSourceIP checks that a source IP is a valid IP address.
-// An empty string is allowed (source IP is optional).
+// validateSourceIP checks that source_ip is an IP address, or absent.
+//
+// Empty stays legal, because the wire contract makes source_ip conditional on the
+// login having an address at all ("the client address, if the login has one"), and
+// a console login has none. What used to be wrong was not the validation but what
+// the policy engine made of the gap: see applyNetworkPolicies (#169). A hostname
+// is refused rather than accepted as a location — an unresolvable claim in
+// source_ip is worse than nothing, since a policy would evaluate it — and clients
+// put the unabridged PAM_RHOST in metadata.rhost instead.
 func validateSourceIP(ip string) error {
 	if ip == "" {
 		return nil
 	}
-	if net.ParseIP(ip) == nil {
+	if len(ip) > maxSourceIPLen {
+		return fmt.Errorf("source_ip exceeds maximum length of %d characters", maxSourceIPLen)
+	}
+	// An IPv6 literal may carry a zone ("fe80::1%eth0"), which net.ParseIP rejects
+	// on its own. The zone names an interface on the sending host and means nothing
+	// here, so it is accepted and ignored.
+	addr := ip
+	if i := strings.IndexByte(addr, '%'); i >= 0 {
+		addr = addr[:i]
+	}
+	if net.ParseIP(addr) == nil {
 		return fmt.Errorf("source_ip is not a valid IP address")
 	}
 	return nil

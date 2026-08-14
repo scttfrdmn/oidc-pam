@@ -33,10 +33,13 @@ const (
 func main() {
 	// Parse command line flags
 	var (
-		configFile  = flag.String("config", "/etc/oidc-auth/pam.conf", "Path to configuration file")
-		username    = flag.String("user", "", "Username to authenticate")
-		service     = flag.String("service", "unknown", "Service requesting authentication")
-		rhost       = flag.String("rhost", "localhost", "Remote host")
+		configFile = flag.String("config", "/etc/oidc-auth/pam.conf", "Path to configuration file")
+		username   = flag.String("user", "", "Username to authenticate")
+		service    = flag.String("service", "unknown", "Service requesting authentication")
+		// (#169) Defaults to empty, not "localhost": rhost becomes the request's
+		// source_ip, and inventing a peer for a login that has none is the mistake
+		// this flag would otherwise hand the broker.
+		rhost       = flag.String("rhost", "", "Address the login is coming from (PAM_RHOST); empty for a local login")
 		tty         = flag.String("tty", "unknown", "TTY")
 		debug       = flag.Bool("debug", false, "Enable debug logging")
 		showVersion = flag.Bool("version", false, "Show version information")

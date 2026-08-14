@@ -8,7 +8,17 @@
 // Total time budget for reading a complete broker response, in milliseconds.
 #define RESPONSE_READ_TIMEOUT_MS 30000
 
-// Global variables
+// Whether this invocation logs at LOG_DEBUG, taken from the module arguments by
+// parse_arguments.
+//
+// It has to be a global because log_pam_message is one, but it must not carry
+// state from one invocation to the next: pam_sm_authenticate runs inside sshd,
+// which serves many logins from one process and may run more than one service's
+// stack there. Setting the flag and never clearing it meant a single `debug` on
+// any stack turned on debug logging for every later authentication in that
+// process, including those of services that did not ask for it (#168).
+// parse_arguments now assigns this on every entry into the module, so an
+// invocation gets exactly what its own arguments asked for.
 static int debug_enabled = 0;
 
 // The compiled-in default must fit in pam_oidc_options.socket_path, which is
@@ -30,6 +40,13 @@ void log_pam_message(int priority, const char *format, ...) {
     closelog();
     
     va_end(args);
+}
+
+// Whether debug logging is in force right now. This is a separate function so a
+// Go test can watch the flag across two invocations — the module writes to syslog,
+// which a test cannot read. See TestDebugFlagDoesNotOutliveItsInvocation.
+int debug_logging_enabled(void) {
+    return debug_enabled;
 }
 
 // Connect to the OIDC authentication broker
@@ -68,36 +85,50 @@ int connect_to_broker(const char *socket_path) {
     return sock;
 }
 
-// Get user information from PAM handle
+// Get user information from PAM handle.
+//
+// An item the service never set comes back as PAM_SUCCESS with a NULL pointer, so
+// every one of these needs the substitute applied on NULL as well as on failure.
+// Testing only the return value left *rhost or *tty NULL, and the next thing that
+// happens to them is json_object_new_string(), i.e. strlen(NULL) — a crash of the
+// auth child, which under sshd is the login. PAM_RHOST is unset for every local
+// service (su, sudo, login, cron), and PAM_TTY for anything that is not on a
+// terminal (#168).
 int get_user_info(pam_handle_t *pamh, const char **username, const char **service, const char **rhost, const char **tty) {
     int retval;
-    
+
     // Get username
     retval = pam_get_user(pamh, username, NULL);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_ERR, "Failed to get username: %s", pam_strerror(pamh, retval));
         return retval;
     }
-    
+    if (*username == NULL) {
+        log_pam_message(LOG_ERR, "PAM returned no username");
+        return PAM_USER_UNKNOWN;
+    }
+
     // Get service name
     retval = pam_get_item(pamh, PAM_SERVICE, (const void**)service);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_WARNING, "Failed to get service name: %s", pam_strerror(pamh, retval));
+    }
+    if (retval != PAM_SUCCESS || *service == NULL) {
         *service = "unknown";
     }
-    
+
     // Get remote host
     retval = pam_get_item(pamh, PAM_RHOST, (const void**)rhost);
-    if (retval != PAM_SUCCESS) {
+    if (retval != PAM_SUCCESS || *rhost == NULL) {
         *rhost = "localhost";
     }
-    
+
     // Get TTY
     retval = pam_get_item(pamh, PAM_TTY, (const void**)tty);
-    if (retval != PAM_SUCCESS) {
+    if (retval != PAM_SUCCESS || *tty == NULL) {
         *tty = "unknown";
     }
-    
+
     log_pam_message(LOG_DEBUG, "User info - username: %s, service: %s, rhost: %s, tty: %s",
                     *username, *service, *rhost, *tty);
     
@@ -129,22 +160,80 @@ const char *classify_login_type(const char *service, const char *tty) {
     return "unknown";
 }
 
+// Derive the request's source_ip from PAM_RHOST: where the login is coming from.
+//
+// (#169) Returns NULL unless rhost really is an address. source_ip carries an
+// address or nothing, and sshd hands PAM a resolved hostname when UseDNS is on;
+// passing that through would be worse than omitting it, because the broker's
+// network policies and IP allowlists would then evaluate a string that is not a
+// location and nothing downstream re-resolves it. The unabridged rhost still goes
+// out in metadata.rhost, which is audit context and decides nothing.
+static const char *source_ip_from_rhost(const char *rhost) {
+    char addr[MAX_SOURCE_IP_LEN + 1];
+    struct in_addr v4;
+    struct in6_addr v6;
+    char *zone;
+    size_t len;
+
+    if (rhost == NULL) {
+        return NULL;
+    }
+    len = strlen(rhost);
+    if (len == 0 || len > MAX_SOURCE_IP_LEN) {
+        return NULL;
+    }
+
+    // A zone ("fe80::1%eth0") names an interface on the sending host, which
+    // inet_pton will not parse, so it is validated without and sent with.
+    memcpy(addr, rhost, len);
+    addr[len] = '\0';
+    zone = strchr(addr, '%');
+    if (zone != NULL) {
+        *zone = '\0';
+    }
+
+    if (inet_pton(AF_INET, addr, &v4) == 1 || inet_pton(AF_INET6, addr, &v6) == 1) {
+        return rhost;
+    }
+    return NULL;
+}
+
+// The request's target_host: the host being logged *into*, which is this one.
+//
+// (#169) Returns NULL rather than a guess when the name cannot be had or does not
+// fit, since a wrong target_host selects the wrong per-resource policy.
+static const char *this_host(char *buf, size_t size) {
+    if (gethostname(buf, size) != 0) {
+        return NULL; // includes ENAMETOOLONG: a truncated hostname is a wrong one
+    }
+    buf[size - 1] = '\0'; // POSIX does not promise termination on truncation
+    if (buf[0] == '\0') {
+        return NULL;
+    }
+    return buf;
+}
+
 // Send authentication request to broker
 int send_auth_request(int sock, const char *username, const char *service, const char *rhost, const char *tty) {
     json_object *request = json_object_new_object();
     json_object *type = json_object_new_string("authenticate");
     json_object *user_id = json_object_new_string(username);
-    json_object *target_host = json_object_new_string(rhost);
     json_object *metadata = json_object_new_object();
     json_object *service_obj = json_object_new_string(service);
     json_object *tty_obj = json_object_new_string(tty);
 
     const char *login_type_str = classify_login_type(service, tty);
+    const char *source_ip = source_ip_from_rhost(rhost);
+    char host_buf[MAX_TARGET_HOST_LEN + 1];
+    const char *target_host = this_host(host_buf, sizeof(host_buf));
 
     // Add metadata
     json_object_object_add(metadata, "service", service_obj);
     json_object_object_add(metadata, "tty", tty_obj);
     json_object_object_add(metadata, "pid", json_object_new_int(getpid()));
+    if (rhost != NULL && rhost[0] != '\0') {
+        json_object_object_add(metadata, "rhost", json_object_new_string(rhost));
+    }
 
     // Build request. Each value is added exactly once and owned by the tree, so
     // a single json_object_put(request) frees everything (L-11: previously the
@@ -152,9 +241,18 @@ int send_auth_request(int sock, const char *username, const char *service, const
     json_object_object_add(request, "type", type);
     json_object_object_add(request, "user_id", user_id);
     json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
-    json_object_object_add(request, "target_host", target_host);
+    // (#169) Both fields are omitted rather than sent empty when unknown: absent
+    // and empty mean the same thing to the broker, and an omitted field is the one
+    // the wire protocol describes. This used to send rhost as target_host and no
+    // source_ip at all, which inverted the two ends of the connection.
+    if (source_ip != NULL) {
+        json_object_object_add(request, "source_ip", json_object_new_string(source_ip));
+    }
+    if (target_host != NULL) {
+        json_object_object_add(request, "target_host", json_object_new_string(target_host));
+    }
     json_object_object_add(request, "metadata", metadata);
-    
+
     // Convert to string
     const char *request_str = json_object_to_json_string(request);
     size_t request_len = strlen(request_str);
@@ -219,7 +317,7 @@ int send_check_session_request(int sock, const char *session_id, const char *use
 // PAM stack.
 int receive_auth_response(int sock, char *response, size_t response_size) {
     if (response_size == 0) {
-        return -1;
+        return RECV_ERROR;
     }
 
     size_t total = 0;
@@ -233,14 +331,14 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
         int pr = poll(&pfd, 1, RESPONSE_READ_TIMEOUT_MS);
         if (pr == 0) {
             log_pam_message(LOG_ERR, "Timed out waiting for broker response");
-            return -1;
+            return RECV_ERROR;
         }
         if (pr < 0) {
             if (errno == EINTR) {
                 continue;
             }
             log_pam_message(LOG_ERR, "poll() failed waiting for response: %s", strerror(errno));
-            return -1;
+            return RECV_ERROR;
         }
 
         ssize_t received = recv(sock, response + total, cap - total, 0);
@@ -249,7 +347,7 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
                 continue;
             }
             log_pam_message(LOG_ERR, "Failed to receive response: %s", strerror(errno));
-            return -1;
+            return RECV_ERROR;
         }
         if (received == 0) {
             // Connection closed by broker. Accept whatever we have if it forms a
@@ -268,13 +366,34 @@ int receive_auth_response(int sock, char *response, size_t response_size) {
 
     if (total == 0) {
         log_pam_message(LOG_ERR, "Connection closed by broker before any response");
-        return -1;
+        return RECV_ERROR;
     }
 
     response[total] = '\0';
-    log_pam_message(LOG_DEBUG, "Received response: %s", response);
 
-    return 0;
+    // A full buffer with no end of message in it is the beginning of a response,
+    // not a response. Returning success here is what made #162 silent: the caller
+    // handed the truncated JSON to json_tokener_parse, which failed, and every
+    // login on the host was refused with nothing to go on but "Failed to parse
+    // broker response". The broker is responsible for not sending more than
+    // MAX_RESPONSE_SIZE; this is what happens when it does anyway.
+    if (total >= cap && memchr(response, '\n', total) == NULL) {
+        log_pam_message(LOG_ERR,
+                        "Broker response does not fit this module's %zu-byte buffer "
+                        "(%zu bytes read with no end of message)",
+                        response_size, total);
+        return RECV_RESPONSE_TOO_LARGE;
+    }
+
+    // The size, never the body. A response carries the live device code, the
+    // user's email and groups, and whatever else the broker<->module contract
+    // grows next; this module cannot know what is in one. syslog is not the place
+    // for it — LOG_AUTHPRIV is retained, shipped off the host and readable by
+    // everyone who can read auth.log, and `debug` is turned on by an operator
+    // debugging a login, not by the user whose response it is (#168).
+    log_pam_message(LOG_DEBUG, "Received %zu-byte broker response", total);
+
+    return RECV_OK;
 }
 
 // Display message to user
@@ -290,10 +409,21 @@ int display_message(pam_handle_t *pamh, const char *message) {
         log_pam_message(LOG_ERR, "Failed to get conversation function: %s", pam_strerror(pamh, retval));
         return retval;
     }
-    
+
+    // PAM_SUCCESS does not promise a usable conversation. A service that set none,
+    // or set one with a NULL function, hands back exactly this — and calling
+    // through it killed the auth child mid-login, which under sshd is the login
+    // itself (#168). Nothing can be shown to this user, which is not a reason to
+    // crash: the caller carries on and the login can still be completed from the
+    // device code the user already has, or it times out and is refused.
+    if (conv == NULL || conv->conv == NULL) {
+        log_pam_message(LOG_WARNING, "No PAM conversation function available; not showing message to user");
+        return PAM_CONV_ERR;
+    }
+
     msg.msg_style = PAM_TEXT_INFO;
     msg.msg = message;
-    
+
     retval = conv->conv(1, &msgp, &resp, conv->appdata_ptr);
     if (retval != PAM_SUCCESS) {
         log_pam_message(LOG_ERR, "Failed to display message: %s", pam_strerror(pamh, retval));
@@ -310,42 +440,11 @@ int display_message(pam_handle_t *pamh, const char *message) {
     return PAM_SUCCESS;
 }
 
-// Prompt user for input
-int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t response_size) {
-    struct pam_message msg;
-    const struct pam_message *msgp = &msg;
-    struct pam_response *resp = NULL;
-    struct pam_conv *conv;
-    int retval;
-    
-    retval = pam_get_item(pamh, PAM_CONV, (const void**)&conv);
-    if (retval != PAM_SUCCESS) {
-        log_pam_message(LOG_ERR, "Failed to get conversation function: %s", pam_strerror(pamh, retval));
-        return retval;
-    }
-    
-    msg.msg_style = PAM_PROMPT_ECHO_ON;
-    msg.msg = prompt;
-    
-    retval = conv->conv(1, &msgp, &resp, conv->appdata_ptr);
-    if (retval != PAM_SUCCESS) {
-        log_pam_message(LOG_ERR, "Failed to prompt user: %s", pam_strerror(pamh, retval));
-        return retval;
-    }
-    
-    if (resp && resp->resp) {
-        strncpy(response, resp->resp, response_size - 1);
-        response[response_size - 1] = '\0';
-        
-        // Clean up
-        free(resp->resp);
-        free(resp);
-    } else {
-        response[0] = '\0';
-    }
-    
-    return PAM_SUCCESS;
-}
+// There was a prompt_user() here. It had no caller — this module never asks the
+// user for input, since the device flow happens in the user's browser — and it
+// copied a conversation reply into a buffer whose size only its caller knew
+// (#168). Deleted rather than left for someone to wire up. The device flow needs
+// display_message and nothing else.
 
 // Parse module arguments
 // Parse the module arguments from /etc/pam.d/<service> into opts, which is
@@ -355,7 +454,7 @@ int prompt_user(pam_handle_t *pamh, const char *prompt, char *response, size_t r
 // therefore trusted, unlike oidc-pam-helper's argv, which may come from an
 // unprivileged caller (see L-6). Recognized arguments:
 //
-//   debug             Log at LOG_DEBUG to syslog.
+//   debug             Log at LOG_DEBUG to syslog, for this invocation only.
 //   socket=<path>     Absolute path to the broker's Unix socket. Defaults to
 //                     SOCKET_PATH, which matches the broker's own default for
 //                     server.socket_path.
@@ -376,10 +475,23 @@ void parse_arguments(int argc, const char **argv, pam_oidc_options *opts) {
     memcpy(opts->socket_path, SOCKET_PATH, sizeof(SOCKET_PATH));
     opts->timeout_s = DEFAULT_AUTH_TIMEOUT;
 
+    // Debug is settled before anything else is parsed: this assignment is what
+    // stops a previous invocation's `debug` from still being in force (#168), and
+    // doing it in its own pass means the messages logged below obey this
+    // invocation's arguments whatever order they arrive in.
     for (i = 0; i < argc; i++) {
         if (strcmp(argv[i], "debug") == 0) {
-            debug_enabled = 1;
-            log_pam_message(LOG_DEBUG, "Debug mode enabled");
+            opts->debug = 1;
+        }
+    }
+    debug_enabled = opts->debug;
+    if (opts->debug) {
+        log_pam_message(LOG_DEBUG, "Debug mode enabled");
+    }
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "debug") == 0) {
+            continue; // handled above
         } else if (strncmp(argv[i], "socket=", 7) == 0) {
             const char *path = argv[i] + 7;
             size_t len = strlen(path);
@@ -503,8 +615,14 @@ static int classify_response(json_object *obj) {
     json_object *success_obj = NULL;
 
     // A response we cannot interpret is not a grant.
-    if (!json_object_object_get_ex(obj, "success", &success_obj)) {
-        log_pam_message(LOG_ERR, "Broker response has no success field");
+    //
+    // The type is checked, not just the presence: json_object_get_boolean answers
+    // true for any non-empty JSON *string*, so `"success":"false"` used to be read
+    // as a success (#168). The real broker emits a JSON bool, which is exactly why
+    // nothing is given up by insisting on one here.
+    if (!json_object_object_get_ex(obj, "success", &success_obj) ||
+        !json_object_is_type(success_obj, json_type_boolean)) {
+        log_pam_message(LOG_ERR, "Broker response has no boolean success field");
         return PAM_AUTHINFO_UNAVAIL;
     }
 
@@ -576,17 +694,33 @@ static int broker_recv_and_close(int sock, char *response, size_t response_size)
     return rc;
 }
 
+// Map a failed read of a broker response onto a PAM result.
+//
+// PAM_AUTHINFO_UNAVAIL means "I could not reach an opinion": no broker, no reply,
+// a reply that is not JSON. A response too large for this module's buffer is a
+// different statement — the broker answered, and what is wrong is the contract
+// between the two halves of this project, not the transport and not the user. It
+// gets PAM_SERVICE_ERR ("error in service module") so that an operator reading
+// auth.log can tell the two apart, and so the fix they look for is the response
+// size rather than the broker's health. Both fail closed (#162).
+static int recv_failure_result(int rc) {
+    if (rc == RECV_RESPONSE_TOO_LARGE) {
+        return PAM_SERVICE_ERR;
+    }
+    return PAM_AUTHINFO_UNAVAIL;
+}
+
 static int broker_authenticate_once(const char *socket_path, const char *username, const char *service,
                                     const char *rhost, const char *tty,
                                     char *response, size_t response_size) {
     int sock = connect_to_broker(socket_path);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to connect to authentication broker");
-        return -1;
+        return RECV_ERROR;
     }
     if (send_auth_request(sock, username, service, rhost, tty) != 0) {
         close(sock);
-        return -1;
+        return RECV_ERROR;
     }
     return broker_recv_and_close(sock, response, response_size);
 }
@@ -596,11 +730,11 @@ static int broker_check_session_once(const char *socket_path, const char *sessio
     int sock = connect_to_broker(socket_path);
     if (sock == -1) {
         log_pam_message(LOG_ERR, "Failed to reconnect to authentication broker while polling");
-        return -1;
+        return RECV_ERROR;
     }
     if (send_check_session_request(sock, session_id, username) != 0) {
         close(sock);
-        return -1;
+        return RECV_ERROR;
     }
     return broker_recv_and_close(sock, response, response_size);
 }
@@ -617,21 +751,24 @@ static int broker_check_session_once(const char *socket_path, const char *sessio
 // "poll once, then give up".
 //
 // Only a transport or parse failure returns PAM_AUTHINFO_UNAVAIL ("I could not
-// reach an opinion"). Everything else — a refusal, a vanished session, an
+// reach an opinion"), and only a response too large for this module's buffer
+// returns PAM_SERVICE_ERR. Everything else — a refusal, a vanished session, an
 // exhausted budget — is a denial, so the auth stack fails closed.
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s) {
-    char response[MAX_BUFFER_SIZE];
+    char response[MAX_RESPONSE_SIZE];
     char session_id[MAX_SESSION_ID_SIZE];
     json_object *response_obj;
     const char *session;
     int poll_interval;
     long deadline;
     int result;
+    int rc;
 
-    if (broker_authenticate_once(socket_path, username, service, rhost, tty,
-                                 response, sizeof(response)) != 0) {
-        return PAM_AUTHINFO_UNAVAIL;
+    rc = broker_authenticate_once(socket_path, username, service, rhost, tty,
+                                  response, sizeof(response));
+    if (rc != RECV_OK) {
+        return recv_failure_result(rc);
     }
 
     response_obj = json_tokener_parse(response);
@@ -681,9 +818,10 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
         // code, so an immediate poll can only ever report "pending".
         sleep_seconds(remaining < poll_interval ? remaining : poll_interval);
 
-        if (broker_check_session_once(socket_path, session_id, username,
-                                      response, sizeof(response)) != 0) {
-            return PAM_AUTHINFO_UNAVAIL;
+        rc = broker_check_session_once(socket_path, session_id, username,
+                                       response, sizeof(response));
+        if (rc != RECV_OK) {
+            return recv_failure_result(rc);
         }
 
         response_obj = json_tokener_parse(response);

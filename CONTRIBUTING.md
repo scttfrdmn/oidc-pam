@@ -93,6 +93,11 @@ make lint
 sudo make install-dev
 ```
 
+The linter set is declared in `.golangci.yml` and the golangci-lint version is
+pinned in `.golangci-version`, so a local run matches CI. `make lint` warns if
+your installed version differs from the pin — install that version, or use
+`make verify-linux`, which always uses it.
+
 ### Working on the PAM module
 
 `cmd/pam-module` is the only cgo package. It holds the C bridge
@@ -110,17 +115,24 @@ every release before this one (#140). `scripts/verify-pam-module.sh` checks the
 built artifact for exactly that, and runs from `make build-pam`,
 `make verify-linux` and the release workflow.
 
+Two checks keep that quarantine from eroding: a `macOS (no PAM headers)` CI job
+that runs `go build/vet/test ./...` on a host with no PAM headers, and
+`make check-cgo` (`scripts/check-cgo-quarantine.sh`), which asserts from the build
+graph that `cmd/pam-module` is the only package with cgo files on Linux and that
+none has any on macOS. `make check-cgo` needs no headers and runs on any OS, so
+run it after touching a `#cgo` line or a build constraint.
+
 To exercise the C locally, run the sweep CI runs inside a Linux container:
 
 ```bash
 make verify-linux
 ```
 
-That builds `test/docker/Dockerfile.verify` and runs `go vet ./...`,
-`go test -race ./pkg/... ./internal/... ./cmd/...` and `golangci-lint run ./...`,
-then builds the module and verifies its entry points. CI covers the same ground in
-the `PAM (cgo)`, `Lint` and `Build` jobs. `make build-pam` refuses to run off
-Linux rather than emitting a module with no C in it.
+That builds `test/docker/Dockerfile.verify` and runs `make check-cgo`,
+`go vet ./...`, `go test -race ./...` and `golangci-lint run ./...`, then builds
+the module and verifies its entry points. CI covers the same ground in the `Test`,
+`PAM (cgo)`, `Lint` and `Build` jobs. `make build-pam` refuses to run off Linux
+rather than emitting a module with no C in it.
 
 ### Project Structure
 
@@ -145,7 +157,7 @@ oidc-pam/
 ├── test/                  # Test support
 │   ├── config/            # Test configuration
 │   ├── docker/            # Dockerfile.verify (Linux toolchain for cgo)
-│   ├── integration/       # Integration tests
+│   ├── integration/       # Keycloak-backed harness (build tag `integration`)
 │   └── keycloak/          # Keycloak realm for manual end-to-end runs
 ├── docs/                  # Documentation (docs/design/ is unmaintained; see its index)
 ├── scripts/               # Build, install and verification scripts

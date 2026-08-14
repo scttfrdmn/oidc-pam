@@ -293,7 +293,7 @@ func TestBrokerSSHKeyMethods(t *testing.T) {
 			},
 		},
 		keyManager:            sshpkg.NewKeyManager(keyDir),
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
+		authorizedKeysManager: testAuthorizedKeysManager(t, homeDir, "test-user-ssh"),
 	}
 
 	// Use a short key size to keep the test fast.
@@ -492,7 +492,12 @@ func TestBrokerAuthenticateScenarios(t *testing.T) {
 	}
 }
 
-// Test pollDeviceAuthorization method
+// Test pollDeviceAuthorization method.
+//
+// This is a smoke test only — it needs network dependencies it does not have,
+// so it returns early. The poll loop's actual behaviour (pending polls,
+// slow_down, terminal errors, expiry) is covered in device_poll_test.go against
+// an in-process issuer.
 func TestBrokerPollDeviceAuthorization(t *testing.T) {
 	cfg := &config.Config{
 		OIDC: config.OIDCConfig{
@@ -556,7 +561,7 @@ func TestBrokerPollDeviceAuthorization(t *testing.T) {
 	// This method runs in a goroutine and doesn't return values
 	// We'll just call it to test it doesn't panic
 	broker.wg.Add(1)
-	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow)
+	go broker.pollDeviceAuthorization(mockSession, provider, deviceFlow, nil)
 
 	// Wait briefly for the polling to start
 	time.Sleep(10 * time.Millisecond)

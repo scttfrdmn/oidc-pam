@@ -1,0 +1,19 @@
+# /etc/pam.d/sshd with an account module that refuses everything.
+#
+# Same auth stack as pam-sshd, so the device flow still completes and pam_oidc.so
+# still returns PAM_SUCCESS for the auth phase. The only difference is the
+# account phase, and the login must be refused anyway.
+#
+# This is the #122 regression: pam_oidc.so used to return PAM_SUCCESS from
+# pam_sm_acct_mgmt, which as 'sufficient' — the flag the configs shipped —
+# rubber-stamped the account stack and made whatever followed unreachable.
+auth        sufficient  pam_oidc.so socket=/var/run/oidc-auth/broker.sock timeout=15 debug
+auth        requisite   pam_deny.so
+
+account     optional    pam_oidc.so
+account     required    pam_deny.so
+
+session     required    pam_permit.so
+session     optional    pam_oidc.so
+
+password    required    pam_deny.so

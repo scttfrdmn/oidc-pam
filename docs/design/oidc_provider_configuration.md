@@ -883,8 +883,11 @@ oidc:
         clock_skew_tolerance: 300             # 5 minutes clock skew
         
         # Certificate pinning for high security environments
+        # (Pinning takes a list of SHA-256 fingerprints, not a boolean; see
+        # configs/CONFIGURATION-GUIDE.md. As with the rest of this file, the
+        # nesting here is not the shipped schema.)
         tls_verification:
-          pin_certificates: true
+          pinned_certificates: ["<sha256 fingerprint of the provider's certificate>"]
           trusted_ca_bundle: "/etc/ssl/certs/company-ca.pem"
           
         # Rate limiting to prevent abuse

@@ -25,28 +25,55 @@ jobs:
           go-version: '1.25.13'
           cache: true
 
+      # ./... includes cmd/pam-module, the one cgo package, so this job needs the
+      # PAM and json-c headers even though the `pam` job covers that package
+      # specifically.
+      - name: Install PAM development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpam0g-dev libjson-c-dev
+
       - name: Verify dependencies
         run: go mod verify
 
+      # Every package. The hand-curated list this replaced is how the PAM
+      # packages went unvetted and untested for as long as they did (#113).
       - name: Run go vet
-        run: |
-          # cmd/pam-module is the only package that needs cgo; it is vetted and
-          # tested in the separate `pam` job, which installs the PAM and json-c
-          # development headers. pkg/pam and cmd/pam-helper are pure Go (#141) and
-          # belong here.
-          go vet ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/pam ./pkg/security ./pkg/ssh \
-            ./internal/adminapi ./internal/brokerclient ./internal/ipc \
-            ./cmd/broker ./cmd/oidc-admin ./cmd/pam-helper
+        run: go vet ./...
 
       - name: Run tests
-        run: |
-          go test -race -coverprofile=coverage.out -covermode=atomic \
-            ./pkg/auth ./pkg/config ./pkg/metrics ./pkg/pam ./pkg/security ./pkg/ssh \
-            ./internal/adminapi ./internal/brokerclient ./internal/ipc ./cmd/oidc-admin
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Check test coverage
         run: |
           go tool cover -func=coverage.out
+
+  macos:
+    name: macOS (no PAM headers)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      # No PAM headers are installed here, deliberately: macOS has neither
+      # <security/pam_ext.h> nor json-c, so any cgo that escapes cmd/pam-module's
+      # //go:build linux constraint fails this job instead of only breaking for
+      # contributors on a Mac (#141). Nothing else in the tree may need cgo.
+      - name: Build
+        run: go build ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
 
   pam:
     name: PAM (cgo)
@@ -70,12 +97,39 @@ jobs:
       # cmd/pam-module holds the C bridge and every cgo wrapper around it, so it
       # is the only package this job exists for. It must stay that way: the C has
       # to live in the package that is built as c-shared, or the module ships with
-      # no PAM entry points in it (#140).
+      # no PAM entry points in it (#140). The `test` job's ./... covers this
+      # package too; the overlap is deliberate, so a cgo break is reported as one.
       - name: Run go vet
         run: go vet ./cmd/pam-module
 
       - name: Run tests
         run: go test -race ./cmd/pam-module/...
+
+  e2e:
+    name: End-to-end (SSH + PAM)
+    runs-on: ubuntu-latest
+    # 20 minutes is well over the ~6 the suite takes, including both image
+    # builds; it is here so a login that hangs past every deadline in the system
+    # fails the job instead of occupying a runner for six hours.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # No Go, no PAM headers and no credentials needed on the runner: the
+      # harness builds everything inside its own images, and the identity
+      # provider it authenticates against is a fake it starts itself. Docker with
+      # the compose plugin is preinstalled on ubuntu-latest.
+      #
+      # This is the only job that exercises what PAM makes of the module's return
+      # codes in a real stack, which is where every serious defect this project
+      # has shipped has lived: #120 (PAM_SUCCESS while the user was still
+      # deciding), #140 (a .so with no pam_sm_* symbols in it), #150 (a device
+      # flow abandoned on its first poll), #152 and #153. Each passed every unit
+      # test on both sides of the boundary it broke.
+      - name: Run the end-to-end harness
+        run: ./test/e2e/run-tests.sh
 
   build:
     name: Build
@@ -128,10 +182,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
+      # One pin, read by everything that runs the linter: this job and
+      # test/docker/Dockerfile.verify. Hardcoding it in each meant they could
+      # drift, and a linter version is part of what "lint passes" means (#142).
+      - name: Read the pinned golangci-lint version
+        id: golangci
+        run: echo "version=$(tr -d '[:space:]' < .golangci-version)" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ steps.golangci.outputs.version }}
           # Every package, including the cgo/PAM ones (hence the headers above).
           args: --timeout=5m ./...
 
@@ -161,3 +222,9 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+      # Reads the build graph for both GOOS values rather than the host, so it
+      # catches a cgo leak here as well as in the macOS job — and names the
+      # offending package instead of failing with a missing header.
+      - name: Check the cgo quarantine
+        run: ./scripts/check-cgo-quarantine.sh

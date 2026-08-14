@@ -1,4 +1,4 @@
-.PHONY: build build-pam skip-pam test install clean lint fmt vet tidy verify-linux help
+.PHONY: build build-pam skip-pam test install clean lint fmt vet check-cgo tidy verify-linux help
 
 # Build variables
 BINARY_DIR := bin
@@ -26,6 +26,10 @@ PAM_MODULE_TARGET := build-pam
 else
 PAM_MODULE_TARGET := skip-pam
 endif
+
+# The pinned golangci-lint version, single-sourced from .golangci-version so the
+# CI Lint job, the verification container and a local `make lint` cannot disagree.
+GOLANGCI_LINT_VERSION := $(shell tr -d '[:space:]' < .golangci-version)
 
 # Default target
 all: build
@@ -83,30 +87,30 @@ test-unit:
 	@echo "Running unit tests..."
 	go test $(GO_TEST_FLAGS) ./pkg/... ./internal/...
 
-## Run integration tests
-test-integration:
-	@echo "Running integration tests..."
-	go test $(GO_TEST_FLAGS) ./test/integration/...
-
-## Run end-to-end tests
+## Run the end-to-end harness: real sshd, real PAM stack, real broker (needs Docker)
 test-e2e:
-	@echo "Running end-to-end tests..."
-	go test $(GO_TEST_FLAGS) ./test/e2e/...
+	@# Not a `go test` package. Every case is an actual SSH login against the
+	@# built pam_oidc.so, which is the only way to exercise what PAM makes of the
+	@# module's return codes. See test/e2e/README.md.
+	./test/e2e/run-tests.sh
 
 ## Verify everything (vet + test + lint, all packages) in a Linux container.
 ## The cgo/PAM packages cannot be built on macOS, so this is the only way to
 ## reproduce CI's `pam` and `lint` jobs locally.
 verify-linux:
 	@echo "Building verification image..."
-	docker build -t oidc-pam-verify -f test/docker/Dockerfile.verify test/docker
+	docker build -t oidc-pam-verify \
+		--build-arg GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) \
+		-f test/docker/Dockerfile.verify test/docker
 	@echo "Running vet, tests and lint in Linux container..."
 	docker run --rm \
 		-v "$(CURDIR)":/src \
 		-v oidc-pam-gomod:/go/pkg/mod \
 		-v oidc-pam-gocache:/root/.cache \
 		-w /src oidc-pam-verify \
-		sh -c 'go vet ./... \
-			&& go test -race ./pkg/... ./internal/... ./cmd/... \
+		sh -c './scripts/check-cgo-quarantine.sh \
+			&& go vet ./... \
+			&& go test -race ./... \
 			&& golangci-lint run --timeout=5m ./... \
 			&& echo "Building and verifying the PAM module..." \
 			&& CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -o /tmp/pam_oidc.so ./cmd/pam-module \
@@ -144,6 +148,15 @@ clean:
 ## Run linter
 lint:
 	@echo "Running linter..."
+	@# CI runs $(GOLANGCI_LINT_VERSION). A different local version enables a
+	@# different set of checks, so a clean local run would not mean a clean CI run
+	@# — warn rather than fail, since the version is a local install concern.
+	@have=$$(golangci-lint version --short 2>/dev/null || golangci-lint --version 2>/dev/null | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1); \
+	want=$$(echo "$(GOLANGCI_LINT_VERSION)" | sed 's/^v//'); \
+	if [ -n "$$have" ] && [ "$${have#v}" != "$$want" ]; then \
+		echo "warning: golangci-lint $$have installed, but this repo pins v$$want (.golangci-version)." >&2; \
+		echo "         Results may differ from CI. 'make verify-linux' always uses the pin." >&2; \
+	fi
 	golangci-lint run
 
 ## Format code
@@ -155,6 +168,10 @@ fmt:
 vet:
 	@echo "Running go vet..."
 	go vet ./...
+
+## Check that cgo stays confined to cmd/pam-module (works on any OS)
+check-cgo:
+	@./scripts/check-cgo-quarantine.sh
 
 ## Tidy dependencies
 tidy:
@@ -217,8 +234,7 @@ help:
 	@echo "  build-admin     Build admin CLI tool"
 	@echo "  test            Run all tests"
 	@echo "  test-unit       Run unit tests only"
-	@echo "  test-integration Run integration tests"
-	@echo "  test-e2e        Run end-to-end tests"
+	@echo "  test-e2e        Run the end-to-end SSH/PAM harness in Docker"
 	@echo "  verify-linux    Run vet+test+lint for ALL packages (incl. cgo/PAM) in Docker"
 	@echo "  install         Install binaries to system"
 	@echo "  install-dev     Install development version"
@@ -226,6 +242,7 @@ help:
 	@echo "  lint            Run linter"
 	@echo "  fmt             Format code"
 	@echo "  vet             Run go vet"
+	@echo "  check-cgo       Check cgo is confined to cmd/pam-module"
 	@echo "  tidy            Tidy dependencies"
 	@echo "  coverage        Generate coverage report"
 	@echo "  security        Run security scan"

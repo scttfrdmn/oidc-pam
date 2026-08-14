@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -13,6 +14,26 @@ import (
 	"github.com/scttfrdmn/oidc-pam/pkg/security"
 	sshpkg "github.com/scttfrdmn/oidc-pam/pkg/ssh"
 )
+
+// testAuthorizedKeysManager returns an AuthorizedKeysManager that resolves homes
+// under homeDir, and creates the home directories of the named accounts.
+//
+// (#171) The manager no longer takes a base directory: it resolves each account's
+// home through the account database, and refuses a home that does not exist rather
+// than creating one as root. Tests substitute the lookup instead of creating real
+// accounts on the machine running the suite.
+func testAuthorizedKeysManager(t *testing.T, homeDir string, usernames ...string) *sshpkg.AuthorizedKeysManager {
+	t.Helper()
+
+	for _, username := range usernames {
+		if err := os.MkdirAll(filepath.Join(homeDir, username), 0700); err != nil {
+			t.Fatalf("MkdirAll home for %s: %v", username, err)
+		}
+	}
+	akm := sshpkg.NewAuthorizedKeysManager(t.TempDir())
+	akm.SetAccountLookup(sshpkg.HomeRootLookup(homeDir))
+	return akm
+}
 
 // newSweepTestBroker returns a broker whose AuthorizedKeysManager is rooted at a
 // temporary directory standing in for /home.
@@ -34,7 +55,7 @@ func newSweepTestBroker(t *testing.T) (*Broker, string) {
 		sessionMutex:          sync.RWMutex{},
 		providers:             map[string]*OIDCProvider{},
 		auditLogger:           auditLogger,
-		authorizedKeysManager: sshpkg.NewAuthorizedKeysManager(homeDir),
+		authorizedKeysManager: testAuthorizedKeysManager(t, homeDir),
 	}
 
 	return broker, homeDir
@@ -193,6 +214,133 @@ func TestSweepToleratesMissingAuthorizedKeys(t *testing.T) {
 	}
 	if len(broker.ListSessions()) != 0 {
 		t.Errorf("%d sessions survived expiry", len(broker.ListSessions()))
+	}
+}
+
+// holdUsersLock takes the broker's authorized_keys lock for username and holds it
+// until the test ends, standing in for a competing writer.
+//
+// Before #161 this lock lived in the user's own ~/.ssh, so the "competing writer"
+// could be the user: `flock ~/.ssh/authorized_keys.lock -c 'sleep infinity'` and
+// the broker's single cleanup goroutine never ran again.
+func holdUsersLock(t *testing.T, broker *Broker, username string) {
+	t.Helper()
+
+	path := broker.authorizedKeysManager.LockPath(username)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600) // #nosec G304 -- test temp dir
+	if err != nil {
+		t.Fatalf("open lock file: %v", err)
+	}
+	// flock is held per open file description, so this contends with the broker's
+	// own open of the same path even though both are in this process.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	})
+}
+
+// runExpiryWithin runs the expiry pass and fails the test if it has not finished
+// by limit, rather than letting the package hang until the go test timeout.
+func runExpiryWithin(t *testing.T, limit time.Duration, broker *Broker) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		broker.expireSessions(time.Now())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		t.Fatalf("expireSessions did not finish within %s; the cleanup goroutine is wedged (#161)", limit)
+	}
+}
+
+// The whole of #161: one account holding its own lock must not stop the expiry
+// pass, because there is exactly one cleanup goroutine for the host.
+func TestSweepSurvivesAnUncooperativeLockHolder(t *testing.T) {
+	broker, homeDir := newSweepTestBroker(t)
+	broker.authorizedKeysManager.SetLockTimeout(150 * time.Millisecond)
+
+	alicePath := writeAuthorizedKeys(t, homeDir, "alice",
+		oidcKeyLine(time.Now().Add(-48*time.Hour), "ALICEOLD"))
+	bobPath := writeAuthorizedKeys(t, homeDir, "bob",
+		oidcKeyLine(time.Now().Add(-48*time.Hour), "BOBOLD"))
+
+	holdUsersLock(t, broker, "alice")
+
+	for _, user := range []string{"alice", "bob"} {
+		broker.setSession(&Session{
+			ID:           "sess-" + user,
+			UserID:       user,
+			ExpiresAt:    time.Now().Add(-time.Minute),
+			LastAccessed: time.Now(),
+		})
+	}
+
+	runExpiryWithin(t, 5*time.Second, broker)
+
+	if strings.Contains(readAuthorizedKeys(t, bobPath), "BOBOLD") {
+		t.Error("bob's expired key survived because alice was holding her lock")
+	}
+	// alice's own key is left for a later pass: the sweep is best-effort, and
+	// writing without the lock would be worse than deferring.
+	if !strings.Contains(readAuthorizedKeys(t, alicePath), "ALICEOLD") {
+		t.Error("alice's authorized_keys was rewritten without holding the lock")
+	}
+	// Session expiry is the authoritative revocation and must not be held hostage
+	// to a file write.
+	if n := len(broker.ListSessions()); n != 0 {
+		t.Errorf("%d sessions survived expiry while a lock was held", n)
+	}
+}
+
+// Stop() waits on the cleanup goroutine, so a wedged sweep turned `systemctl
+// restart oidc-auth-broker` into a 90-second wait for SIGKILL.
+//
+// This drives the two statements of Stop() that can block — close(stopChan) then
+// wg.Wait() — around a sweep running under a held lock. It does not call Stop()
+// itself: the rest of Stop() shuts down the token manager and audit logger, which
+// have nothing to do with the lock and need a network-backed broker to construct.
+func TestStopIsNotBlockedByAHeldLock(t *testing.T) {
+	broker, homeDir := newSweepTestBroker(t)
+	broker.authorizedKeysManager.SetLockTimeout(150 * time.Millisecond)
+	broker.stopChan = make(chan struct{})
+
+	writeAuthorizedKeys(t, homeDir, "alice",
+		oidcKeyLine(time.Now().Add(-48*time.Hour), "ALICEOLD"))
+	holdUsersLock(t, broker, "alice")
+
+	broker.setSession(&Session{
+		ID:           "sess-alice",
+		UserID:       "alice",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+		LastAccessed: time.Now(),
+	})
+
+	broker.wg.Add(1)
+	go func() {
+		defer broker.wg.Done()
+		broker.expireSessions(time.Now())
+	}()
+
+	stopped := make(chan struct{})
+	go func() {
+		close(broker.stopChan)
+		broker.wg.Wait()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not complete while a user held their lock; Stop() would hang until SIGKILL (#161)")
 	}
 }
 

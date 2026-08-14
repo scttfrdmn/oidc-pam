@@ -112,10 +112,41 @@ into your boot/login automation.
 
 #### Minimum Requirements
 - Linux server with PAM support
+- **OpenSSH 7.7 or newer** on every host the broker provisions keys on
 - 2 CPU cores
 - 4 GB RAM
 - 20 GB storage
 - Network connectivity to OIDC provider
+
+##### Why OpenSSH 7.7 is a hard requirement
+
+The broker writes each login's key into `~/.ssh/authorized_keys` with an
+`expiry-time="…"` option in front of it, so that **sshd** stops honouring the key
+once it is stale. That is deliberate: the broker holds its sessions in memory, so
+before this every key it had issued outlived the process that was meant to revoke
+it (#171), and an expiry only the broker knows about is an expiry a restart
+forgets.
+
+`expiry-time=` was added in OpenSSH 7.7. An sshd that does not recognise an
+authorized_keys option refuses the whole entry, so on anything older **every key
+the broker installs is rejected**: the login is authenticated, the file looks
+correct, and SSH still says `Permission denied (publickey)`. Check with:
+
+```bash
+ssh -V   # OpenSSH_8.4p1 …  -> fine
+```
+
+Versions the common platforms ship: RHEL/CentOS Stream 8 `8.0p1`, RHEL 9 `8.7p1`,
+Debian 11 `8.4p1`, Debian 12 `9.2p1`, Ubuntu 20.04 `8.2p1`, Ubuntu 22.04 `8.9p1`,
+Ubuntu 24.04 `9.6p1` — all fine. **Amazon Linux 2 and RHEL/CentOS 7 ship `7.4p1`
+and cannot run this**; check any other platform with the command above before
+deploying. The broker does not currently detect the local sshd version
+([#199](https://github.com/scttfrdmn/oidc-pam/issues/199)); it writes the option
+unconditionally.
+
+The timespec itself is written in the host's local time zone, not UTC, because the
+`Z` suffix that means UTC was only added in OpenSSH 9.1 and older versions reject
+a timespec carrying it.
 
 #### Recommended Requirements
 - 4+ CPU cores
@@ -125,12 +156,19 @@ into your boot/login automation.
 - Load balancer for multiple instances
 
 #### Supported Operating Systems
-- Ubuntu 20.04 LTS or later
-- CentOS 8 or later
-- RHEL 8 or later
-- Debian 11 or later
-- Amazon Linux 2
-- SUSE Linux Enterprise Server 15+
+- Ubuntu 20.04 LTS or later (OpenSSH 8.2p1+)
+- CentOS Stream 8 or later (8.0p1+)
+- RHEL 8 or later (8.0p1+)
+- Debian 11 or later (8.4p1+)
+- SUSE Linux Enterprise Server 15+ — check `ssh -V` first; the older service packs
+  predate OpenSSH 7.7
+- **Not Amazon Linux 2, and not RHEL/CentOS 7**: both ship OpenSSH 7.4p1, which does
+  not know `expiry-time=` and therefore refuses every key the broker installs. See
+  the OpenSSH requirement above.
+
+Which distribution has actually been tested, and on what, is in
+[README.md](README.md#-supported-platforms) — the list above is what the broker's
+dependencies allow, not a claim that a login has been run on each one.
 
 ### Network Requirements
 
@@ -265,82 +303,91 @@ oidc:
     - name: "production"
       issuer: "https://your-oidc-provider.com"
       client_id: "your-production-client-id"
-      client_secret: "your-production-client-secret"
+      # A literal, or "env:VAR_NAME", or "file:/path/to/secret"
+      client_secret: "file:/etc/oidc-auth/client-secret"
       scopes: ["openid", "email", "profile", "groups"]
-      device_flow_enabled: true
-      discovery_cache_duration: "1h"
-      
-  # Connection settings
-  timeout: "30s"
-  retry_count: 3
-  retry_delay: "5s"
 
 # Authentication policies
+#
+# A policy is selected by its name: "default" applies to every host, and any
+# other name must match the hostname of the machine being logged into (exactly,
+# or as a domain component — "production" matches "api.production.example.com").
+# A policy whose name matches no host never applies; the broker logs a warning
+# naming it at startup. Policies cannot be scoped to an operation such as sudo.
+#
+# Every matching policy applies: require_groups is the union of the global
+# authentication.require_groups and every match's, and max_session_duration is
+# the smallest of them.
 authentication:
+  # Applies everywhere, whatever the host is called.
+  require_groups: ["employees"]
+  max_concurrent_sessions: 3
+
   policies:
     default:
       require_groups: ["employees", "contractors"]
-      session_duration: "8h"
-      max_concurrent_sessions: 3
-      require_mfa: false
+      max_session_duration: "8h"
       audit_level: "standard"
-      
-    admin_operations:
+
+    # Applies only on hosts named "admin", e.g. admin.example.com.
+    admin:
       require_groups: ["administrators", "sysadmins"]
-      session_duration: "4h"
-      max_concurrent_sessions: 1
-      require_mfa: true
-      audit_level: "detailed"
-      
-    sudo_operations:
-      require_groups: ["sudo-users", "administrators"]
-      session_duration: "1h"
-      max_concurrent_sessions: 2
-      require_mfa: true
+      max_session_duration: "4h"
+      require_additional_mfa: true
+      require_device_trust: true
       audit_level: "detailed"
 
 # Security settings
 security:
-  encryption_key: "your-32-character-encryption-key-here"
-  token_cache_duration: "1h"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "file:/etc/oidc-auth/token-encryption-key"
   max_token_age: "24h"
-  secure_cookies: true
-  csrf_protection: true
-  
-# Network settings
-network:
-  bind_address: "127.0.0.1"
-  port: 8080
-  tls_enabled: false  # Use reverse proxy for TLS
-  cors_enabled: false
-  
-# Logging configuration
-logging:
-  level: "info"
-  format: "json"
-  output: "/var/log/oidc-auth/broker.log"
-  max_size: "100MB"
-  max_backups: 10
-  max_age: 30
-  
-  # Audit logging
-  audit_enabled: true
-  audit_level: "standard"
-  audit_file: "/var/log/oidc-auth/audit.log"
-  audit_max_size: "500MB"
-  audit_max_backups: 20
-  audit_max_age: 90
+  clock_skew_tolerance: "5m"
+  rate_limiting:
+    max_requests_per_minute: 60   # per requested account, not host-wide
+    max_concurrent_auths: 10
 
-# Monitoring settings
-monitoring:
+# Server: the broker listens on a Unix socket, not a TCP port. There is no
+# bind address and no HTTP API; metrics are the one optional TCP listener.
+server:
+  socket_path: "/var/run/oidc-auth/broker.sock"
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"   # Prometheus /metrics; empty disables it
+
+# Audit trail
+audit:
   enabled: true
-  metrics_port: 9090
-  health_check_enabled: true
-  health_check_path: "/health"
-  ready_check_path: "/ready"
+  format: "json"
+  overflow_strategy: "block"       # block | sync | drop — see below
+  outputs:
+    - type: "file"                 # file | stdout | syslog | http
+      path: "/var/log/oidc-auth/audit.log"
+      rotation: "daily"
 ```
 
+Every key a configuration file may contain is a field of `config.Config`. Since
+#170 the broker refuses to start on a key it does not read and names the key's
+full path, so nothing in the file can be a setting that does nothing. If an
+upgrade rejects a file you cannot edit immediately, setting
+`OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true` in the unit downgrades the refusal to
+a warning that lists the keys.
+
 ### 3. PAM Configuration
+
+**Wire `pam_oidc.so` into one service's file at a time, and never into
+`/etc/pam.d/common-auth` (Debian/Ubuntu) or `/etc/pam.d/system-auth` (RHEL,
+Fedora, SUSE).** Those are `@include`d by every PAM service on the host, so a
+module there runs for `su`, `sudo`, `gdm`/`sddm`, `polkit`, `login`, `cron` and
+everything else linked against libpam. Each would then wait up to `timeout`
+seconds (90 by default) for a human with a phone, and several can never satisfy a
+device flow at all: no controlling terminal, a conversation function that discards
+`PAM_TEXT_INFO`, or a graphical prompt that renders the QR code as ASCII art. The
+stacks fail closed, so nothing is admitted that should not be — but the host
+becomes unusable, and these stacks have no password fallback.
+
+Only `sshd` is exercised end-to-end by CI (`test/e2e`). The `login`, `su` and
+`sudo` files in `configs/pam/` are examples: deploy them one at a time, from a
+host you can still get back into.
 
 #### SSH Configuration (`/etc/pam.d/ssh`)
 ```bash
@@ -416,6 +463,10 @@ consult the PAM auth stack at all.
 ### 4. System Service Configuration
 
 #### Systemd Service (`/etc/systemd/system/oidc-auth-broker.service`)
+
+The unit shipped in `configs/systemd/oidc-auth-broker.service` is the reference; install
+that rather than retyping it. It looks like this:
+
 ```ini
 [Unit]
 Description=OIDC Authentication Broker
@@ -424,18 +475,32 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=oidc-auth
-Group=oidc-auth
-ExecStart=/usr/bin/oidc-auth-broker --config /etc/oidc-auth/broker.yaml
+# root, not a service account: the broker installs each login's SSH key in that
+# account's ~/.ssh/authorized_keys and hands the file to the account, which needs
+# both write access to the home directory and the ability to chown.
+User=root
+Group=root
+ExecStart=/usr/local/bin/oidc-auth-broker --config /etc/oidc-auth/broker.yaml
 Restart=always
-RestartSec=5
+RestartSec=10
 
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/oidc-auth /var/lib/oidc-auth
+# Must stay off. ProtectHome=true replaces /home with an empty tmpfs for this
+# service, so no authorized_keys can be written at all (#171).
+ProtectHome=false
+# ProtectSystem=strict makes everything read-only, so every path the broker
+# writes is listed: its runtime socket, its logs, its state directory (issued keys
+# and per-user locks), and the home directories it provisions keys into. Add your
+# own home path here if homes are not under /home. The "-" prefix makes a missing
+# path non-fatal: without it systemd refuses to start the unit at all on a host
+# that has no /home, which is exactly the host whose homes are somewhere else.
+ReadWritePaths=/var/run/oidc-auth /var/log/oidc-auth /etc/oidc-auth /var/lib/oidc-pam -/home
+StateDirectory=oidc-pam
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 # Resource limits
 LimitNOFILE=65536
@@ -448,6 +513,12 @@ Environment=GOGC=100
 [Install]
 WantedBy=multi-user.target
 ```
+
+If a login reports success but the SSH key does not work, check these three things
+first: that `ProtectHome` is not `true`, that the path homes really live on is in
+`ReadWritePaths`, and that `/var/lib/oidc-pam` exists and is writable. A key the
+broker could not install now denies the login rather than completing it, and the
+reason is recorded as an `ssh_key_provisioning_failed` audit event.
 
 ## Security Hardening
 
@@ -625,6 +696,11 @@ server {
 ### 2. Monitoring Setup
 
 #### Prometheus Configuration
+
+The broker serves `/metrics` only when `server.metrics_addr` is set; there is no
+default and no listener otherwise. Bind it to a loopback or management address —
+the endpoint has no authentication.
+
 ```yaml
 # /etc/prometheus/prometheus.yml
 global:
@@ -949,10 +1025,8 @@ sudo tail -f /var/log/oidc-auth/broker.log
 # Check PAM logs
 sudo tail -f /var/log/auth.log
 
-# Enable debug mode
-# Edit /etc/oidc-auth/broker.yaml
-logging:
-  level: "debug"
+# Enable debug mode: set server.log_level to "debug" in
+# /etc/oidc-auth/broker.yaml, then restart the broker
 ```
 
 #### 3. Performance Issues

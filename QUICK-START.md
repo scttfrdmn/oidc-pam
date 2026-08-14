@@ -11,7 +11,7 @@ This is an **alpha release** intended for testing and evaluation purposes only. 
 ### System Requirements
 - Linux system with PAM support (Ubuntu 20.04+, CentOS 8+, RHEL 8+)
 - Go 1.21+ (for building from source)
-- Docker and Docker Compose (for testing with Keycloak)
+- Docker and Docker Compose (for `make test-e2e`)
 - Root or sudo access for PAM configuration
 
 ### OIDC Provider
@@ -47,17 +47,22 @@ make build
 sudo make install
 ```
 
-## Quick Test Setup with Keycloak
+## Quick Test Setup
 
-### 1. Start Keycloak Test Environment
+### 1. See it work before installing anything
 
 ```bash
-# Start Keycloak with test configuration
-docker-compose -f docker-compose.test.yml up -d
-
-# Wait for Keycloak to start
-docker-compose -f docker-compose.test.yml logs -f keycloak
+# Real sshd, real PAM stack, real broker, a fake issuer, in Docker
+make test-e2e
 ```
+
+Every case is an actual SSH login against the built `pam_oidc.so`, so this is
+also the fastest way to see what a device-flow login looks like end to end. See
+[test/e2e/README.md](test/e2e/README.md).
+
+For the steps below you need an OIDC provider of your own with the device
+authorization flow enabled — any of Keycloak, Okta, Entra ID, Auth0 or Google
+will do. `configs/production/` has a worked example per provider.
 
 ### 2. Configure OIDC Broker
 
@@ -65,7 +70,7 @@ docker-compose -f docker-compose.test.yml logs -f keycloak
 # Copy example configuration
 sudo cp configs/production/broker-minimal.yaml /etc/oidc-auth/broker.yaml
 
-# Edit configuration for Keycloak
+# Point it at your provider
 sudo nano /etc/oidc-auth/broker.yaml
 ```
 
@@ -73,19 +78,23 @@ Update the configuration:
 ```yaml
 oidc:
   providers:
-    - name: "keycloak"
-      issuer: "http://localhost:8080/realms/test-realm"
+    - name: "primary"
+      issuer: "https://your-oidc-provider.example.com"
       client_id: "oidc-pam-client"
-      client_secret: "test-secret"
+      client_secret: "your-client-secret"
       scopes: ["openid", "email", "profile", "groups"]
 
-logging:
-  level: "info"
-  audit_level: "detailed"
-  
+server:
+  log_level: "info"
+
 security:
-  encryption_key: "your-32-character-encryption-key"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
 ```
+
+The broker refuses to start on a key it does not read, naming the key and its
+path, so a typo or a setting from an older guide cannot sit in the file doing
+nothing.
 
 ### 3. Start OIDC Broker
 
@@ -125,43 +134,59 @@ oidc:
       client_id: "your-client-id"
       client_secret: "your-client-secret"
       scopes: ["openid", "email", "profile", "groups"]
-      device_flow_enabled: true
 
 authentication:
+  token_lifetime: "8h"
   policies:
+    # "default" applies to every host; any other name must match this host's
+    # name. See configs/CONFIGURATION-GUIDE.md, "Authentication Policies".
     default:
       require_groups: ["users"]
-      session_duration: "8h"
+      max_session_duration: "8h"
       audit_level: "standard"
 
-logging:
-  level: "info"
-  audit_level: "detailed"
-  audit_file: "/var/log/oidc-auth/audit.log"
+server:
+  log_level: "info"
 
 security:
-  encryption_key: "generate-a-32-character-key-here"
-  token_cache_duration: "1h"
+  # base64-encoded 32-byte key, from `oidc-admin gen-key`
+  token_encryption_key: "REPLACE-with-output-of-oidc-admin-gen-key"
+
+audit:
+  enabled: true
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
 ```
 
 ### 2. PAM Configuration
 
-For SSH authentication, edit `/etc/pam.d/ssh`:
+For SSH authentication, edit `/etc/pam.d/ssh` — that one service's file, not
+`/etc/pam.d/common-auth` or `/etc/pam.d/system-auth`, which every service on the
+host `@includes`:
 
 ```
-# OIDC authentication
+# OIDC authentication. This is OIDC-only: nothing may follow `requisite
+# pam_deny.so`, which returns to sshd immediately, so a pam_unix.so line here
+# would never be reached. Keep SSH public-key access as the break-glass path,
+# or drop pam_deny.so -- see configs/pam/README.md.
 auth    sufficient  pam_oidc.so
 auth    requisite   pam_deny.so
-auth    required    pam_unix.so try_first_pass
 
-# Account management
-account required    pam_oidc.so
+# Account management. pam_oidc.so returns PAM_IGNORE here and decides nothing;
+# it must be `optional`, never `sufficient`, and a real account module has to
+# follow it.
+account optional    pam_oidc.so
 account required    pam_unix.so
 
 # Session management
 session required    pam_unix.so
 session optional    pam_oidc.so
 ```
+
+The device flow needs a terminal to print the verification URL on and a user
+waiting in front of it, so `pam_oidc.so` belongs only in the stack of a service
+that has both. `sshd` is the only one CI exercises end-to-end.
 
 ### 3. SSH Configuration
 
@@ -247,12 +272,8 @@ sudo oidc-auth-broker --config /etc/oidc-auth/broker.yaml --validate
 
 #### 2. Authentication Fails
 ```bash
-# Enable debug mode
-# Edit /etc/oidc-auth/broker.yaml
-logging:
-  level: "debug"
-
-# Restart broker
+# Enable debug mode: set server.log_level to "debug" in
+# /etc/oidc-auth/broker.yaml, then restart the broker
 sudo systemctl restart oidc-auth-broker
 
 # Check detailed logs
@@ -288,10 +309,14 @@ openssl s_client -connect your-oidc-provider.com:443
 Enable debug logging in `/etc/oidc-auth/broker.yaml`:
 
 ```yaml
-logging:
-  level: "debug"
-  audit_level: "detailed"
-  audit_file: "/var/log/oidc-auth/audit.log"
+server:
+  log_level: "debug"
+
+audit:
+  enabled: true
+  outputs:
+    - type: "file"
+      path: "/var/log/oidc-auth/audit.log"
 ```
 
 Add debug to PAM configuration:

@@ -7,6 +7,842 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-14
+
+### Security
+- **High (#171): the SSH key a successful login was granted was written to a
+  directory guessed from the login name, was never removed when the session ended,
+  and accumulated one working credential per login.** The provisioning path was
+  wrong at both ends: the key often did not arrive where sshd reads it, and when it
+  did arrive nothing took it away again.
+
+  The broker joined `/home` with the login name and wrote `<that>/.ssh/authorized_keys`.
+  On any site whose homes are not literally `/home/<user>` — SSSD or LDAP with
+  `/home/<domain>/<user>`, autofs, NFS, a home moved by hand — it created that
+  directory itself, as root and mode 0700, wrote a key list sshd would never read,
+  and reported the login as successful. The user was told they were authenticated
+  and then could not log in, and on the next real login their own home was shadowed
+  by a root-owned directory they could not write. The uid from the passwd database
+  was never consulted, so nothing distinguished "this is the account's home" from
+  "this is a directory belonging to someone else". Where the key *did* land, it was
+  appended on every login and deduplicated only against byte-identical lines, so an
+  account that logged in daily accumulated a live credential per login; each one
+  carried no expiry sshd could see, so it stopped being limited at all the moment
+  the broker forgot the session that owned it — which happens on every restart,
+  since sessions are held only in memory. The shipped systemd unit set
+  `ProtectHome=true`, which makes `/home` an empty tmpfs to the service, so on a
+  host installed from it no key could be written at all.
+
+  - Home directories now come from the account database, through
+    `pkg/ssh.LookupAccount`: `os/user` first, then `getent passwd`. The fallback is
+    not redundancy — the released broker is built `CGO_ENABLED=0`, and without cgo
+    `os/user` parses `/etc/passwd` and never asks NSS, so every SSSD or LDAP account
+    is invisible to it. `getent` asks NSS the way sshd and `login` do, bounded by a
+    timeout and a `WaitDelay` so a wedged directory server cannot hold a login open.
+    Nothing derives a home path any more, and a home that does not exist is refused
+    rather than created.
+  - The owning uid is checked, on the home directory, on `.ssh` and on
+    `authorized_keys` through the open file descriptor. The account or root is
+    accepted, which is what sshd's own `StrictModes` accepts; anything else is
+    refused rather than written through. Files the root broker creates in a home are
+    handed to the account.
+  - A login installs exactly one broker key: every previous `@oidc-pam-` entry is
+    dropped as it is written, and the account's own keys are left alone. The entry
+    carries `expiry-time="…"`, so **sshd** enforces the key's lifetime whether or
+    not the broker is running or remembers the session. Both the key store and the
+    `authorized_keys` sweep now use the configured `token_lifetime`; both used to be
+    hardcoded to 24 hours, so a site that had deliberately set `token_lifetime: 1h`
+    still handed out keys good for a day.
+  - **That option makes OpenSSH 7.7 or newer a requirement**, and it is now stated
+    where an operator will see it: DEPLOYMENT.md's prerequisites, and README.md's
+    platform table, which gains an OpenSSH column and marks Amazon Linux 2 and
+    RHEL/CentOS 7 (both `7.4p1`) unsupported rather than "expected to work". sshd
+    refuses an entire authorized_keys entry that carries an option it does not
+    recognise, so on an older host every key the broker installs is rejected — the
+    same "authenticated, then `Permission denied (publickey)`" outcome, reached a
+    different way. The timespec is written in the host's own time zone, not UTC: the
+    `Z` suffix meaning UTC is OpenSSH 9.1 and newer, and every sshd before that
+    rejects the entry carrying it, which would have limited this to Debian 12-era
+    hosts while breaking RHEL 8 and 9, Debian 11 and Ubuntu 20.04 and 22.04. The
+    broker does not detect the local sshd version; whether it should, refuse to
+    start, or make the option configurable is #199.
+  - Startup revokes what the previous run left behind. The key store survives a
+    restart even though sessions do not, so anything in it at startup belongs to no
+    live session and its `authorized_keys` entry is removed.
+  - A login whose key could not be provisioned is now denied instead of completed.
+    It used to be activated and audited as `authentication_successful` with no usable
+    key anywhere; the failure is recorded as `ssh_key_provisioning_failed` and the
+    session is dropped, which the module already reports through
+    `SESSION_NOT_FOUND` — no change to the broker↔module wire contract.
+  - Revoking a key a later login had already superseded is no longer reported as
+    `ssh_key_revocation_incomplete`. That event means a credential is still live
+    (#165), and firing it for the ordinary two-logins case would have trained
+    operators to ignore it.
+  - `configs/systemd/oidc-auth-broker.service` sets `ProtectHome=false`, lists
+    `-/home` in `ReadWritePaths` (`ProtectSystem=strict` otherwise makes it
+    read-only) and declares `StateDirectory=oidc-pam`; `scripts/install-release.sh`
+    creates `/var/lib/oidc-pam/{ssh-keys,locks}` at 0700, and DEPLOYMENT.md's unit
+    matches the shipped one. The `-` prefix is load-bearing: systemd fails a unit
+    whose `ReadWritePaths` names a path that does not exist, and the site told to add
+    its own home path — `/export/home` and the like — is exactly the site with no
+    `/home`, which would have got a broker that refuses to start.
+
+  Coverage: `pkg/ssh` tests that a key is written to the home the account database
+  gives and that nothing is created at `/home/<user>`, that a missing home is
+  refused rather than created, that a foreign-owned path is refused, that a second
+  login supersedes the first key while leaving the user's own, that the installed
+  entry carries the `expiry-time` option, and that the sweep measures against the
+  configured lifetime; `pkg/ssh/accounts_test.go` covers the NSS fallback, an
+  unknown account, a wedged account database and the passwd fields that are refused;
+  `pkg/auth` tests that a login whose key cannot be installed is denied and audited,
+  that startup revokes a previous run's keys through `Start` itself, that
+  `token_lifetime` reaches the key manager, and that a superseded revocation is not
+  reported as incomplete; `pkg/ssh/docs_test.go` fails if DEPLOYMENT.md or README.md
+  stops stating the minimum OpenSSH version, or if the timespec written is anything
+  other than the form an older sshd parses; `cmd/broker` pins the unit's
+  `ProtectHome`, its optional `-/home` and `StateDirectory`; and two e2e cases cover
+  a second login replacing the first key and a broker restart sweeping the keys it
+  had issued.
+- **Medium (#188): stopping the audit logger discarded every record still
+  queued, and a second `Stop` panicked.** `processEvents` selected on its stop
+  channel and returned without looking at the buffer, so the events sitting in
+  `eventChan` when the broker shut down were collected unwritten. The records
+  most likely to be in that buffer are the ones logged immediately before
+  shutdown — the tail of the audit trail, and the part an investigation into why
+  a host stopped answering would reach for first. The default overflow strategy
+  is `block` precisely so that load cannot cost a record; shutdown was throwing
+  away the same records for free.
+
+  - The worker drains the buffer on both exits (stop and a cancelled context),
+    and `Stop` drains again afterwards, so a logger that was never started, or
+    whose worker had already returned on a cancelled context, still writes what
+    it accepted. `Stop` returning now means every accepted event is on disk.
+  - Draining is bounded by a five-second budget, because an output can be
+    arbitrarily slow: one unreachable HTTP sink costs up to three ten-second
+    timeouts plus backoff for a *single* event, and the default buffer holds a
+    thousand, so an unbounded drain could hold shutdown for hours. A shutdown
+    that never finishes is worse than an incomplete trail, so the budget wins —
+    and what it abandons is counted in `DroppedEvents` and logged with the
+    number, since a gap nobody is told about is indistinguishable from nothing
+    having happened.
+  - `Stop` is idempotent (`sync.Once`). It closes a channel, and stopping on a
+    shutdown path plus a deferred cleanup — the ordinary shape — used to panic
+    with `close of closed channel`.
+  - The four `pkg/security` cases that logged events and then read the file back
+    synchronised on a fixed `time.Sleep`, which is an assertion about the
+    scheduler: on a loaded machine the events were not written yet and the case
+    reported the field it could not find rather than the event that never
+    arrived. This is what turned up as an intermittent
+    `TestAuditLoggerComplianceRequirements` failure in CI, with an identical
+    missing-field list to the one the defect above produces on demand. They now
+    stop the logger and read, and no longer bound the worker's life with a
+    two-second context.
+
+  Coverage: `TestStopWritesEventsStillQueued` (three events queued with no
+  worker; the file is empty without the fix), `TestStopDrainsAfterTheContextIsCancelled`
+  (an event logged in the window between cancellation and `Stop`),
+  `TestStopGivesUpOnASlowOutput` (forty events behind a slow output with the
+  budget shortened: unbounded, `Stop` takes 1.04s against a 50ms budget and
+  counts nothing) and `TestStopIsIdempotent` (which panics without the `sync.Once`). Each was run
+  against the defect reintroduced.
+- **Medium (#172): `configs/pam/common-auth` put a 90-second interactive device
+  flow in the auth stack of every service on the host.** `common-auth` is the file
+  every Debian/Ubuntu PAM service `@include`s, so an operator who followed the
+  install instructions in `configs/pam/README.md` got `pam_oidc.so` at the front of
+  `su`, `sudo`, `gdm`/`sddm`, `polkit`, `login` and `cron` as well as `sshd`. Each
+  of those then waited up to `timeout` seconds — 90 by default — for a human with a
+  phone before falling through, and several of them can never satisfy a device flow
+  at all: no controlling terminal, a conversation function that discards
+  `PAM_TEXT_INFO`, or a graphical prompt that renders the QR code as a block of
+  ASCII art. Nothing was admitted that should not have been, since the stacks fail
+  closed on `pam_deny.so`; what broke was the machine's usability, and with no
+  password fallback in the shipped stacks (#160) an auth stack that cannot complete
+  is an operator locked out of their own host.
+
+  - `configs/pam/common-auth` is deleted. The per-service files — `ssh`, `login`,
+    `su`, `sudo` — are what this project ships, and each now says in its header
+    that it belongs in that one service's `/etc/pam.d` file and not in the
+    host-wide stack.
+  - `scripts/install.sh` no longer inserts `@include common-auth` at the top of
+    `/etc/pam.d/sshd`. That line both duplicated the distribution's own include
+    further down the same file and, on a host that had taken the old `common-auth`
+    advice, ran the device flow twice. It also no longer runs `sed` against an
+    `/etc/pam.d/sshd` that does not exist, which aborted the install.
+  - `configs/pam/README.md` loses its "for system-wide (be careful!)" install
+    command and gains a section on why no host-wide stack is shipped;
+    `DEPLOYMENT.md` and `QUICK-START.md` say the same where they tell an operator
+    to edit a PAM file. The `QUICK-START.md` example also still carried defects
+    fixed elsewhere long ago — an unreachable `pam_unix.so` line after `requisite
+    pam_deny.so`, and `account required pam_oidc.so` — and now matches
+    `configs/pam/ssh`.
+  - The `su` and `sudo` headers claimed they maintained "traditional authentication
+    for emergency access". They do not: the `requisite pam_deny.so` in both refuses
+    anything OIDC did not accept, and a comment that misstates a stack's semantics
+    is part of the same defect.
+  - `README.md`'s platform table claimed Console and GUI support as **Stable** on
+    five distributions. CI exercises `sshd` on one image — Debian 12, via
+    `test/e2e` — so the table now says which cell that is, marks the console, `su`
+    and `sudo` stacks as untested examples, and marks display managers
+    unsupported, since no `gdm`/`sddm`/`lightdm` stack is shipped. The "Subsequent
+    access uses cached SSH key" line is gone: `pam_oidc.so` sends no session ID
+    with its request, so the broker has nothing to match a login against and every
+    login runs a fresh device flow.
+
+  Coverage: four tests in `cmd/pam-module/configs_test.go` that read the shipped
+  files rather than describing them. A stack file must be named after a service
+  that can complete a device flow and must not point at a host-wide stack;
+  `pam_oidc.so` must carry a documented control flag for its phase (`auth
+  sufficient` or `required`, every other phase `optional`) and never a bracketed
+  skip count like the `[success=2 default=ignore]` that `common-auth` used; no
+  `scripts/*.sh` may touch `common-auth` or `system-auth`; and every
+  `configs/pam/<file>` a document or script names must exist, so a deleted stack
+  cannot leave install instructions pointing at it.
+- **High (#170): none of the configuration files this project ships could be
+  loaded, and every security setting an operator wrote under a name the broker
+  does not read was discarded in silence.** viper's `Unmarshal` drops unknown
+  keys without a word, so `security.tls_verification.pin_certificates` — not the
+  name of any field; pinning is `pinned_certificates` and takes SHA-256
+  fingerprints, not a boolean — was accepted in six files and set to `true` in
+  three of them, including `broker-enterprise.yaml`, which
+  `CONFIGURATION-GUIDE.md` recommends as the production template. Everyone who
+  followed it believed certificate pinning was on and had nothing of the kind.
+  Worse were the files that could not start at all:
+  `configs/production/broker-cloud.yaml` used `${VAR:-default}` shell
+  interpolation that nothing expands, so sixteen of its values were the literal
+  string and it failed to parse; `broker-enterprise.yaml` named audit output
+  types (`remote_syslog`, `webhook`) that no constructor knows, which is a
+  `log.Fatal` before the broker listens — an audit sink silently absent on the
+  host that most wanted one. Both shipped for eleven releases.
+
+  - `LoadConfig` now decodes with `UnmarshalExact`: an unknown key is a startup
+    error naming its full path (`'security.tls_verification' has invalid keys:
+    pin_certificates`). A key the broker does not read is a setting that does
+    nothing, and a setting that does nothing must not look like protection.
+  - Because the shipped PAM stack has no password fallback (#160), a config that
+    loaded yesterday must not become an unbootable host:
+    `OIDC_AUTH_ALLOW_UNKNOWN_CONFIG_KEYS=true` downgrades the error to a warning
+    naming the keys, for recovery only.
+  - `pin_certificates` corrected to `pinned_certificates` in all six files;
+    `broker-cloud.yaml` deleted (the `cloud:` subtree it existed for was never
+    read — `env:` and `file:` secret references are how secrets stay out of the
+    file); the inert `cloud:`, `ssh:`, `policy:`, `logging:`, `health:` and
+    `metrics:` blocks removed, with a note pointing at the settings that are
+    actually enforced. `security.encryption_key`, `oidc.timeout` and the
+    `monitoring:`/`network:` blocks are gone from QUICK-START.md and
+    DEPLOYMENT.md for the same reason, and the guide now documents the live
+    knobs no template showed (`server.metrics_addr`, `socket_group`,
+    `audit.overflow_strategy` and the rest).
+  - `security.ValidateAuditConfig` checks output types, paths and
+    `overflow_strategy` up front, so an unknown `overflow_strategy` no longer
+    degrades quietly to `drop`.
+
+  Coverage: `TestShippedConfigsLoad` puts every YAML under `configs/`, plus
+  `test/e2e/broker.yaml`, through `LoadConfig` → `Validate` → the audit check
+  the broker performs at startup, and `TestDocumentedConfigSnippetsLoad` holds
+  the YAML in README/QUICK-START/DEPLOYMENT/CONFIGURATION-GUIDE to the same
+  standard, since a wrong key in a document is a key somebody pastes into
+  `broker.yaml`. Proven against the defect: restoring the old files fails seven
+  of the config cases and five of the document cases, naming `cloud`, `logging`,
+  `policy`, `ssh`, `format` and `pin_certificates` by path.
+- **High (#169): the network access controls could not work, and every audit record
+  named the client as the host being logged into.** Neither client ever sent
+  `source_ip`, and both sent `PAM_RHOST` — the address the login comes *from* — as
+  `target_host`, so the two ends of the connection were swapped on the wire. Every
+  policy that reads `source_ip` was therefore evaluating the empty string:
+  `require_private_network` and `require_tailscale` ask `net.ParseIP` about it, which
+  answers no, so enabling either refused **every login on the host** including the
+  ones it was configured to admit — and `configs/production/broker-enterprise.yaml`
+  ships with both on. `ip_allowlist`/`ip_denylist` and the geo checks matched nothing
+  for the same reason, the location history recorded an entry with an empty subnet
+  that made every subsequent login for that user score as an unusual location, and
+  the audit trail recorded the client's address in `target_host` — so an
+  investigation could not tell which machine a login reached.
+
+  - Both clients now send `source_ip` from `PAM_RHOST` and `target_host` from this
+    host's own name, per the **oauth2-pam wire protocol (version 1)**: `source_ip` is
+    "the client address, if the login has one and it really is an address" and
+    `target_host` is "the host being logged **into** — this host". That project owns
+    the contract and this one consumes it (#179), so the field meanings, the 45- and
+    253-byte bounds and the decision to leave `source_ip` optional are taken from
+    there rather than settled here.
+  - A resolved hostname is not an address, so an `rhost` that is a name (what sshd
+    supplies with `UseDNS yes`) yields no `source_ip` rather than a string no policy
+    can evaluate. The unabridged `rhost` reaches the broker in `metadata.rhost`, as
+    audit context that nothing consults for a decision.
+  - **An absent `source_ip` is now a third answer — "origin unknown" — and what it
+    means is the operator's, not the zero value's.** A console login legitimately has
+    no address, so a network requirement now needs
+    `authentication.network_requirements.unknown_source_ip: deny|allow` alongside it;
+    the broker refuses to start with the requirement enabled and the question
+    unanswered, rather than reaching the old implicit answer (deny everything) at the
+    first login. `allow` is audited per login as `network_requirement_waived`: a
+    requirement that was configured and then not applied must not be invisible. Risk
+    scoring counts an unknown origin the same 25 as a public one — it is not evidence
+    of safety — but names it "Unknown network origin" so the score can be read.
+  - A login with no location is no longer recorded in the location history at all,
+    which is what turned one unrecordable first login into a permanent "unusual
+    location" verdict for that user.
+  - `internal/ipc` now bounds `source_ip` at 45 bytes and `target_host` at 253 at the
+    boundary, and accepts a zoned IPv6 literal (`fe80::1%eth0`), which `net.ParseIP`
+    rejects on its own.
+  - Coverage on both sides of the boundary, since the defect was identical in each: a
+    cgo test asserting what the C module puts on the wire, a Go test doing the same
+    against a fake broker, policy tests that a private source address is now
+    distinguishable from a public one (impossible to write against the defect — both
+    cases were the empty string and both were denied), a config test that every
+    shipped config answers the unknown-origin question, and an e2e case asserting the
+    login came from `127.0.0.1` and arrived at this host. Each was proven to fail with
+    the defect reintroduced.
+- **High (#168): the shipped PAM stacks logged every login's broker response to
+  syslog, and a service with no PAM conversation crashed the login outright.** Five
+  defects in the C module, grouped because they are one PR's worth of work.
+
+  - `display_message` called through `conv->conv` on the strength of
+    `pam_get_item(PAM_CONV, …)` answering `PAM_SUCCESS`, which it does even for a
+    service that set no conversation function. Showing the device-flow instructions
+    then jumped to address zero and killed the auth child — under sshd that child
+    *is* the login. Both the item and the function pointer are checked now, and a
+    message that cannot be shown is logged and skipped instead.
+  - `get_user_info` applied its `"unknown"`/`"localhost"` substitutes only when
+    `pam_get_item` *failed*. An item a service never set comes back as
+    `PAM_SUCCESS` with a NULL pointer, and the next thing that happens to it is
+    `json_object_new_string()`, i.e. `strlen(NULL)`. `PAM_RHOST` is not set by
+    services that are not remote and `PAM_TTY` not by services with no terminal, so
+    this was reachable from any non-sshd stack — `su`, `sudo`, `login`, cron — and
+    not from something exotic. Found while writing the test for the defect above,
+    which crashed on this one first; fixed with it.
+  - `debug_enabled` was a process global that was set and never cleared, so a single
+    `debug` anywhere turned on debug logging for every *later* authentication in the
+    process — and `pam_sm_authenticate` runs inside sshd, which serves many logins
+    from one process and may run more than one service's stack there. What that
+    logged included the **entire broker response**: the live device code, the user's
+    email and groups, and whatever the broker↔module contract grows next. The flag
+    is now taken from each invocation's own arguments (`pam_oidc_options.debug`), a
+    response is logged by size and never by body, and the shipped `ssh` and `login`
+    stacks no longer pass `debug` — they used to, next to a note telling the reader
+    to remove it, which is not a default.
+  - `classify_response` read the grant condition with `json_object_get_boolean`,
+    which answers true for any non-empty JSON *string*: `"success":"false"` was a
+    success, and under `auth sufficient pam_oidc.so` a success is a login. The field
+    must be a JSON boolean now. The broker emits one, which is why insisting on it
+    costs nothing in the one function whose whole job is to be strict about the
+    grant.
+  - The unused `prompt_user`, which copied a conversation reply into a buffer whose
+    size only its caller knew, is deleted rather than left to be wired up. This
+    module never prompts: the device flow happens in the user's browser.
+
+  Coverage: three cgo tests against a fake broker, two of them driving
+  `pam_sm_authenticate` itself so that argument parsing is part of what is
+  exercised — an authentication whose PAM handle carries no conversation function
+  (a segfault before the fix), a second authentication in the same process not
+  inheriting the first's `debug`, and `success` as the string `"false"`, the string
+  `"true"`, `1` and `null` each refused rather than granted. A fourth test reads
+  `configs/pam` and fails if a shipped stack passes `debug`.
+- **Medium (#167): a token response with no `id_token` was accepted with nothing
+  verified at all, an unsigned `/userinfo` body outranked the signed token where the
+  two disagreed, and two of the three endpoints the broker sends credentials to were
+  never checked.** The whole verification block in `PollDeviceAuthorization` —
+  signature, `iss`, `aud`, `exp`, the nonce replay check and `validateIDTokenClaims`
+  — sat behind `if tokenResp.IDToken != ""`, so a provider that simply omitted the
+  field got an identity read out of `/userinfo` and vouched for by nothing but TLS
+  and the bearer token. Where an ID token *was* present, the merge that decides which
+  claim authorizes the login preferred `/userinfo` anyway. The endpoint gap is the
+  sharpest of the three and needs no misbehaving provider: `validateEndpoint` ran on
+  the device authorization endpoint only, while the token and userinfo endpoints were
+  taken from the discovery document unvalidated, so a discovery response naming
+  `http://` had the broker post the device code to, and carry the access token to, a
+  plaintext endpoint — with `trusted_ca_bundle`, `skip_tls_verify` and the
+  certificate pins all bypassed, because none of them apply to a connection that
+  never negotiates TLS.
+
+  - `require_id_token`, per provider, defaults to **on**: a granted authorization
+    with no `id_token` is refused, leaves no session and no SSH key, and is audited
+    as `ID_TOKEN_MISSING` naming the key that would permit it. The field is a
+    `*bool`, so unset means required in configs built in Go as well as in loaded
+    YAML — the fail-closed direction for every deployment that has never heard of
+    the key. An operator whose provider genuinely does not issue an ID token for the
+    device grant sets it to false and gets the old behaviour, deliberately.
+  - The ID token now wins over `/userinfo` wherever the two disagree. Claims only
+    `/userinfo` returns are still used, since the signed token says nothing about
+    them, so this changes which value is believed in a conflict and not how much of
+    the identity is available.
+  - The token, userinfo and device authorization endpoints are all checked when the
+    provider is built, which refuses a provider like this at broker startup rather
+    than one login at a time. Only the scheme is enforced there, deliberately: a
+    token endpoint on a host other than the issuer's is ordinary — Google's issuer
+    is `accounts.google.com` and its token endpoint is on `oauth2.googleapis.com` —
+    so extending the issuer-host match that the device endpoint has always demanded
+    would refuse real providers outright. What an endpoint cannot be is plaintext.
+  - Loopback is still exempt from that check, for local development and the test
+    issuer, but is matched exactly now rather than by prefix: the old
+    `strings.HasPrefix(u.Host, "localhost")` took `localhost.attacker.example` for
+    the local machine and allowed plaintext to it.
+  - Out of scope, and both left alone on purpose: refresh responses, where RFC 6749
+    §6 makes `id_token` optional and the refresh path derives no identity from
+    claims; and `security.tls_verification.pin_certificates` as documented in
+    `CONFIGURATION-GUIDE.md`, which matches no config field and so pins nothing
+    (#170).
+
+  Coverage: five tests in `pkg/auth/provider_trust_test.go`. Three drive the real
+  poll loop against the in-process issuer — a grant with the `id_token` withheld
+  refused and audited as `ID_TOKEN_MISSING`; the same grant admitted under
+  `require_id_token: false`, so the escape hatch is known to work; and an ID token
+  and a `/userinfo` body naming different users, asserted in both directions, so
+  that the signed claim is the one that binds *and* the unsigned one cannot
+  authorize a login the signature contradicts. The other two go through
+  `NewOIDCProvider` against a discovery document naming `http://` for each endpoint
+  in turn, and against configured endpoints under `skip_discovery`, including the
+  `localhost.…` host and a legitimate cross-host HTTPS token endpoint that must
+  still be accepted. Reintroducing any one of the three defects fails the
+  corresponding test.
+- **Low (#166): `allowed_groups` and `allowed_roles` denied nothing.** Both were
+  applied while claims were being read, where the only thing they could do was drop
+  the group and role names that were not in the list. A user in **none** of the
+  `allowed_groups` therefore reached the login decision with an empty group list and
+  was authenticated normally — the option that reads as an authorization gate was a
+  projection. The only thing that would have caught it is the global
+  `authentication.require_groups`, which is empty in every shipped config and, until
+  #158, was the only group key enforced at all. The severity is Low only because the
+  keys appear in no shipped YAML and in no document, so no deployment relies on
+  them; the exposure was to the first operator who found the struct field and
+  assumed the obvious meaning.
+
+  - Both are now login gates, enforced on the device-flow poll path in
+    `Broker.verifyGroupAuthorization`: a non-empty list the identity satisfies
+    nothing in refuses the authentication, leaving no session and no SSH key. An
+    empty list still means no restriction, which is what every existing deployment
+    depends on.
+  - They no longer touch the group or role list. `extractUserInfoFromClaims`
+    reports the identity as the IdP asserted it (`group_prefix` and
+    `group_mappings` are still projections), so the session, the audit record and
+    `require_groups` all see the same groups. Under the old code an identity that
+    *did* satisfy `require_groups` could be refused by it, because the allowlist had
+    already removed the group it was being required to have.
+  - `require_groups` and the allowlists meet in one function rather than becoming
+    two competing checks, because they ask different questions and cannot be one
+    list: `require_groups` demands *every* group it names, an allowlist demands *at
+    least one*. Refusals are audited apart — `GROUP_NOT_ALLOWED` against
+    `GROUP_DENIED` — since they send an operator to different config keys.
+    Case-insensitive matching for the allowlists is kept as it was, so this changes
+    what a non-match does and not what matches.
+
+  Coverage: five cases in `device_poll_test.go`, all through the real poll loop as
+  #158's are — refusal with no session, no key and no success record; a member
+  admitted with *all* of its groups; an empty list restricting nothing;
+  `allowed_roles` on its own; and the three-way composition with `require_groups`.
+  Re-applying the filter makes four of them fail, one of them (`required but not
+  allowed`) by demonstrating the interaction above.
+- **High (#165): after any expiry sweep, the next login's SSH key became
+  permanently unrevocable while the audit log reported it as revoked.** The sweep
+  rewrote `authorized_keys` from a `bufio.Scanner`, which strips newlines, and
+  joined the survivors without restoring the final one — so the file was left
+  unterminated. `AddPublicKey` appends with `O_APPEND`, so the user's next login
+  fused its `# Added by OIDC PAM on …` comment onto the last surviving key line.
+  sshd still honours the key on such a line, but nothing can remove it again: the
+  sweep can no longer parse the timestamp out of `…@oidc-pam-1770000000# Added by…`
+  and so retains the key (fail-safe by design), and targeted revocation compares
+  the whole line and no longer matches. `RemovePublicKey` returned `nil` for "no
+  such line" exactly as it did for a real removal, so the broker went on to log
+  `SSH key revoked` at Info and record a revoke-success metric for a removal that
+  changed nothing. No attacker is needed: one expired key plus one later login.
+
+  - Both rewrite paths now go through one writer, `writeAuthorizedKeysLines`, which
+    guarantees the file ends in exactly one newline. The two paths previously
+    derived the file's tail independently — `RemovePublicKey` split on `"\n"` and
+    happened to be correct, the sweep did not — and sharing the writer is what
+    stops them disagreeing again.
+  - `AddPublicKey` terminates an unterminated last line before appending, so a file
+    left that way by anything else (a user's editor, a broker from before this fix)
+    cannot fuse the next key either.
+  - `RemovePublicKey` now returns `(removed bool, err error)`. A caller cannot
+    silently mistake "there was no such line" for "the line is gone"; `removed=false`
+    with a nil error means the entry is still there.
+  - `revokeSSHKey` audits the two outcomes separately: `ssh_key_revoked`
+    (`success=true`) only when an `authorized_keys` line was actually removed, and
+    otherwise `ssh_key_revocation_incomplete` with
+    `ErrorCode=AUTHORIZED_KEYS_ENTRY_NOT_REMOVED` and a revoke-**failure** metric,
+    naming the user and session so an operator can find the file.
+  - Note for operators: entries already fused by this defect are not repaired by
+    the fix — they are indistinguishable from a legitimate key whose comment field
+    contains a `#`. Grep for `# Added by OIDC PAM` on a line that does not start
+    with `#` and delete those lines by hand.
+- **High (#164): if the identity provider stopped returning the configured
+  `username_claim`, the authorization decision moved silently to `sub`.** An absent
+  `preferred_username` or `sub` claim was substituted with `userInfo.Subject`, and an
+  absent `email` with `userInfo.Email`, so a scope change, a claim-mapper edit or a
+  tenant migration re-pointed identity binding at an identifier the operator never
+  chose and never audited — without an error, a warning or an audit record. The claim
+  it fell back to is the one shipped in every provider config
+  (`preferred_username` in `azure-ad.yaml`, `okta.yaml`, `keycloak.yaml` and
+  `test/e2e/broker.yaml`), and for the many IdPs whose `sub` is an email or a
+  username — LDAP/AD-backed and self-hosted ones especially — that substituted value
+  was then matched against local account names, so #159's local-part matching applied
+  to it too.
+
+  - The configured claim is now the only claim consulted. A token that does not carry
+    it is refused: no session, no login key, and no token stored.
+  - The refusal names the claim that was configured and missing, and points at the
+    provider's scopes and claim mapping. A `sub`-based deployment stays expressible,
+    deliberately, as `username_claim: sub`.
+  - Audited as `USERNAME_CLAIM_MISSING` rather than `IDENTITY_MISMATCH`: nothing was
+    wrong with the identity, every login through that provider is failing for the same
+    reason, and the fix is in the provider or the config.
+
+  Coverage: the existing "claim absent in token fails closed" case passed against the
+  defect because its fixture had an empty `Subject`, which is exactly the condition
+  that hides the fallback. The new cases give the identity a non-empty `Subject` and
+  `Email`, cover all three deleted branches, and run through the full device flow —
+  proven to fail with the fallback restored (an active session, a provisioned key and
+  an `authentication_successful` record).
+- **High (#161): any local user could stop session expiry and key revocation for
+  the whole host.** The broker serialized its `authorized_keys` writes on
+  `~/.ssh/authorized_keys.lock` — a path inside the home directory of the very
+  account it was protecting — and took it with a *blocking* `flock(LOCK_EX)`. So
+  `flock ~/.ssh/authorized_keys.lock -c 'sleep infinity'`, which needs no
+  privileges, parked the broker's only cleanup goroutine indefinitely: from then on
+  no session expired, no key was revoked for *any* user, and `Broker.Stop()` — which
+  waits on that goroutine — hung, so `systemctl restart` waited out
+  `TimeoutStopSec` and ended in SIGKILL. A login's `AddPublicKey` blocked the same
+  way, holding the authentication open until sshd's `LoginGraceTime` killed it.
+
+  - The lock moved out of the user's home to `/var/lib/oidc-pam/locks/<user>.lock`
+    (`ssh.DefaultLockDir`), a root-owned 0700 directory. A lock whose only job is
+    to serialize the broker against itself has no business being reachable by the
+    account it protects. The broker refuses to use a lock directory that is a
+    symlink, is not a directory, is group- or world-writable, or is owned by
+    another uid.
+  - Acquisition is now `LOCK_EX|LOCK_NB` with a bounded retry (5 s, 50 ms apart)
+    and returns `ssh.ErrLockUnavailable` instead of waiting. This is what makes the
+    fix durable: no future lock location, and no misconfigured state directory, can
+    park the daemon again. A failed acquisition skips that one user's write — the
+    sweep is best-effort and is retried on the next pass — rather than writing
+    without the lock.
+  - `NewAuthorizedKeysManager` takes the lock directory as a second argument. It is
+    required rather than defaulted, so a caller cannot arrive at a lock directory
+    inside a user's home by omission.
+  - `configs/systemd/oidc-auth-broker.service` adds `/var/lib/oidc-pam` to
+    `ReadWritePaths` (`ProtectSystem=strict` made it read-only) and
+    `scripts/install.sh` creates `ssh-keys/` and `locks/` at 0700.
+- **High (#160): one unauthenticated remote client could make a host
+  unloginnable.** The IPC rate limit was documented and named as per-UID, but the
+  UID it was keyed on can only ever be 0 — `verifyPeerCredentials` rejects every
+  peer that is not root — so there was a single bucket for the whole machine and
+  `max_requests_per_minute` was a *host-wide* budget. One PAM login spends about
+  19 requests (one `authenticate` plus a `check_session` per poll), so the shipped
+  budgets of 30–60 covered under three concurrent logins. Opening SSH connections
+  to any syntactically valid username at roughly one per second emptied it, after
+  which every login on the host was refused with `RATE_LIMIT_EXCEEDED` →
+  `PAM_MAXTRIES`, and the shipped stack (`auth sufficient pam_oidc.so` followed by
+  `auth requisite pam_deny.so`) has no password fallback. The bucket refilled at
+  30–60 tokens per minute, so a slow trickle sustained it.
+
+  - The limits are now keyed on the **account a request names**, so one account's
+    traffic cannot spend another's budget. `max_requests_per_minute` is therefore
+    now a per-account figure; the shipped values are unchanged and are generous
+    for one account.
+  - `check_session`, `refresh_session` and `revoke_session` are charged against a
+    separate, larger budget (20× the authenticate budget, one per poll of one
+    login). Sharing one budget meant that exhausting it refused the polls of
+    logins already in flight: the broker permitted the login, chose the polling
+    interval itself, and then denied the login for continuing.
+  - The limiter runs after the request is decoded and validated, since that is
+    when the account is known. As the compensating bound, `maxRequestSize` drops
+    from 1 MiB to 64 KiB — the largest request these validation limits permit is
+    about 40 KiB — so what an unlimited peer can make the broker allocate is
+    8 MiB rather than 128 MiB.
+  - The bucket map is bounded (4096 entries, LRU eviction), because its keys now
+    come from requests. Eviction cannot be turned into a lockout: draining a given
+    account's budget requires naming it, which keeps that bucket the most recently
+    used and so the last evicted.
+  - Administrative reads (`status`, `sessions_list`, `keys_list`) are not charged.
+    They name no account, so they would all share one bucket — the shape of this
+    bug — and an `oidc-admin status` refused during an incident is a real cost
+    where an operator looping the command is not a threat.
+
+  This does not stop an attacker from spending the budget of an account they name
+  deliberately; that needs a second key the client does not choose (`source_ip`,
+  #169) and the pending-flow accounting in #163.
+
+  Coverage: `ratelimit_test.go` drove the limiter with synthetic uids 1000/2000/3000
+  — a state unreachable in production, and the reason a host-wide bucket looked
+  per-user in the tests. It is rewritten around account names, with the attack as
+  a test (400 requests naming 100 accounts, then a login for an unnamed account
+  still succeeds) and one asserting an in-flight login's polls survive an
+  exhausted authenticate budget.
+
+- **High (#159): an identity provider could choose which local account a login
+  became, including root.** Identity binding accepted the **local part** of an
+  email-shaped claim as a match for the requested account, so `root@evil.tld`
+  logging in as `root` was bound and approved. With `auth sufficient pam_oidc.so`
+  (the shipped stack) that short-circuits the rest of the auth stack. Reaching it
+  needed only the ability to choose the local part of one's own address — a mail
+  alias, a second verified domain, a B2B guest identity from another tenant —
+  and the branch was live in every shipped configuration: `username_claim: email`
+  in four of them, and `preferred_username`, which *is* the UPN on Entra ID, in
+  two more. The weaker variant needed no provider control at all: guest
+  `alice@partner.example` and employee `alice@example.com` both bound to local
+  `alice`.
+
+  Two independent fixes, either of which stops the escalation:
+
+  - The whole claim value must now equal the requested account. Local-part
+    matching is opt-in per provider (`username_claim_strip_domain: true`) and
+    requires `allowed_email_domains` to pin the domains it may come from —
+    enabling one without the other is a startup error, and domains are matched
+    exactly, since a wildcard re-opens the subdomain an attacker can get a
+    verified address under.
+  - No OIDC identity may bind to uid 0 or to any account with uid below 1000,
+    whatever the token says and however the mapping is configured. This is the
+    check that holds when `username_claim` or `allowed_email_domains` is wrong.
+    Deliberate exceptions go in `authentication.allow_privileged_accounts`, named
+    one at a time, and each use is logged.
+
+  Refusals of the second kind are audited as `PRIVILEGED_ACCOUNT_DENIED`: the
+  identity matched, so recording it as `IDENTITY_MISMATCH` would send an operator
+  looking for a claim problem that is not there.
+
+  **This is a breaking change for anyone using an email-shaped
+  `username_claim`.** Logins that relied on the local part being stripped will be
+  refused until `username_claim_strip_domain` and `allowed_email_domains` are
+  set; the refusal names both keys and the domain it saw. The six affected
+  shipped configs are updated with the opt-in and a placeholder domain. The
+  environment-variable-derived config deliberately does *not* enable it, because
+  it cannot know the operator's domain and guessing a domain pin is the wrong
+  direction to fail.
+
+  Coverage: the previous test suite asserted the vulnerable behaviour was correct
+  (`identity_binding_test.go` had `email: alice@example.com` + requested `alice`
+  ⇒ no error), which is why it survived. That case now asserts the refusal and
+  moves under the opt-in. `root@evil.tld` is tested against all four plausible
+  provider configurations, the uid guard is tested on an exact claim match, and
+  both run through the full device flow — not just the binding function — so the
+  poll loop is proven to act on the result. Two e2e cases: an exactly-matching
+  identity refused for a uid-400 account (`root` is unusable there, since
+  `PermitRootLogin no` means sshd refuses before PAM runs and the case would pass
+  without testing anything), and `alice@example.org` refused for local `alice`.
+
+### Fixed
+- **High (#162): a verification URL longer than about 100 characters made every
+  login on the host fail, with nothing to go on but "Failed to parse broker
+  response".** The module read a broker response into an 8 KiB buffer, and the
+  verification URI reached it three times over: as `device_url`, as text inside
+  `instructions`, and as QR art whose size grows with the URI — art the broker
+  serialized *twice*, once as its own `qr_code` field and again embedded in the
+  instructions. An ordinary device response therefore sat about 20 bytes from the
+  limit. Past it, what arrived was a truncated prefix, `json_tokener_parse` refused
+  it, and the login was refused with `PAM_AUTHINFO_UNAVAIL` — the same result as a
+  broker that is not running, so the shipped stack's `auth requisite pam_deny.so`
+  left the operator with no password fallback and no diagnosis. Every provider in
+  the wild hands out a short URI, which is why nothing caught this.
+
+  - The QR art is serialized once, inside `instructions`. The redundant `qr_code`
+    field is gone from the IPC response (and from `internal/brokerclient`, which
+    declared it and never read it).
+  - The broker now owns the size of what it sends. A device response that would not
+    fit the module's buffer is re-rendered **without the QR art** — a login the user
+    completes by typing the URL beats a response that cannot be parsed — and at the
+    write site a response that still does not fit is replaced by a small, parseable
+    `RESPONSE_TOO_LARGE` failure rather than a truncated prefix of the real one.
+    Admin payloads are deliberately exempt: `oidc-admin` decodes a stream, and
+    `sessions_list` on a busy host is legitimately larger than the module's buffer.
+  - The buffer is 16 KiB, the bound the **oauth2-pam wire protocol (version 1)**
+    sets on a response. That project owns the broker↔module contract and this one
+    consumes it (#179), so the size is taken from there rather than chosen here.
+    `MAX_RESPONSE_SIZE` and `internal/ipc`'s `maxResponseSize` are held equal by a
+    test that reads the C header, so the two cannot drift; the second, unused
+    `MAX_BUFFER_SIZE` macro that had the same value is gone.
+  - `receive_auth_response` no longer reports success on a full buffer with no end
+    of message. That case is now distinguished from a transport failure and reported
+    as `PAM_SERVICE_ERR` ("error in service module"), not `PAM_AUTHINFO_UNAVAIL`
+    ("could not reach an opinion"), with the size in syslog. Both fail closed, but
+    they no longer look alike to whoever is reading the log.
+  - The broker bounds what a provider can hand it: `verification_uri` and
+    `verification_uri_complete` at 512 bytes, `user_code` at 64, rejected with an
+    error naming the provider's field — the input side of the same problem, where
+    the error can still say where the value came from.
+  - Tests in three places, since this defect lived between them: a Go test that
+    marshals the worst-case response the broker's own validation permits and asserts
+    it fits (with the art, and without); a cgo test that an oversized response is
+    reported distinctly rather than as an unreachable broker; and an e2e case that
+    logs in against an issuer handing out a 400-byte verification URI, asserting the
+    URL still reaches the user and the module never falls back on a parse failure.
+    `fakeoidc` grew a `/control/verification-uri?pad=N` route for it, because a
+    harness that only ever sees a 29-byte URI cannot tell that this is broken.
+- **High (#158): `require_groups` written the way every document tells operators
+  to write it enforced nothing.** Group membership was checked against the global
+  `authentication.require_groups`, but the configuration in QUICK-START.md,
+  DEPLOYMENT.md and the provider examples puts `require_groups` under
+  `authentication.policies.<name>`. The policy engine collected those into
+  `PolicyResult.RequiredGroups` and nothing ever read it, so on the documented
+  configuration any identity the provider would authenticate received a login,
+  a session, and an SSH key. `pollDeviceAuthorization` now enforces the list the
+  policy engine resolved — the union of the global setting and every matching
+  policy — which it takes as an argument, because the check runs in a background
+  goroutine long after policy evaluation and re-evaluating there would evaluate
+  against a different clock.
+
+  Two things prevented that resolved list from ever containing anything:
+
+  - Policies were matched against `AuthRequest.TargetHost`, which despite its
+    name is populated from PAM's `PAM_RHOST` by both clients — the address the
+    user is connecting *from*. A policy named `production` therefore only matched
+    a *client* literally named `production`. Matching is now against the
+    hostname of the machine being logged into, which is what a policy naming a
+    resource means.
+  - No policy name in any shipped configuration is a hostname; they are all
+    `default`, `production`, `staging`. `default` is now a documented catch-all
+    that applies to every host, so `policies.default.require_groups` — the
+    QUICK-START configuration — is enforced.
+
+  Policies whose names cannot match this host are logged by name at startup
+  instead of silently doing nothing, and `applyResourcePolicies` now applies
+  *every* matching policy rather than ranging over a map and breaking on the
+  first, which made the effective policy vary between runs of the same binary on
+  the same host. Unioning `require_groups` and taking the minimum
+  `max_session_duration` means an additional match can only restrict access
+  further.
+
+  `configs/CONFIGURATION-GUIDE.md` documents how a policy is selected;
+  DEPLOYMENT.md's example no longer uses three keys that are not fields of a
+  policy (`session_duration`, `max_concurrent_sessions`, `require_mfa`) or two
+  names that can never match (`admin_operations`, `sudo_operations`). Policies
+  still cannot be scoped to an operation such as `sudo`.
+- **Medium (#153): every `authentication_successful` record was written without
+  the identity it authenticated.** The device-flow poll loop clones the session
+  before mutating it (the map holds the raw pointer, so writing through it would
+  race with readers) and writes the email and groups from the provider onto the
+  clone — but the success audit event was built from the *original*, so it reached
+  the audit trail with `email: ""` and `groups: null` on every login. The denial
+  events, built from the provider's user info directly, carried the identity
+  correctly, so an operator reviewing the trail could see who had been refused but
+  not who had got in. The event now reads the clone it belongs to, as does the
+  location the policy engine records.
+
+  `device_authorization_failed` also gains the `provider` and the same bounded
+  `error_code` its metric is already labelled with (`classifyPollError`), so a
+  refusal can be filtered and correlated rather than only carrying free text.
+
+  The `pkg/auth` device-flow tests now run against a real file-backed audit logger
+  and assert on what it wrote, since a disabled logger cannot show a wrong record.
+- **High (#152): no login ever got an SSH key, which is the one thing the broker
+  exists to hand out.** `Broker.generateSSHKey` files the on-disk key pair under
+  the *session* ID, deliberately, so that concurrent sessions for one user do not
+  overwrite each other's key — but `KeyManager.SaveKey` validated that argument
+  with `validateUsername`, and a 64-character hex session ID is not a POSIX login
+  name. Every save was refused, the error was only written to the broker's own
+  log, and the login carried on and was audited as `authentication_successful`.
+  So a device flow completed, PAM returned success, and `authorized_keys` was
+  never touched. Introduced by `2e5522a`'s path-traversal hardening: the hardening
+  was right, the validator was simply the wrong one for an argument that is not a
+  username.
+
+  The key store is now explicitly keyed by an opaque **key ID**: `validateKeyID`
+  (anchored, length-bounded, no dots or separators, so traversal is still
+  impossible) replaces `validateUsername` in `SaveKey`/`LoadKey`/`DeleteKey`/
+  `GetKeyPath`/`GetPublicKeyPath`, and those parameters are named `keyID` so the
+  contract is legible from the signature. `validateUsername` stays where the
+  argument really is a username. `KeyInfo` gains a `KeyID`, and its `Username` is
+  now recovered from the key's comment instead of being the storage directory
+  name — so `oidc-admin keys` no longer prints session IDs in a `USERNAME`
+  column, and gains a `SESSION` column to tie a key to the session that owns it.
+  A provisioning failure is now also audited (`ssh_key_provisioning_failed`)
+  rather than only logged, since that silence is why this survived eleven
+  releases.
+
+  Unit tests passed on both sides throughout: each half was self-consistent, and
+  the one test that exercised the store end to end used the session ID
+  `"sess-poll-test"` — which satisfies the POSIX username pattern by accident.
+  The regression gate therefore uses a session ID of the shape the broker really
+  mints, and asserts the key reaches both the store and the user's
+  `authorized_keys`.
+- **Critical (#150): the broker abandoned every device flow on the first poll,
+  so no device login could ever complete.** RFC 8628 §3.5 makes
+  `authorization_pending` the *normal* answer to every poll before the user
+  finishes in the browser, but `PollDeviceAuthorization` returned it wrapped as
+  `"token error: authorization_pending"` while `pollDeviceAuthorization`
+  compared `err.Error()` against the bare `"authorization_pending"`. The
+  comparison never matched, so the pending answer fell through to the deny path:
+  audit `device_authorization_failed`, session deleted, goroutine gone —
+  typically about five seconds after the verification URL was displayed, leaving
+  the user with a code and a session that no longer existed. `slow_down` was
+  treated the same way, and the polling interval never grew as the RFC requires.
+  The two codes are now sentinel errors (`ErrAuthorizationPending`, `ErrSlowDown`)
+  wrapped with `%w` and matched with `errors.Is`, so the pending path continues
+  polling, `slow_down` adds 5 s to the interval and resets the ticker, and only
+  the device code's own expiry or a genuinely terminal code (`access_denied`,
+  `expired_token`, an invalid ID token) ends the flow. The audit message keeps
+  its `token error: <code>` shape.
+
+  The bug was invisible to unit tests on either side — the provider returned the
+  right code and the loop compared against a plausible string; what went untested
+  was the two halves agreeing. So the regression gate is an end-to-end one: see
+  **Added** below.
+
+### Added
+- **(#129) `test/e2e`, an end-to-end harness: real `sshd`, real PAM stack, real
+  `pam_oidc.so`, real broker, and a scripted fake identity provider, in Docker.**
+  `make test-e2e` runs it; it needs nothing but Docker — no credentials, no
+  network egress, no Keycloak. Every case is an actual SSH login that either
+  happens or does not, because the thing under test is what PAM makes of the
+  module's return code in the context of a real stack, and that is where every
+  serious defect this project has shipped has lived: #120 (`PAM_SUCCESS` returned
+  while the user was still deciding, which `auth sufficient` turns into a
+  bypass), #140 (a `.so` containing no `pam_sm_*` symbols at all), #150 (every
+  device flow abandoned on its first poll). Each of those passed every unit test
+  on both sides of the boundary it broke.
+
+  Nine cases: the login waits while nothing is approved (the #120 gate), an
+  approval completes it and installs exactly one key, a flow nobody approves is
+  refused after the module's whole budget, a provider refusal is terminal, an ID
+  token for another user cannot log in as this one (#90), `require_groups` is
+  enforced (#92), an `account required` module below `pam_oidc.so` can still
+  refuse a login whose auth phase succeeded (#122), a non-root peer is refused on
+  the IPC socket, and an absent broker is reported at once rather than after the
+  device-flow budget. Verified against a deliberately reintroduced #120: the two
+  bypass cases fail, naming it.
+
+  It found #152 and #153 on its first run, both of which had survived eleven
+  releases and the whole unit suite.
+- `test/e2e/fakeoidc`, the scripted issuer it authenticates against: discovery,
+  JWKS, RS256-signed ID tokens with a real `nonce`/`aud`/`iss`, the device
+  authorization and token endpoints, and a `/control/*` API so a case can decide
+  *when* the user approves, deny, expire, or change which identity the token
+  carries. Approving before the broker is really polling would test a race rather
+  than a device flow, so `/control/state` reports the poll count.
+- A CI job running the harness on `ubuntu-latest`. It builds everything inside
+  its own images, so unlike the other jobs it needs neither Go nor PAM headers on
+  the runner.
+- `internal/testoidc`, an in-process OpenID Connect issuer for tests: discovery,
+  JWKS, RS256-signed ID tokens (real signatures, real `aud`/`iss`/`exp`/`nonce`,
+  so go-oidc's verifier is exercised rather than bypassed), the device
+  authorization endpoint and userinfo. Its point is `Script(...)`, which sets the
+  *sequence* of token-endpoint answers — a fake that grants on the first poll
+  cannot tell a working client from one that treats `authorization_pending` as
+  fatal, which is precisely #150.
+- `pkg/auth` tests driving `pollDeviceAuthorization` against that issuer:
+  pending-pending-grant reaches an active session with its tokens in the
+  encrypted store (this fails on the pre-fix code with the session already
+  deleted after one poll), `slow_down` slows the poll rate without ending the
+  flow, `access_denied` and `expired_token` stay terminal, the device code's
+  expiry bounds the loop, and stopping the broker abandons it. `Broker` gained an
+  unexported `pollIntervalUnit` so those tests do not have to wait out RFC 8628's
+  5-second interval floor.
+
+### Removed
+- **(#129) The Keycloak integration harness, which `test/e2e` replaces and which
+  no CI job ran.** `test/integration` (a `package main` behind a build tag that
+  `./...` skips), `docker-compose.test.yml`, `test/Dockerfile.integration`,
+  `test/config/integration-test.yaml`, `test/keycloak`,
+  `scripts/{start,run}-integration-tests.sh` and the `test-projects/ssh-server`
+  shell harness are gone, along with the `test-integration` and
+  `test-integration-run` make targets. What they promised — a real login through
+  a real PAM stack — is what `make test-e2e` now delivers, in a form that runs in
+  CI and needs no external identity provider. The QUICK-START section that told a
+  reader to bring up the deleted Keycloak compose file points at the harness
+  instead.
+- `make test-e2e` no longer runs `go test ./test/e2e/...`, which matched no
+  packages and therefore passed unconditionally. It runs the harness.
+
 ### Security
 - Bumped the Go toolchain pin from 1.25.12 to 1.25.13. govulncheck reported four
   called standard-library vulnerabilities against 1.25.12, all fixed in 1.25.13:
@@ -110,9 +946,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(#120)** `PAMMaxTries` was `24`, which is not a Linux-PAM result code
   (`PAM_MAXTRIES` is 11); returning it would have turned a deliberate
   rate-limit denial into an unrecognized error. The `PAMResultCode` constants are
-  now taken from the PAM headers the module is compiled against instead of being
-  copied by hand, since the values are not portable between Linux-PAM and
-  OpenPAM.
+  no longer hand-copied guesses: each one is checked against the PAM macro of the
+  same name in the headers the module is compiled against, by
+  `TestPAMResultCodesMatchHeaders` (see **(#141)** under **Added**). The values
+  are not portable between Linux-PAM and OpenPAM, so the test is what keeps
+  `pkg/pam`'s literals honest.
 
 ### Fixed (BREAKING for PAM configs)
 - **(#122)** The example configs (`configs/pam/{ssh,login,su,sudo}`, the
@@ -157,6 +995,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keep working.
 
 ### Added
+- **(#142)** `.golangci.yml` and `.golangci-version`. There was no lint
+  configuration, so the linter set was whatever the installed binary defaulted to
+  — decided by the tool version rather than by this repository, which is how a
+  contributor on a different version sees different results and how a tool upgrade
+  silently adds or drops a check. The standard set (errcheck, govet, ineffassign,
+  staticcheck, unused) is now declared explicitly; it changes nothing today, which
+  is the point. The version is single-sourced in `.golangci-version`, read by the
+  CI Lint job, `test/docker/Dockerfile.verify` and `make lint` — which warns if
+  the locally installed version differs, rather than reporting a clean run that
+  CI will not reproduce.
 - **(#140)** `scripts/verify-pam-module.sh` — the gate that would have caught the
   empty module. It asserts a built `.so` exports all six `pam_sm_*` entry points
   and links `libpam` and `libjson-c`, and it runs everywhere a shipped module is
@@ -174,6 +1022,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers the module is compiled against, and fails if a value or the set of
   codes drifts. This preserves what #118 established — that the codes are not
   hand-copied guesses — now that `pkg/pam` declares them without cgo.
+- **(#141)** A `macOS (no PAM headers)` CI job runs `go build ./...`,
+  `go vet ./...` and `go test ./...` on `macos-latest`. The point is what is *not*
+  installed: with no `<security/pam_ext.h>` and no json-c, any cgo that escapes
+  `cmd/pam-module`'s `//go:build linux` constraint fails CI instead of only
+  breaking for contributors on a Mac — which is how the tree came to be
+  unbuildable there in the first place.
+- **(#141)** `scripts/check-cgo-quarantine.sh` (`make check-cgo`, and a step in
+  the `Validate` job) asserts that `cmd/pam-module` is the only package with cgo
+  files under `GOOS=linux`, and that no package has any under `GOOS=darwin`. It
+  reads the build graph rather than the host, so it gives the same answer on any
+  OS with no headers installed, and it names the offending package instead of
+  failing with a missing header a hundred lines into a compile. Both halves
+  matter: cgo escaping the module breaks the macOS build (#141), and C leaving
+  `cmd/pam-module` is exactly what shipped a module with no entry points (#140).
 - **(#124)** `oidc-admin status`, `health`, `sessions` and `keys` work. The broker
   now implements the `status`, `sessions_list` and `keys_list` IPC requests the
   CLI has always sent, backed by `Broker.Status()`, `Broker.ListSessions()` and
@@ -228,6 +1090,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages CI has to treat specially are down to one: `cmd/pam-module`. The
   `pam_sm_*` entry points are unaffected — they are C, called by libpam, and stay
   C.
+- **(#141)** The `Test` job runs `go vet ./...` and `go test -race ./...` instead
+  of two hand-maintained package lists, and installs the PAM headers because
+  `./...` now includes `cmd/pam-module`. A list of packages to check is a list of
+  packages someone has to remember to extend, and that is the whole mechanism by
+  which the PAM code went years without being vetted or tested (#113/#118). The
+  `PAM (cgo)` job stays, overlapping with this one on purpose, so a break in the C
+  is reported as a cgo failure by name.
 - **(#127)** The six pre-implementation design documents in the repository root
   (`oidc_pam_project.md`, `oidc_pam_comprehensive.md`,
   `oidc_provider_configuration.md`, `research_computing_oidc.md`,
@@ -257,6 +1126,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests — the live Go path has gone through `internal/brokerclient` since #121.
   Their tests asserted that a bad file descriptor fails, which is a property of
   the C library, not of this project.
+- **(#141) `test/integration/broker_test.go` (748 lines), which had never passed.**
+  All three of its top-level tests died in `auth.NewBroker`: the fixture's issuer
+  was `mock://test-provider` and OIDC discovery is an HTTP GET, so every run
+  ended in `unsupported protocol scheme "mock"`. The subtests behind that failure
+  were written against a broker that does not exist either — `key_create` and
+  `risk_assess` are not request types the broker implements, several sent two
+  requests down one connection when the broker answers one per connection, and
+  `sessions_list`/`keys_list` require uid 0. The directory did not even build
+  under its own `integration` tag (`package integration` in the test file,
+  `package main` in `main.go`), which it now does. Nothing was covered by this
+  file: `internal/ipc` exercises the same request surface over real sockets, and
+  end-to-end coverage through PAM is what the container harness in #129 is for.
+  `make test-integration` now vets the tagged Keycloak harness that
+  `docker-compose.test.yml` actually runs, and `make test-integration-run` runs
+  it, instead of pointing `go test` at a package with no tests in it.
 - **(#141)** The four `cgo_{linux,darwin}.go` files that carried nothing but
   duplicate `#cgo` flag comments. cgo merges `#cgo` directives across a package,
   so the flags are declared once, in `cmd/pam-module/bridge_linux.go`.
@@ -283,6 +1167,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggested a capability that did not exist.
 
 ### Fixed
+- **(#142)** An unchecked `f.Close()` in `internal/ipc/peercred_darwin.go`, which
+  its Linux twin handles explicitly. It went unnoticed because the file is
+  `//go:build darwin` and CI lints on Linux only — a reminder that the platform CI
+  runs on decides which code gets checked at all.
 - **(#127)** `.gitignore` no longer ignores `*.h`. The cgo bridge headers
   (`cmd/pam-module/cgo_bridge.h`) are source files, so the rule meant a newly added
   header would be skipped by `git add` without a word — in a project whose
@@ -354,6 +1242,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(#118)** `test/integration` used a raw passphrase for
   `security.token_encryption_key`, invalid since the v0.4.0 breaking change; it
   now uses a base64 32-byte test key.
+
+### Fixed
+- Published releases carried **empty release notes**. `release.yml` pulled this
+  version's CHANGELOG section with an awk range whose end pattern (`^## `) also
+  matches the version header that opens the range, so awk closed the range on the
+  line that opened it and `head -n -1` deleted the single line it produced. Every
+  release up to and including v0.4.2 was published with an empty body. The section
+  is now read from its header to the next one and passed as `--notes-file`, and a
+  version with no section logs a warning instead of silently publishing nothing.
 
 ## [0.4.2] - 2026-07-09
 

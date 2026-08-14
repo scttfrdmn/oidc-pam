@@ -61,6 +61,29 @@ func validateUsername(username string) error {
 	return nil
 }
 
+// keyIDPattern is the allowlist for the identifier a stored key pair is filed
+// under. The broker files keys by session ID, so this has to admit a 64-character
+// hex string — but it is still a path element, so it admits nothing else: no
+// dots (hence no "." or ".."), no separators, and a bounded length.
+var keyIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
+// validateKeyID rejects key identifiers that are not safe to join into a path
+// under the manager's base directory.
+//
+// This is deliberately not validateUsername: the key store is keyed by an opaque
+// key ID, not by a login name. Validating it as a POSIX login name is what broke
+// key provisioning outright (#152) — every session ID the broker passed was
+// refused, so no login ever got a key.
+func validateKeyID(keyID string) error {
+	if keyID == "" {
+		return fmt.Errorf("key ID cannot be empty")
+	}
+	if !keyIDPattern.MatchString(keyID) {
+		return fmt.Errorf("key ID %q is not a valid identifier", keyID)
+	}
+	return nil
+}
+
 // NewKeyManager creates a new SSH key manager
 func NewKeyManager(baseDir string) *KeyManager {
 	return &KeyManager{
@@ -140,14 +163,15 @@ func (km *KeyManager) GenerateKey(username string) (*SSHKey, error) {
 	return sshKey, nil
 }
 
-// SaveKey saves an SSH key pair to disk
-func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+// SaveKey saves an SSH key pair to disk under keyID. The broker passes a session
+// ID, so that concurrent sessions for one user do not overwrite each other's key.
+func (km *KeyManager) SaveKey(keyID string, key *SSHKey) error {
+	if err := validateKeyID(keyID); err != nil {
+		return fmt.Errorf("invalid key ID: %w", err)
 	}
-	userDir := filepath.Join(km.baseDir, username)
+	userDir := filepath.Join(km.baseDir, keyID)
 	if err := os.MkdirAll(userDir, 0700); err != nil {
-		return fmt.Errorf("failed to create user directory: %w", err)
+		return fmt.Errorf("failed to create key directory: %w", err)
 	}
 
 	// Save private key
@@ -173,7 +197,7 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 	}
 
 	log.Info().
-		Str("username", username).
+		Str("key_id", keyID).
 		Str("private_key_path", privateKeyPath).
 		Str("public_key_path", publicKeyPath).
 		Msg("SSH key pair saved successfully")
@@ -181,12 +205,12 @@ func (km *KeyManager) SaveKey(username string, key *SSHKey) error {
 	return nil
 }
 
-// LoadKey loads an SSH key pair from disk
-func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
-	if err := validateUsername(username); err != nil {
-		return nil, fmt.Errorf("invalid username: %w", err)
+// LoadKey loads an SSH key pair from disk by the ID it was saved under.
+func (km *KeyManager) LoadKey(keyID string) (*SSHKey, error) {
+	if err := validateKeyID(keyID); err != nil {
+		return nil, fmt.Errorf("invalid key ID: %w", err)
 	}
-	userDir := filepath.Join(km.baseDir, username)
+	userDir := filepath.Join(km.baseDir, keyID)
 
 	// Load private key
 	privateKeyPath := filepath.Join(userDir, "id_rsa")
@@ -233,12 +257,12 @@ func (km *KeyManager) LoadKey(username string) (*SSHKey, error) {
 	return sshKey, nil
 }
 
-// DeleteKey removes an SSH key pair from disk
-func (km *KeyManager) DeleteKey(username string) error {
-	if err := validateUsername(username); err != nil {
-		return fmt.Errorf("invalid username: %w", err)
+// DeleteKey removes an SSH key pair from disk by the ID it was saved under.
+func (km *KeyManager) DeleteKey(keyID string) error {
+	if err := validateKeyID(keyID); err != nil {
+		return fmt.Errorf("invalid key ID: %w", err)
 	}
-	userDir := filepath.Join(km.baseDir, username)
+	userDir := filepath.Join(km.baseDir, keyID)
 
 	// Remove all key files
 	files := []string{"id_rsa", "id_rsa.pub", "key_metadata"}
@@ -252,14 +276,14 @@ func (km *KeyManager) DeleteKey(username string) error {
 	// Remove directory if empty
 	if err := os.Remove(userDir); err != nil && !os.IsNotExist(err) {
 		log.Debug().
-			Str("username", username).
-			Str("user_dir", userDir).
+			Str("key_id", keyID).
+			Str("key_dir", userDir).
 			Err(err).
-			Msg("Failed to remove user directory (may not be empty)")
+			Msg("Failed to remove key directory (may not be empty)")
 	}
 
 	log.Info().
-		Str("username", username).
+		Str("key_id", keyID).
 		Msg("SSH key pair deleted successfully")
 
 	return nil
@@ -270,23 +294,23 @@ func (km *KeyManager) IsKeyExpired(key *SSHKey) bool {
 	return time.Now().After(key.ExpiresAt)
 }
 
-// GetKeyPath returns the path to the SSH key for a user
-func (km *KeyManager) GetKeyPath(username string) string {
-	if validateUsername(username) != nil {
+// GetKeyPath returns the path to the stored private key for a key ID
+func (km *KeyManager) GetKeyPath(keyID string) string {
+	if validateKeyID(keyID) != nil {
 		return ""
 	}
-	return filepath.Join(km.baseDir, username, "id_rsa")
+	return filepath.Join(km.baseDir, keyID, "id_rsa")
 }
 
-// GetPublicKeyPath returns the path to the SSH public key for a user
-func (km *KeyManager) GetPublicKeyPath(username string) string {
-	if validateUsername(username) != nil {
+// GetPublicKeyPath returns the path to the stored public key for a key ID
+func (km *KeyManager) GetPublicKeyPath(keyID string) string {
+	if validateKeyID(keyID) != nil {
 		return ""
 	}
-	return filepath.Join(km.baseDir, username, "id_rsa.pub")
+	return filepath.Join(km.baseDir, keyID, "id_rsa.pub")
 }
 
-// ListKeys lists all SSH keys managed by this key manager
+// ListKeys lists the IDs of every key pair managed by this key manager
 func (km *KeyManager) ListKeys() ([]string, error) {
 	entries, err := os.ReadDir(km.baseDir)
 	if err != nil {
@@ -296,53 +320,53 @@ func (km *KeyManager) ListKeys() ([]string, error) {
 		return nil, fmt.Errorf("failed to read base directory: %w", err)
 	}
 
-	var users []string
+	var keyIDs []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			// Check if this directory contains SSH keys
 			privateKeyPath := filepath.Join(km.baseDir, entry.Name(), "id_rsa")
 			if _, err := os.Stat(privateKeyPath); err == nil {
-				users = append(users, entry.Name())
+				keyIDs = append(keyIDs, entry.Name())
 			}
 		}
 	}
 
-	return users, nil
+	return keyIDs, nil
 }
 
 // CleanupExpiredKeys removes expired SSH keys
 func (km *KeyManager) CleanupExpiredKeys() error {
-	users, err := km.ListKeys()
+	keyIDs, err := km.ListKeys()
 	if err != nil {
 		return fmt.Errorf("failed to list keys: %w", err)
 	}
 
 	var cleaned []string
-	for _, username := range users {
-		key, err := km.LoadKey(username)
+	for _, keyID := range keyIDs {
+		key, err := km.LoadKey(keyID)
 		if err != nil {
 			log.Error().
-				Str("username", username).
+				Str("key_id", keyID).
 				Err(err).
 				Msg("Failed to load key for cleanup check")
 			continue
 		}
 
 		if km.IsKeyExpired(key) {
-			if err := km.DeleteKey(username); err != nil {
+			if err := km.DeleteKey(keyID); err != nil {
 				log.Error().
-					Str("username", username).
+					Str("key_id", keyID).
 					Err(err).
 					Msg("Failed to delete expired key")
 			} else {
-				cleaned = append(cleaned, username)
+				cleaned = append(cleaned, keyID)
 			}
 		}
 	}
 
 	if len(cleaned) > 0 {
 		log.Info().
-			Strs("users", cleaned).
+			Strs("key_ids", cleaned).
 			Msg("Cleaned up expired SSH keys")
 	}
 
@@ -353,6 +377,12 @@ func (km *KeyManager) CleanupExpiredKeys() error {
 // listings. It deliberately carries no key material: `oidc-admin keys` wants to
 // know which users have keys, how strong they are and when they expire.
 type KeyInfo struct {
+	// KeyID is the identifier the pair is stored under, which is the ID of the
+	// session it was issued for.
+	KeyID string
+	// Username is the local account the key authorizes, recovered from the key's
+	// comment. It is empty for a key whose comment does not carry one, since the
+	// store itself is keyed by session and does not record the user separately.
 	Username string
 	// KeyType is the SSH algorithm name from the public key itself
 	// (e.g. "ssh-rsa"), not the manager's configured key type — an existing key
@@ -366,6 +396,21 @@ type KeyInfo struct {
 	Expired   bool
 }
 
+// usernameFromComment recovers the local account from a key comment of the form
+// "<username>@oidc-pam-<unix>", as written by GenerateKey. It returns "" for a
+// comment in any other shape rather than guessing, so an operator sees an empty
+// column instead of a plausible-looking wrong name.
+func usernameFromComment(comment string) string {
+	user, rest, found := strings.Cut(comment, "@oidc-pam-")
+	if !found || user == "" {
+		return ""
+	}
+	if _, err := strconv.ParseInt(rest, 10, 64); err != nil {
+		return ""
+	}
+	return user
+}
+
 // ListKeyInfo returns metadata for every managed key pair.
 //
 // A key whose files cannot be read or parsed is skipped and counted in the
@@ -373,18 +418,18 @@ type KeyInfo struct {
 // directory should not make the listing unavailable, but a silently short list
 // would read as "these are all the keys".
 func (km *KeyManager) ListKeyInfo() ([]KeyInfo, int, error) {
-	users, err := km.ListKeys()
+	keyIDs, err := km.ListKeys()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list keys: %w", err)
 	}
 
-	infos := make([]KeyInfo, 0, len(users))
+	infos := make([]KeyInfo, 0, len(keyIDs))
 	unreadable := 0
-	for _, username := range users {
-		key, err := km.LoadKey(username)
+	for _, keyID := range keyIDs {
+		key, err := km.LoadKey(keyID)
 		if err != nil {
 			log.Warn().
-				Str("username", username).
+				Str("key_id", keyID).
 				Err(err).
 				Msg("Skipping key that could not be read while listing keys")
 			unreadable++
@@ -393,7 +438,8 @@ func (km *KeyManager) ListKeyInfo() ([]KeyInfo, int, error) {
 
 		keyType, keySize := publicKeyStrength(key.PublicKey)
 		infos = append(infos, KeyInfo{
-			Username:  username,
+			KeyID:     keyID,
+			Username:  usernameFromComment(key.Comment),
 			KeyType:   keyType,
 			KeySize:   keySize,
 			CreatedAt: key.CreatedAt,

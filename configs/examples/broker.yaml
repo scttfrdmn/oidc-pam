@@ -21,6 +21,13 @@ oidc:
       # User attribute mapping
       user_mapping:
         username_claim: "email"
+        # (#159) An email-shaped claim binds on its local part only when you ask for it
+        # and pin the domains it may come from: with these settings alice@example.com can
+        # log in as "alice", while alice@partner.example and root@anything cannot.
+        # Replace example.com with your domain(s). Privileged accounts (uid < 1000)
+        # are refused regardless; see authentication.allow_privileged_accounts.
+        username_claim_strip_domain: true
+        allowed_email_domains: ["example.com"]
         email_claim: "email"
         name_claim: "name"
         groups_claim: "groups"
@@ -42,6 +49,13 @@ oidc:
       # verification_only: this provider may confirm an identity but must never
       # be the one a login is issued against.
       verification_only: false
+      # require_id_token is the default, and is spelled out here only to say so: the
+      # ID token is the only part of a token response that can be verified at all
+      # (signature, aud, exp, nonce), and without one the identity comes from
+      # /userinfo with nothing vouching for it but TLS and the bearer token. Set it
+      # to false only for a provider that does not issue an ID token for the device
+      # grant. See CONFIGURATION-GUIDE.md, "How Far the Provider Is Trusted".
+      require_id_token: true
 
     # Example: Azure AD configuration  
     - name: "azure-corporate"
@@ -69,12 +83,27 @@ authentication:
   require_groups: ["linux-users"]
   
   # Network requirements
+  #
+  # require_tailscale and require_private_network are checked against the login's
+  # source_ip. A login can legitimately have none — one at the physical console,
+  # or one whose PAM_RHOST is a resolved hostname rather than an address — so
+  # enabling either of them requires unknown_source_ip as well, saying what
+  # happens to those: "deny" (fail closed) or "allow" (permitted, and audited as
+  # network_requirement_waived). The broker refuses to start without it.
   network_requirements:
     require_tailscale: false
     validate_device_trust: false
     require_private_network: false
+    # unknown_source_ip: "deny"
     
   # Resource-specific policies
+  # A policy is selected by its NAME: "default" applies to every host, any other
+  # name must match this host's name (exactly, or as a domain component, so
+  # "production" matches "api.production.example.com" but not "prod-login-01").
+  # A policy that matches no host never applies — the broker logs a warning
+  # naming it at startup. Rename the tier that applies to these hosts to
+  # "default", or name your hosts to match. Every matching policy applies:
+  # require_groups is the union of all matches and the global setting.
   policies:
     production:
       require_groups: ["production-access", "senior-engineers"]
@@ -121,29 +150,27 @@ security:
   
   # TLS verification
   tls_verification:
-    pin_certificates: false
     skip_tls_verify: false
-    
-  # Rate limiting
+    # SHA-256 fingerprints that must appear in the provider's TLS chain. Empty
+    # means the system trust store decides. (#170) This was `pin_certificates`,
+    # which is not a setting the broker reads — a list of fingerprints, not a
+    # boolean, and a wrong one refuses every connection to the provider.
+    pinned_certificates: []
+    # trusted_ca_bundle: "/etc/ssl/certs/company-ca.pem"  # replaces the system store
+
+  # Rate limiting. max_requests_per_minute is the budget for *starting* an
+  # authentication, per requested account — not a host-wide total, so traffic for
+  # one account cannot deny logins to another. check_session polls are charged
+  # against a separate budget 20x this size, so a login that has been allowed to
+  # start can always finish polling.
   rate_limiting:
     max_requests_per_minute: 60
     max_concurrent_auths: 10
 
-# Cloud integration (optional)
-cloud:
-  provider: "aws"  # aws, azure, gcp, or leave empty to disable
-  auto_discovery: true
-  metadata_sources: ["aws", "azure", "gcp"]
-  
-  # AWS configuration
-  aws:
-    region: "us-west-2"
-    parameter_store:
-      prefix: "/company/oidc/"
-      parameters:
-        provider_url: "provider"
-        client_id: "client-id"
-        scopes: "scopes"
+# Secrets from outside the file: a client_secret or token_encryption_key written
+# as "env:VAR_NAME" or "file:/path/to/secret" is resolved at startup. (#170) The
+# cloud: section that used to sit here — provider, auto_discovery, Parameter
+# Store, Key Vault, Secret Manager — had no readers anywhere in the broker.
 
 # Audit configuration
 audit:

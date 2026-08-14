@@ -2,6 +2,7 @@ package pam
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -97,8 +98,19 @@ func TestBuildAuthRequest(t *testing.T) {
 		t.Errorf("Expected login_type 'ssh', got %s", req.LoginType)
 	}
 
-	if req.TargetHost != rhost {
-		t.Errorf("Expected target_host %s, got %s", rhost, req.TargetHost)
+	// (#169) rhost is where the login came from, so it is source_ip; target_host is
+	// this host. The two used to be the wrong way round.
+	if req.SourceIP != rhost {
+		t.Errorf("Expected source_ip %s, got %s", rhost, req.SourceIP)
+	}
+
+	thisHost, err := os.Hostname()
+	if err == nil && req.TargetHost != thisHost {
+		t.Errorf("Expected target_host to be this host (%s), got %s", thisHost, req.TargetHost)
+	}
+
+	if req.Metadata["rhost"] != rhost {
+		t.Errorf("Expected rhost %s in metadata, got %s", rhost, req.Metadata["rhost"])
 	}
 
 	if req.Metadata["service"] != service {
