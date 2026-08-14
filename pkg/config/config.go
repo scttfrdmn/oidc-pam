@@ -62,6 +62,27 @@ type OIDCProvider struct {
 	VerificationOnly  bool              `mapstructure:"verification_only"`
 	RequirePKCE       bool              `mapstructure:"require_pkce"`
 	AllowMissingNonce bool              `mapstructure:"allow_missing_nonce"`
+
+	// RequireIDToken refuses a device-grant token response that carries no
+	// id_token. The ID token is the only part of that response the broker can
+	// check: the signature, the issuer, the audience, the expiry and the nonce it
+	// sent are all in there. Without one the identity comes from /userinfo — a
+	// JSON body authenticated by nothing but TLS and the bearer token — and no
+	// signature, aud or exp check happens at all (#167).
+	//
+	// A pointer because the default is *on*: nil means required, so a provider
+	// whose configuration has never heard of the key still gets verification, in
+	// configs built in Go as well as loaded YAML. Read it through IDTokenRequired.
+	RequireIDToken *bool `mapstructure:"require_id_token"`
+}
+
+// IDTokenRequired reports whether a token response with no id_token must be
+// refused for this provider. Unset means required (#167): set
+// require_id_token: false only for a provider that genuinely does not issue an ID
+// token for the device grant, accepting that its identities are then asserted by
+// /userinfo alone.
+func (p OIDCProvider) IDTokenRequired() bool {
+	return p.RequireIDToken == nil || *p.RequireIDToken
 }
 
 // UserMapping defines how to map OIDC claims to user attributes

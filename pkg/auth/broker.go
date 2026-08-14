@@ -1637,6 +1637,14 @@ func classifyPollError(err error) string {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	// A grant carrying no id_token at all (#167). Its own code, because nothing
+	// was wrong with an ID token — there was none to check — and the operator's
+	// next move is a provider scope or claim-mapping change, not an
+	// investigation of this user. Matched on the underscore spelling, and first,
+	// so that the wording of a message that has to explain what could not be
+	// verified cannot land it in one of the cases below.
+	case strings.Contains(msg, "no id_token"):
+		return "ID_TOKEN_MISSING"
 	case strings.Contains(msg, "nonce"):
 		return "NONCE_INVALID"
 	case strings.Contains(msg, "verify id token"), strings.Contains(msg, "claim validation"):

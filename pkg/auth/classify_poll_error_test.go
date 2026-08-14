@@ -18,6 +18,11 @@ func TestClassifyPollError(t *testing.T) {
 		"failed to decode token response":           "DECODE_ERROR",
 		"failed to poll device authorization: dial": "NETWORK_ERROR",
 		"something entirely unexpected":             "POLL_FAILED",
+		// (#167) A grant carrying no ID token at all is its own condition, and the
+		// message has to be able to say which checks were impossible without being
+		// classified as one of them having failed.
+		`provider "idp" granted the device authorization but returned no id_token, so this ` +
+			`authorization cannot be verified at all`: "ID_TOKEN_MISSING",
 	}
 	for msg, want := range cases {
 		var err error

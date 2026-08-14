@@ -411,6 +411,50 @@ audit:
     - "policy_violations"
 ```
 
+### 6. How Far the Provider Is Trusted
+
+Two things about a device-flow login are checked by the broker rather than taken on
+the provider's word, and both are on by default.
+
+**An ID token is required.** The ID token is the only part of a token response the
+broker can verify: the signature, the issuing `iss`, the `aud` that says the token was
+minted for *this* client, the expiry, and the nonce that makes a replayed token
+useless are all claims inside it. A response without one leaves the identity coming
+from `/userinfo`, which is authenticated by nothing but TLS and the bearer token, so
+the broker refuses it and audits `ID_TOKEN_MISSING`. Where the two sources disagree
+the ID token wins; claims that only `/userinfo` returns are still used, since the
+signed token says nothing about them.
+
+Set `require_id_token: false` only for a provider that genuinely does not issue an ID
+token for the device grant, understanding that its logins are then authorized by an
+unsigned JSON body:
+
+```yaml
+oidc:
+  providers:
+    - name: legacy-idp
+      issuer: "https://idp.example.com"
+      client_id: "oidc-pam"
+      scopes: ["openid", "email", "profile"]
+      # Accepts an identity asserted only by /userinfo: no signature, audience,
+      # expiry or replay check is then possible. Check the scopes first — a missing
+      # `openid` scope is the usual reason a provider returns no id_token.
+      require_id_token: false
+      enabled_for_login: true
+```
+
+**Every endpoint must be HTTPS.** The token, userinfo and device authorization
+endpoints all come out of the provider's `/.well-known/openid-configuration` (or, under
+`skip_discovery`, out of this file), and each of them receives either the device code
+or an access token. The broker refuses at startup to use one that names `http://`,
+because a plaintext connection silently bypasses `trusted_ca_bundle` and the
+certificate pins — those only apply to a connection that negotiates TLS. Loopback
+(`localhost`, `127.0.0.1`, `::1`) is the sole exception, for local development.
+
+The host is not required to match the issuer: a token endpoint on a different host is
+ordinary — Google's issuer is `accounts.google.com` and its token endpoint is on
+`oauth2.googleapis.com`. Only the scheme is enforced.
+
 ## Binding an OIDC Identity to a Local Account
 
 `user_mapping.username_claim` names the claim whose value must equal the local

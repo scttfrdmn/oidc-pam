@@ -49,6 +49,13 @@ oidc:
       # verification_only: this provider may confirm an identity but must never
       # be the one a login is issued against.
       verification_only: false
+      # require_id_token is the default, and is spelled out here only to say so: the
+      # ID token is the only part of a token response that can be verified at all
+      # (signature, aud, exp, nonce), and without one the identity comes from
+      # /userinfo with nothing vouching for it but TLS and the bearer token. Set it
+      # to false only for a provider that does not issue an ID token for the device
+      # grant. See CONFIGURATION-GUIDE.md, "How Far the Provider Is Trusted".
+      require_id_token: true
 
     # Example: Azure AD configuration  
     - name: "azure-corporate"
