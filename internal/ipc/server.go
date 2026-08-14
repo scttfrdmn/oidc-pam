@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -36,6 +37,13 @@ type Server struct {
 // maxConcurrentConnections caps the number of simultaneously handled IPC
 // connections so a peer cannot exhaust goroutines/FDs by opening many at once.
 const maxConcurrentConnections = 128
+
+// acceptBackoffMin and acceptBackoffMax bound the pause between retries after a
+// failed accept(2). See nextAcceptBackoff.
+const (
+	acceptBackoffMin = 5 * time.Millisecond
+	acceptBackoffMax = 1 * time.Second
+)
 
 // Request represents a request from PAM module
 type Request struct {
@@ -93,15 +101,24 @@ func NewServer(socketPath string, broker *auth.Broker, socketMode os.FileMode, s
 
 // Start starts the IPC server
 func (s *Server) Start(ctx context.Context) error {
-	// Remove existing socket file
-	if err := os.RemoveAll(s.socketPath); err != nil {
-		return fmt.Errorf("failed to remove existing socket: %w", err)
-	}
-
 	// Create socket directory if it doesn't exist
 	socketDir := filepath.Dir(s.socketPath)
 	if err := os.MkdirAll(socketDir, 0750); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
+	}
+
+	// Refuse to serve under a directory another account can write to. MkdirAll
+	// above is a no-op when the directory already exists, so an installer that
+	// created it 0755 and chowned it to an unprivileged account leaves that mode
+	// and owner in place — and write permission on the directory is enough to
+	// unlink this socket and bind an impostor at the same path (#200).
+	if err := verifySocketDirTrusted(socketDir); err != nil {
+		return fmt.Errorf("refusing to listen on %s: %w", s.socketPath, err)
+	}
+
+	// Remove existing socket file
+	if err := os.RemoveAll(s.socketPath); err != nil {
+		return fmt.Errorf("failed to remove existing socket: %w", err)
 	}
 
 	// Set umask to 0117 before creating the socket so it is created with
@@ -188,6 +205,8 @@ func (s *Server) Stop() error {
 func (s *Server) acceptConnections(ctx context.Context) {
 	defer s.wg.Done()
 
+	backoff := time.Duration(0)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,21 +222,52 @@ func (s *Server) acceptConnections(ctx context.Context) {
 			conn, err := s.listener.Accept()
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					backoff = 0
 					continue
 				}
-				// For other errors, check if we should continue or exit
+
+				// A deliberate shutdown is the only reason to stop accepting.
 				select {
 				case <-ctx.Done():
 					return
 				case <-s.stopChan:
 					return
 				default:
-					log.Error().
-						Err(err).
-						Msg("Failed to accept connection")
+				}
+				if errors.Is(err, net.ErrClosed) {
 					return
 				}
+
+				// Everything else is transient and must not take the broker's
+				// socket out of service. accept(2) fails with EMFILE/ENFILE when
+				// the descriptor table is full, ECONNABORTED when the peer goes
+				// away between the SYN and the accept, and EINTR on a signal —
+				// none of which say anything about the listener. This loop used to
+				// return here, so the first such error left a process that systemd
+				// still saw as healthy, with Restart=always never firing, that
+				// accepted no connection again for the rest of its life: on a host
+				// wired with configs/pam/ssh, every login denied until an operator
+				// noticed and restarted it by hand (#216).
+				backoff = nextAcceptBackoff(backoff)
+				event := log.Error()
+				if isTransientAcceptError(err) {
+					event = log.Warn()
+				}
+				event.
+					Err(err).
+					Dur("retry_in", backoff).
+					Msg("Failed to accept connection; retrying")
+
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return
+				case <-s.stopChan:
+					return
+				}
+				continue
 			}
+			backoff = 0
 
 			// Bound concurrent connections (L-4): if at capacity, reject rather
 			// than spawning an unbounded number of handler goroutines.
@@ -225,6 +275,11 @@ func (s *Server) acceptConnections(ctx context.Context) {
 			case s.connSem <- struct{}{}:
 			default:
 				log.Warn().Msg("Connection rejected: at maximum concurrent connections")
+				// This write happens on the accept loop itself, not in a handler, so
+				// it gets a deadline of its own: a peer that connects, fills the
+				// socket buffer and never reads must not be able to park the loop
+				// that every other login depends on (#216).
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				s.sendErrorResponse(conn, "SERVER_BUSY", "Server at capacity, try again")
 				_ = conn.Close()
 				continue
@@ -237,11 +292,48 @@ func (s *Server) acceptConnections(ctx context.Context) {
 	}
 }
 
+// nextAcceptBackoff returns how long to pause after a failed accept(2).
+//
+// The pause exists so that a failure which is transient but not instantly cleared
+// — a full descriptor table, most obviously — is retried without spinning a core
+// and without filling the journal. It is capped so the broker never stays deaf for
+// longer than a second once the condition clears.
+func nextAcceptBackoff(current time.Duration) time.Duration {
+	if current <= 0 {
+		return acceptBackoffMin
+	}
+	if next := current * 2; next < acceptBackoffMax {
+		return next
+	}
+	return acceptBackoffMax
+}
+
+// isTransientAcceptError reports whether err is one of the accept(2) failures with
+// a known, self-clearing cause. It only chooses the log level: every error other
+// than a closed listener is retried either way, because a broker that has stopped
+// accepting connections is indistinguishable from a broker that is down, except
+// that nothing restarts it.
+func isTransientAcceptError(err error) bool {
+	return errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EINTR) ||
+		errors.Is(err, syscall.EAGAIN)
+}
+
 // handleConnection handles a single IPC connection
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer func() { <-s.connSem }() // release the concurrency slot (L-4)
 	defer func() { _ = conn.Close() }()
+
+	// Set the connection timeout before anything reads from or writes to conn, so
+	// that no path through this function — including the rejection below, which
+	// writes to a peer that may never read — can block a handler goroutine
+	// indefinitely. This deadline is only as good as the descriptor's O_NONBLOCK
+	// flag: see the comment on withSocketFD for how a peer-credential lookup used
+	// to clear it and void every deadline on the connection (#216).
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Verify peer is root — PAM modules always run as root
 	if err := verifyPeerCredentials(conn); err != nil {
@@ -249,9 +341,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 		s.sendErrorResponse(conn, "PERMISSION_DENIED", "Connection rejected")
 		return
 	}
-
-	// Set connection timeout
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Verify peer credentials if required
 	if s.requirePeerAuth {

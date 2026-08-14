@@ -120,6 +120,9 @@ func main() {
 		Str("socket_path", cfg.Server.SocketPath).
 		Msg("OIDC Authentication Broker started successfully")
 
+	// Keep a stray SIGHUP from taking the broker down (#224).
+	ignoreSIGHUP()
+
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -171,6 +174,36 @@ func main() {
 	}
 
 	log.Info().Msg("OIDC Authentication Broker stopped")
+}
+
+// ignoreSIGHUP stops a SIGHUP from terminating the broker.
+//
+// Go's default disposition for SIGHUP is to kill the process, and the broker has no
+// configuration reload: the config is read once, at startup, before auth.NewBroker,
+// and nothing re-reads it. So every SIGHUP the broker has ever received was a
+// ten-second authentication outage for the whole host — Restart=always brings it
+// back RestartSec=10s later — with nothing in the journal but a clean exit and a
+// restart (#224).
+//
+// The shipped unit no longer advertises ExecReload=, so `systemctl reload` refuses
+// the job outright. This handler covers what the unit cannot: a site's logrotate
+// postrotate stanza, or an operator's `kill -HUP` on the daemon that holds
+// /var/log/oidc-auth open. Those are the documented idiom for "reload your logs" and
+// this repo does not control them.
+//
+// Swallowing the signal is deliberately not the same as implementing reload, and the
+// log line says so: whoever sent it wanted new configuration to take effect and has
+// to be told that only a restart does that.
+func ignoreSIGHUP() {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			log.Warn().Msg("Received SIGHUP and ignored it: the broker has no configuration " +
+				"reload — configuration is read once at startup, so restart the service to " +
+				"apply changes")
+		}
+	}()
 }
 
 func setupLogging(level string) {

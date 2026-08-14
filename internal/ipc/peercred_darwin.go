@@ -15,23 +15,17 @@ const xucredVersion0 = 0
 
 // getPeerCredentials extracts the UID and GID of the peer process from a Unix socket connection
 // using the LOCAL_PEERCRED socket option (macOS/Darwin).
+//
+// The descriptor is reached through withSocketFD rather than (*net.UnixConn).File():
+// File()+Fd() clears O_NONBLOCK on the connection and so voids its read deadline for
+// the rest of the connection's life (#216).
 func getPeerCredentials(conn net.Conn) (uid, gid uint32, err error) {
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return 0, 0, fmt.Errorf("connection is not a Unix socket")
-	}
-
-	f, err := unixConn.File()
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get file descriptor: %w", err)
-	}
-	// File() returns a duplicate descriptor, so closing it does not disturb conn;
-	// there is nothing to do about a failure to close a descriptor we only read a
-	// sockopt from. Matches peercred_linux.go.
-	defer func() { _ = f.Close() }()
-
-	cred, err := unix.GetsockoptXucred(int(f.Fd()), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
-	if err != nil {
+	var cred *unix.Xucred
+	if err := withSocketFD(conn, func(fd int) error {
+		var credErr error
+		cred, credErr = unix.GetsockoptXucred(fd, unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
+		return credErr
+	}); err != nil {
 		return 0, 0, fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
