@@ -522,7 +522,8 @@ func validateDeviceAuthLengths(resp *DeviceAuthResponse) error {
 // decodeProviderJSON decodes a provider's JSON response body into v, reading no
 // more than maxProviderResponseBytes of it. The read is capped at one byte past
 // the limit, which is the least that distinguishes a body over it from one landing
-// exactly on it. what names the response in the error, e.g. "token response".
+// exactly on it. The what argument names the response in the error message, e.g.
+// "token response".
 //
 // The over-limit message says "decode" deliberately: classifyPollError buckets
 // poll failures by substring, and this is a decode failure in every way that
