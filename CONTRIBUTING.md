@@ -175,12 +175,12 @@ oidc-pam/
 ├── internal/              # Private application code
 │   ├── adminapi/          # Admin request/response shapes
 │   ├── brokerclient/      # Broker IPC client and device-flow completion
-│   └── ipc/               # Broker IPC server and request validation
+│   ├── ipc/               # Broker IPC server and request validation
+│   └── testoidc/          # In-process fake OIDC issuer, for tests
 ├── test/                  # Test support
-│   ├── config/            # Test configuration
 │   ├── docker/            # Dockerfile.verify (Linux toolchain for cgo)
-│   ├── integration/       # Keycloak-backed harness (build tag `integration`)
-│   └── keycloak/          # Keycloak realm for manual end-to-end runs
+│   ├── e2e/               # SSH + PAM harness against a fake issuer, in containers
+│   └── scripts/           # Shell-level tests (the installers' PAM editing)
 ├── docs/                  # Documentation (docs/design/ is unmaintained; see its index)
 ├── scripts/               # Build, install and verification scripts
 └── configs/               # Configuration examples
@@ -237,27 +237,26 @@ test(integration): add end-to-end authentication tests
 - Mock external dependencies
 - Aim for high test coverage
 
+Name a test after the invariant it holds, not after the function it calls, and
+say what breaks if it fails. `TestAcquireAuth` tells a reader nothing when it goes
+red; `TestAnOversizedConcurrencyCapIsStillACap` tells them a configured limit
+stopped limiting. That is the convention in this repository — about 500 of its
+tests are named that way — and it is why a failing run is readable without
+opening the test.
+
 ```go
-func TestTokenManager_ValidateToken(t *testing.T) {
-    tests := []struct {
-        name    string
-        token   string
-        want    bool
-        wantErr bool
-    }{
-        {
-            name:    "valid token",
-            token:   "valid.jwt.token",
-            want:    true,
-            wantErr: false,
-        },
-        // ... more test cases
-    }
-    
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // Test implementation
-        })
+// A concurrency cap larger than an int32 must still be a cap. `int32(n)` wrapped
+// it to a negative number, and AcquireAuth reads <= 0 as "limit disabled", so the
+// largest values an operator could write in the config were the ones that removed
+// the limit entirely (#189).
+func TestAnOversizedConcurrencyCapIsStillACap(t *testing.T) {
+    for _, configured := range []int{math.MaxInt32 + 1, math.MaxInt64} {
+        rl := NewRateLimiter(0, configured)
+        if rl.maxConcurrentAuths <= 0 {
+            t.Errorf("max_concurrent_auths=%d became %d, which AcquireAuth treats as no limit at all",
+                configured, rl.maxConcurrentAuths)
+        }
+        rl.Stop()
     }
 }
 ```

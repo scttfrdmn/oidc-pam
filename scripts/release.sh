@@ -62,8 +62,6 @@ if ! grep -q 'badge/Version-' README.md; then
   echo "error: could not find version badge in README.md" >&2
   exit 1
 fi
-perl -0pi -e "s{badge/Version-[^-]*(?:-[^-]*)*?-blue}{badge/Version-${VER}-blue}g" README.md
-# Simpler, robust replacement of just the version token between 'Version-' and '-blue':
 perl -0pi -e "s{(badge/Version-)([^)]*?)(-blue)}{\${1}${VER}\${3}}g" README.md
 
 # --- stamp the download snippet's VERSION ------------------------------------
@@ -79,6 +77,25 @@ if ! grep -qE '^VERSION=v[0-9]' README.md; then
   exit 1
 fi
 perl -0pi -e "s{^VERSION=v[0-9][^\n]*}{VERSION=v${VER}}mg" README.md
+
+# --- stamp the two prose version strings -------------------------------------
+# The roadmap heading ("Delivered (through vX.Y.Z)") and the status line
+# ("Current Status: Pre-1.0 (vX.Y.Z)") are where a reader looks to judge how
+# current the document is, and nothing stamped either: both still said v0.4.0
+# two releases later, a few screens below a badge that said 0.5.0. A README that
+# contradicts itself about its own version teaches readers to discount all of it,
+# including the parts that matter — the OpenSSH 7.7 requirement and the warnings
+# about which PAM stacks this must never go into (#147).
+if ! grep -q '^### Delivered (through v' README.md; then
+  echo "error: could not find README's '### Delivered (through vX.Y.Z)' heading" >&2
+  exit 1
+fi
+if ! grep -q '^\*\*Current Status\*\*: Pre-1.0 (v' README.md; then
+  echo "error: could not find README's '**Current Status**: Pre-1.0 (vX.Y.Z)' line" >&2
+  exit 1
+fi
+perl -0pi -e "s{^### Delivered \(through v[^)]*\)}{### Delivered (through v${VER})}mg" README.md
+perl -0pi -e "s{^\*\*Current Status\*\*: Pre-1\.0 \(v[^)]*\)}{**Current Status**: Pre-1.0 (v${VER})}mg" README.md
 
 # --- roll CHANGELOG: insert a new version section below [Unreleased] ---------
 # Turn:
