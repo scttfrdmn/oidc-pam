@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -163,6 +164,67 @@ func TestShippedUnitDoesNotAdvertiseAReloadTheBrokerCannotDo(t *testing.T) {
 	}
 }
 
+// The broker is a long-lived root process on a host whose logins all depend on it,
+// and it has no ceiling of its own. Without MemoryMax, a broker allocating without
+// bound is the *host's* problem: the kernel's OOM killer picks a victim across every
+// cgroup, and on a login host the thing it kills may be the reason anyone is logged
+// in. With it, the same runaway is one service being restarted (#223).
+//
+// The value is not asserted — that is tuning, and an operator may have measured a
+// need. What is asserted is that a ceiling exists and is finite, and that MemoryHigh
+// sits below MemoryMax so reclaim is tried before anything is killed.
+func TestShippedUnitPutsACeilingOnTheBrokersMemory(t *testing.T) {
+	settings := shippedUnitSettings(t)
+
+	max, ok := parseMemoryBytes(settings["MemoryMax"])
+	if !ok {
+		t.Fatalf("MemoryMax=%q: the shipped unit must put a finite ceiling on the broker's "+
+			"memory, or a runaway broker takes the whole host's OOM killer with it (#223)",
+			settings["MemoryMax"])
+	}
+
+	high, ok := parseMemoryBytes(settings["MemoryHigh"])
+	if !ok {
+		t.Errorf("MemoryHigh=%q: without it the first thing that happens at the ceiling is a "+
+			"kill, with no reclaim attempted and nothing in the journal leading up to it",
+			settings["MemoryHigh"])
+	} else if high >= max {
+		t.Errorf("MemoryHigh=%q is not below MemoryMax=%q, so the throttle never engages "+
+			"before the kill and serves no purpose", settings["MemoryHigh"], settings["MemoryMax"])
+	}
+}
+
+// parseMemoryBytes reads a systemd memory value. Reports false for the values that
+// mean "no limit" — "infinity", a bare percentage (which is relative to physical
+// memory and so is not a ceiling this test can compare), and anything unparseable.
+func parseMemoryBytes(value string) (int64, bool) {
+	if value == "" || value == "infinity" || strings.HasSuffix(value, "%") {
+		return 0, false
+	}
+
+	multipliers := []struct {
+		suffix string
+		scale  int64
+	}{
+		{"K", 1 << 10}, {"M", 1 << 20}, {"G", 1 << 30}, {"T", 1 << 40},
+	}
+	digits, scale := value, int64(1)
+	for _, m := range multipliers {
+		// systemd accepts K/M/G/T and the KB/MB/… spellings, all base 1024.
+		for _, suffix := range []string{m.suffix, m.suffix + "B"} {
+			if strings.HasSuffix(value, suffix) {
+				digits, scale = strings.TrimSuffix(value, suffix), m.scale
+			}
+		}
+	}
+
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n * scale, true
+}
+
 // The unit in DEPLOYMENT.md must not drift from the one this repo installs.
 //
 // An operator who follows the deployment guide types that unit in by hand rather
@@ -199,6 +261,8 @@ func TestTheDocumentedUnitAgreesWithTheShippedOne(t *testing.T) {
 		"CapabilityBoundingSet", // #202: CAP_CHOWN or every provisioning fails
 		"ProtectSystem",         // the hardening that must not quietly come off
 		"NoNewPrivileges",
+		"MemoryMax",  // #223: a runaway broker must not be the host's OOM problem
+		"MemoryHigh", //
 	} {
 		if documented[setting] != shipped[setting] {
 			t.Errorf("DEPLOYMENT.md has %s=%q where the shipped unit has %q. An operator who "+

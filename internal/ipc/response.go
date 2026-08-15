@@ -33,6 +33,24 @@ import (
 // module's buffer.
 const maxResponseSize = 16384
 
+// maxResponseWire is the largest newline-terminated message the module can actually
+// read out of that buffer, which is one byte less than the buffer itself.
+//
+// receive_auth_response_within reserves the final byte for the NUL it writes
+// (`const size_t cap = response_size - 1`, cgo_bridge_linux.c), loops while
+// `total < cap`, and then refuses a full buffer with no newline in it as "the
+// beginning of a response, not a response". So the newline has to arrive within the
+// first maxResponseSize-1 bytes, and a message of exactly maxResponseSize bytes is
+// one byte too long however the broker feels about it.
+//
+// Bounding the wire message at maxResponseSize instead was the off-by-one in #223:
+// a response at exactly the limit passed fitsModuleBuffer, was sent whole, and came
+// back RECV_RESPONSE_TOO_LARGE from the module — the #162 failure reproduced at the
+// one size the cap was supposed to make safe. It is the boundary and nothing else,
+// which is why it survived: every response anyone had looked at was kilobytes clear
+// of it, and the only way to hit it is to land on it exactly.
+const maxResponseWire = maxResponseSize - 1
+
 // setDeviceInstructions renders the device-flow instructions into response,
 // dropping the QR art if the response would not otherwise fit the PAM module's
 // buffer.
@@ -66,13 +84,13 @@ func fitsModuleBuffer(response *Response) bool {
 		// writeResponse will report the encoding failure.
 		return false
 	}
-	return len(payload)+1 <= maxResponseSize
+	return len(payload)+1 <= maxResponseWire
 }
 
 // writeResponse writes one newline-delimited JSON response.
 //
 // Responses to the PAM module (*Response) are additionally bounded by
-// maxResponseSize: rather than a truncated prefix the module cannot parse, an
+// maxResponseWire: rather than a truncated prefix the module cannot parse, an
 // oversized response is replaced by a small RESPONSE_TOO_LARGE failure, which the
 // module maps to a distinct PAM result and which says in the broker log how big
 // the response was.
@@ -83,10 +101,10 @@ func (s *Server) writeResponse(conn net.Conn, response any) {
 		return
 	}
 
-	if _, forModule := response.(*Response); forModule && len(payload)+1 > maxResponseSize {
+	if _, forModule := response.(*Response); forModule && len(payload)+1 > maxResponseWire {
 		log.Error().
 			Int("response_size", len(payload)+1).
-			Int("max_response_size", maxResponseSize).
+			Int("max_response_size", maxResponseWire).
 			Msg("Response does not fit the PAM module's buffer; sending RESPONSE_TOO_LARGE instead of a truncated response")
 
 		payload, err = json.Marshal(&Response{

@@ -20,7 +20,15 @@ import (
 // two, the broker would happily send responses that arrive truncated — which is
 // exactly #162, and it produced nothing in syslog but "Failed to parse broker
 // response" on every login.
-func TestResponseSizeMatchesTheModulesBuffer(t *testing.T) {
+// moduleBufferSize reads MAX_RESPONSE_SIZE out of the module's header.
+//
+// Deliberately not cgo: this has to run on a developer's Mac, where the module
+// itself cannot be compiled (#141). Reading the header is also the point — a test
+// that used the Go constant for both sides would agree with itself no matter what
+// either value was.
+func moduleBufferSize(t *testing.T) int {
+	t.Helper()
+
 	const header = "../../cmd/pam-module/cgo_bridge.h"
 
 	data, err := os.ReadFile(header)
@@ -28,20 +36,23 @@ func TestResponseSizeMatchesTheModulesBuffer(t *testing.T) {
 		t.Fatalf("read %s: %v", header, err)
 	}
 
-	// Deliberately not cgo: this has to run on a developer's Mac, where the module
-	// itself cannot be compiled (#141).
 	match := regexp.MustCompile(`(?m)^#define\s+MAX_RESPONSE_SIZE\s+(\d+)`).FindSubmatch(data)
 	if match == nil {
 		t.Fatalf("no MAX_RESPONSE_SIZE definition in %s; if it was renamed, update this test — "+
 			"the two sizes must stay equal", header)
 	}
 
-	moduleBuffer, err := strconv.Atoi(string(match[1]))
+	size, err := strconv.Atoi(string(match[1]))
 	if err != nil {
 		t.Fatalf("MAX_RESPONSE_SIZE is not a number: %v", err)
 	}
+	return size
+}
 
-	if moduleBuffer != maxResponseSize {
+func TestResponseSizeMatchesTheModulesBuffer(t *testing.T) {
+	const header = "../../cmd/pam-module/cgo_bridge.h"
+
+	if moduleBuffer := moduleBufferSize(t); moduleBuffer != maxResponseSize {
 		t.Errorf("MAX_RESPONSE_SIZE in %s is %d but maxResponseSize is %d; the broker must not send "+
 			"more than the module can read", header, moduleBuffer, maxResponseSize)
 	}
@@ -224,6 +235,88 @@ func TestWriteResponseReplacesAnOversizedResponse(t *testing.T) {
 	}
 	if got.Success {
 		t.Error("an oversized response was replaced by a success")
+	}
+	if got.ErrorCode != "RESPONSE_TOO_LARGE" {
+		t.Errorf("error_code = %q, want RESPONSE_TOO_LARGE", got.ErrorCode)
+	}
+}
+
+// responseOfExactWireSize returns a response whose marshalled form plus its
+// terminating newline is exactly want bytes, padding Instructions to get there.
+func responseOfExactWireSize(t *testing.T, want int) *Response {
+	t.Helper()
+
+	response := &Response{Success: true, SessionID: "sess-1"}
+	payload, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// One ASCII byte of Instructions costs one byte of JSON; the field itself costs
+	// the key, the quotes and the comma, which is why the padding is measured rather
+	// than computed.
+	response.Instructions = ""
+	for pad := want - (len(payload) + 1); pad > 0; pad-- {
+		response.Instructions = strings.Repeat("Q", pad)
+		payload, err = json.Marshal(response)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if len(payload)+1 == want {
+			return response
+		}
+	}
+	t.Fatalf("could not build a response of exactly %d wire bytes", want)
+	return nil
+}
+
+// The boundary itself, in both directions (#223).
+//
+// The module reserves the last byte of its buffer for the NUL it writes, so it reads
+// at most MAX_RESPONSE_SIZE-1 bytes and needs the newline inside them. A response of
+// exactly MAX_RESPONSE_SIZE bytes therefore arrives as a full buffer with no end of
+// message in it, which the module refuses — the #162 failure, at the one size the cap
+// was meant to make safe. The broker used to send it: this pins the last size it may.
+func TestTheLargestResponseTheBrokerSendsIsOneTheModuleCanRead(t *testing.T) {
+	// Derived from the header, not from maxResponseWire: the whole bug was the Go
+	// side's idea of the limit disagreeing with what the C side can read, and a test
+	// that asked the Go constant about itself would have passed either way.
+	readable := moduleBufferSize(t) - 1 // the module reserves the last byte for its NUL
+
+	atLimit := responseOfExactWireSize(t, readable)
+	if !fitsModuleBuffer(atLimit) {
+		t.Errorf("a %d-byte response is rejected, but that is exactly what the module can read: "+
+			"the broker is degrading responses it did not need to", readable)
+	}
+
+	// One byte more is the first size the module cannot read out of its buffer, and
+	// is also the size the broker sent before #223.
+	overLimit := responseOfExactWireSize(t, readable+1)
+	if fitsModuleBuffer(overLimit) {
+		t.Errorf("a %d-byte response is treated as fitting, but the module reads at most %d bytes "+
+			"of its %d-byte buffer and would find no newline in them",
+			readable+1, readable, moduleBufferSize(t))
+	}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	go func() {
+		defer func() { _ = server.Close() }()
+		(&Server{}).writeResponse(server, overLimit)
+	}()
+
+	payload, err := readOneResponse(client)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	// +1 for the newline readOneResponse stripped: what went on the wire.
+	if len(payload)+1 > readable {
+		t.Fatalf("writeResponse put %d bytes on the wire, over the %d the module can read",
+			len(payload)+1, readable)
+	}
+	var got Response
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("the module would fail to parse what was sent: %v", err)
 	}
 	if got.ErrorCode != "RESPONSE_TOO_LARGE" {
 		t.Errorf("error_code = %q, want RESPONSE_TOO_LARGE", got.ErrorCode)
