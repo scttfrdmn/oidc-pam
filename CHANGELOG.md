@@ -7,7 +7,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release makes the broker refuse what it cannot honour. Most of what follows is
+one shape of defect: a control that was configured, reported as active, and not
+applied — a policy key nothing enforced, an audit log with nowhere to go, a response
+field read as a grant because nothing checked its type. The fix in each case is to
+fail closed and say so, which means **two configurations that started a v0.5.0 broker
+will not start a v0.5.1 one**. Both are listed first, deliberately.
+
+### Changed
+
+- **BREAKING: the broker refuses to start when `audit.enabled` is true and
+  `audit.outputs` is empty (#210).** `audit.enabled` defaults to true and `audit.outputs`
+  has no default at all, so a configuration that omitted the audit block — or wrote
+  `audit: {enabled: true}` and nothing else — produced an audit logger with an empty
+  output list. Every event was accepted, including the critical ones written
+  synchronously, and `writeEvent` then iterated a nil slice: nothing was written and
+  no error came back. The two counters an operator alerts on measure events the
+  logger declined to queue and writes that returned an error, so both sat at zero
+  forever, `oidc_audit_events_dropped_total` read flat, and `oidc-admin status`
+  reported a healthy broker. Six months later "there are no audit records" is
+  indistinguishable from "nothing happened", which is the one distinction an audit
+  trail exists to make.
+
+  `ValidateAuditConfig` now reports an empty `audit.outputs` as a problem. If you
+  have a hand-written `broker.yaml` that relies on the default, add an output or set
+  `audit.enabled: false` before upgrading — the broker will tell you which at
+  startup, but it will not start.
+
+- **BREAKING: the broker refuses a configuration whose access controls it does not
+  implement (#212).** Ten policy keys, risk actions other than `DENY` and `LOG`, and
+  risk conditions naming signals that do not exist were all accepted and then
+  ignored. Refusing is the safe answer because the alternative is what shipped: an
+  operator's stated policy and the broker's behaviour differing, with nothing
+  anywhere to say so. The shipped templates were cleaned in the same release (see
+  **Removed**), so this affects hand-written configurations and any file derived from
+  a pre-0.5.1 template.
+
 ### Security
+
+- **An unauthenticated remote client could deny logins to a chosen user and to the
+  whole host (#163).** Pending device-flow sessions were accounted for after the
+  provider round trip and against a single host-wide counter, so opening logins and
+  never completing them filled the pool. Admission is now decided before the provider
+  is called, and counted two ways — per `(user, source IP)` and host-wide — so
+  abandoned flows cost the client that opened them rather than everyone. A refused
+  login is audited with both counts, because "one address holding its budget" and
+  "the host's pool is full" are different incidents. An abandoned flow no longer
+  keeps the account out: pending sessions expire on their own deadline, and a new
+  login displaces the client's own stale one.
+- **A non-boolean `requires_device` in a broker response was read as a grant
+  (#201).** `classify_response` in the C bridge used `json_object_get_boolean` with
+  no type check, so any JSON type that coerces truthy — a string, a number — decided
+  the field. The module now refuses a response whose fields are the wrong JSON type
+  rather than interpreting it, which is the same class as the bypass that started
+  this campaign.
+- **Policy, sessions and refusals now fail closed (#213, #215, #217, #218).** Policy
+  evaluation is provider-scoped, a session that cannot be evaluated is not active,
+  and every refusal is audited — including the ones a client is deliberately told
+  nothing about, so the audit trail is the only place the reason exists.
+- **The device code no longer reaches the logs, and it is no longer stored in a field
+  documented as a safe hash (#219).** A pending session carried the raw device code
+  in `TokenFingerprint`, the live credential for the flow it was waiting on, in a
+  field the broker copies and records as a hash everywhere else. Pending sessions now
+  leave it unset; `pollDeviceAuthorization` fills it in from the granted token.
+- **Every JSON body the broker reads from a provider is bounded at 64 KiB (#223).**
+  Discovery documents, token responses and device-authorization responses were
+  decoded straight from the HTTP body with no limit, so anything able to answer as
+  the provider — a misconfigured `issuer`, a DNS or TLS compromise — could make a
+  root-run daemon allocate without bound. The shipped systemd unit now also sets
+  `MemoryHigh=384M` and `MemoryMax=512M`, so a runaway broker is a service restart
+  rather than the host's OOM killer choosing a victim across every cgroup.
+- **A stored token's ciphertext is bound to the record it belongs to (#232, the AAD
+  half).** AES-GCM was used without additional authenticated data, so a ciphertext
+  moved from one
+  record into another decrypted cleanly and its tag validated. An attacker with write
+  access to the token store but not the key could put user A's refresh token in user
+  B's record and have every downstream decision — policy, audit attribution, key
+  provisioning — made for the wrong identity. Token ownership is now also checked on
+  the path that hands tokens out, rather than only where they are stored. The
+  remaining half of #232 — a tamper-evident hash chain over the audit log — stays
+  open: SECURITY.md now says plainly that the
+  trail is not tamper-evident, and points at the `syslog` and `http` outputs as the
+  off-host anchor available today.
+- **The broker's socket can no longer be replaced by an impostor (#200).** The
+  socket's `0660 root` mode protected the file, not the path: write permission on the
+  *directory* is enough to `unlink(2)` the socket and `bind(2)` a replacement. The
+  real broker kept serving its now-unlinked inode, stayed green in `systemctl
+  status`, and logged nothing, while every PAM login reached the impostor — which can
+  answer `{"success":true}` and, with the shipped `auth sufficient pam_oidc.so`,
+  short-circuit the stack. That is authentication as any user, root included, from
+  whatever account owns the directory, and the installers created exactly that
+  situation (`mkdir 0755` then `chown -R oidc-auth:oidc-auth`, for an account no
+  shipped component runs as). The broker now refuses to bind under a directory it
+  does not trust, and `RuntimeDirectory=`/`RuntimeDirectoryMode=0750` in the unit
+  reassert root ownership on every start, healing an already-misconfigured host.
+- **`authorized_keys` writes no longer follow anything the target account can
+  redirect (#204, #205, #206, #225, #226, #229).** A symlinked `.ssh` was followed:
+  `os.Stat` was used to ask whether the directory existed, which follows links, and
+  two other entry points did not look at all. `O_NOFOLLOW` on `authorized_keys`
+  constrains only the final component, so nothing downstream caught it. All eight
+  entry points now go through one gate that `Lstat`s the directory, refuses a symlink
+  or a non-directory, checks ownership, and treats absence as nothing to do. The
+  residual name-then-use race needs an `openat(2)`-relative redesign and is
+  deliberately not attempted here.
+- **The broker can hand a key file to its owner without a path an account can
+  swap (#202, #203).** `CapabilityBoundingSet` caps the effective set even for
+  `User=root`, so with `CAP_CHOWN` absent every `chown(2)` to another uid returned
+  EPERM, every provisioning failed, and on a host wired with `configs/pam/ssh` every
+  login was denied. CI could not see it: the containerized e2e harness runs with
+  Docker's default capability set, which includes `CAP_CHOWN`. The capability is now
+  granted *and* the handover goes through `fchown(2)` on an already-open descriptor
+  rather than `chown(2)` on a path the account can replace with a symlink — the two
+  changes landed together for that reason.
+- **The module's 30-second read budget was per-poll, not total (#196, #197).**
+  `receive_auth_response` passed the whole `RESPONSE_READ_TIMEOUT_MS` to every
+  `poll()` in its read loop, so a peer that produced one byte just inside each
+  window reset the clock: the real bound was one window per byte of the buffer —
+  16383 × 30 s, about 5.7 days — with a login held open and an `sshd` pre-auth
+  child pinned for all of it. Bounding the byte count (#162) bounded how many
+  windows there were, not how long they lasted. The deadline is now taken once, on
+  `CLOCK_MONOTONIC`, and each `poll()` gets only what is left of it. The bound that
+  matters is `sshd`'s `LoginGraceTime`, 120 s by default: past that `sshd` kills the
+  pre-auth child itself and the user gets a dropped connection with nothing in
+  `auth.log` naming the broker, because the module never got to decide anything.
+
+  `classify_response` and `map_error_code` are where a broker reply becomes a PAM
+  result, and neither had a test of any kind — both were `static`, absent from
+  `cgo_bridge.h`, and reachable from the Go tests only through a fake broker
+  resembling an honest one. `classify_response` rewritten to return `PAM_SUCCESS`
+  unconditionally was green in every suite in this repository, which is how both
+  #168 and #201 got in. They are reachable now.
+- **The broker could stop answering while looking healthy (#216).** The accept loop
+  returned on any error that was not a timeout — `EMFILE` from a full descriptor
+  table, `ECONNABORTED` from a peer that left between the SYN and the accept,
+  `EINTR` — leaving a process systemd saw as healthy that never accepted a
+  connection again, with `Restart=always` never firing. It retries with a capped
+  backoff now. The peer-credential lookup also reached the descriptor through
+  `(*net.UnixConn).File()`, whose `Fd()` clears `O_NONBLOCK` on the shared open file
+  description and so voids every deadline on the connection, so a client that
+  connected and sent nothing held its handler goroutine for the life of the process.
+- **The installers could leave a host nobody can log in to, or a secret anyone can
+  read (#207, #208, #209, #220).** They wrote the module to a `/lib/security` that
+  exists on neither Debian/Ubuntu nor RHEL-family layouts, so the install aborted
+  after the binaries were in place — and once an operator created that directory to
+  get past it, the module sat where PAM never looks. That is not a no-op: with the
+  stack this project ships, the unresolvable `sufficient` line falls through to
+  `auth requisite pam_deny.so` and every login is refused. The installers now locate
+  the directory by asking dpkg/rpm for `pam_permit.so` and probing the known
+  layouts, before anything is written, and refuse to install if they cannot find it
+  (`PAM_MODULE_DIR` overrides).
+
+  PAM stack editing was equally blunt at both ends. Insertion ahead of
+  `pam_faillock`'s preauth entry stops failure counting, and ahead of `pam_nologin`,
+  `pam_access` or `pam_securetty` makes those gates unreachable, because a
+  `sufficient` module that succeeds ends the auth phase there; insertion now walks
+  the auth phase, allows a known prologue in front, goes before the first module that
+  authenticates or terminates, and refuses outright on a stack it does not
+  recognise. Uninstallation removed one line and left `pam_deny.so` as the entire
+  auth phase — every SSH authentication refused, for every user, permanently, while
+  printing "Uninstallation completed successfully!" — and the same edit applied to
+  `su` and `sudo` would have removed the way to repair it. It now strips OIDC from
+  every PAM file that references it and checks the resulting auth phase still has
+  something that can authenticate. `scripts/install.sh` no longer edits PAM at all
+  unless `--configure-pam` is passed, matching `install-release.sh`.
+- **An orphaned key could be left behind with nothing able to find it again
+  (#228).** `reconcileIssuedKeys` deleted every stored key record in one loop and
+  removed the `authorized_keys` entries in a second. The store is the only record
+  naming which accounts hold broker-issued keys, so a failure in the second loop —
+  which the code anticipates, audits as `ORPHANED_KEYS_NOT_REMOVED`, and continues
+  past — left the entry in place with nothing that could ever find it again. The next
+  startup reconciles an empty store; `sweepExpiredAuthorizedKeys` only reaches
+  accounts with a session expiring now, and an orphan belongs to no session at all.
+  A user who never logs in again keeps a working credential indefinitely: #171 by
+  another route. The entry now goes first, and the record is deleted per account only
+  once `RemoveOIDCKeys` has returned nil for it — the reverse order can leave a live
+  credential nobody can find, this order can at worst leave a record of a key already
+  removed, which the next startup retries harmlessly.
+- **Rate limiting now runs before validation, and counts the requests that never
+  reach a handler (#189).** An oversized `max_concurrent_auths` also used to wrap
+  through an `int32` narrowing to a negative number, which `AcquireAuth` reads as "no
+  limit" — so the largest values an operator could write were the ones that turned
+  the cap off. It saturates now. Three socket tests that had never executed in CI
+  were fixed rather than left skipped.
+- **The release workflow is gated on CI and its actions are pinned (#214, #221).**
 - **`pam_oidc.so` no longer carries the Go runtime into `sshd`, and is compiled
   with hardening flags (#198).** The module is loaded into every authenticating
   `sshd` pre-auth child, as root, and holds a 16 KB broker response on the stack.
@@ -66,6 +248,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the download; nothing checked the payload that actually reaches PAM.
 
 ### Fixed
+- **A second login took away the key the first session was using (#227).** An install
+  rewrote `authorized_keys` without any of the broker-issued entries it found there,
+  so an account could only ever hold one — the ordinary case for anyone with more
+  than one machine. Log in from the laptop, then from a jump host, and the second
+  login revokes the first session's key: the open connection survives because sshd
+  authenticated it before the key went, but the next connection is refused, and so is
+  the reconnect a `ControlMaster` re-dial or a resumed laptop makes. Meanwhile the
+  broker reports that session as live and unexpired, and nothing in the file, the log
+  or the audit trail says the key was taken away. An install now keeps the entries
+  belonging to the account's other sessions, and still drops the entry it is
+  replacing and any broker entry whose expiry has passed.
+- **The broker no longer issues a key the local sshd will throw away (#199).** It
+  wrote `expiry-time=` into every entry it installed and knew nothing about the sshd
+  that has to honour it. The option arrives in OpenSSH 7.7 — verified against real
+  sshd builds, not 8.2 as was believed — and an sshd that does not recognise an
+  `authorized_keys` option does not ignore the option, it refuses the whole entry. So
+  on a 7.4p1 host (Amazon Linux 2, RHEL/CentOS 7) the broker authenticated the user,
+  wrote a file that looks exactly right, reported success, and sshd answered
+  `Permission denied (publickey)` for every login using that key, with nothing on
+  either side naming the cause. The broker now probes `sshd -V` — a fixed list of
+  absolute paths, `LC_ALL=C`, bounded context plus `WaitDelay`, output capped at
+  8 KiB — and refuses to install rather than issuing a key that cannot work.
+  Detect-and-omit was rejected: dropping the option puts the key's lifetime back
+  inside the broker's memory, which is what #171 was filed about.
+- **`systemctl reload` and the documented logrotate stanza killed the broker
+  (#224).** The unit advertised `ExecReload=/bin/kill -HUP $MAINPID` while the broker
+  installed no SIGHUP handler, and Go's default disposition for SIGHUP is to
+  terminate — so a reload after a config edit, or the postrotate stanza this repo's
+  own guide recommended, produced a ten-second authentication outage for the whole
+  host with nothing in the journal but a clean exit and a restart. The unit no longer
+  advertises a reload, so systemd refuses the job and says so; the broker ignores a
+  stray SIGHUP; and the documented stanza uses `copytruncate`. `DEPLOYMENT.md`'s unit
+  had also drifted from the shipped one — it carried neither `CAP_CHOWN` nor
+  `RuntimeDirectory=`, so a host built by following the guide had #202 and #211 with
+  both already fixed in `configs/systemd/`. The two are now pinned to each other by a
+  test.
+- **The broker could send a response one byte larger than the module can read
+  (#223).** `MAX_RESPONSE_SIZE` is the module's buffer, but
+  `receive_auth_response_within` reserves the final byte for the NUL it writes and
+  refuses a full buffer with no newline in it, so the largest readable
+  newline-terminated message is 16383 bytes, not 16384. The broker's cap was the
+  buffer size, so a 16384-byte response was sent and could not be read. The
+  boundary was unreachable in practice — the worst case the broker's own validation
+  permits is 16343 bytes — but the size check is the thing that exists to be exactly
+  right. The test that pins it derives the expected value from `MAX_RESPONSE_SIZE` in
+  the C header rather than from the Go constant, so it cannot pass against the
+  unfixed code.
 - **One script now builds `pam_oidc.so`, and it cannot finish without inspecting
   what it built (#222).** A module with no PAM entry points in it builds and exits
   0 — that is #140, and it shipped in every release before it was found — so
@@ -104,14 +333,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why: `--repo` alone is satisfied by any attestation this repository has ever
   produced.
 - SECURITY.md's supported-versions table still claimed 0.4.x.
+- **The contributor docs described a repository that does not exist (#147).**
+  `CODEOWNERS` assigned `/pkg/policy/`, deleted during the audit campaign, so its
+  rules matched nothing; `CONTRIBUTING.md` documented directories and commands that
+  are gone. Both now describe the tree as it is, and `CONTRIBUTING.md`'s reference to
+  a code of conduct resolves — there was no such file.
 
 ### Added
+- `CODE_OF_CONDUCT.md`: Contributor Covenant 2.1, with a real reporting path
+  (#147). `CONTRIBUTING.md` had linked to it since before it existed.
 - `docs/verifying-releases.md`: the exact `cosign verify-blob` and
   `gh attestation verify` commands, including the `--certificate-identity` and
   `--certificate-oidc-issuer` values for this repository, what each check proves
   (and what it does not), offline verification, and the pitfalls of matching the
   signer identity with a regexp. Every release's notes now carry the same
   commands with the tag substituted in.
+
+### Removed
+- **The policy settings nothing enforced are gone from the shipped templates
+  (#212).** Between them the templates set nine policy keys no code reads, two risk
+  actions the broker does not perform, and two risk conditions naming flags that have
+  never existed. An operator writing `require_additional_mfa: true` or
+  `no_data_export: true` in a production tier got a broker that loaded the file,
+  logged nothing, and admitted the login anyway. The keys are removed rather than
+  commented in place, because a commented example here would be misleading; where one
+  is kept it says why and what to use instead, and the per-IdP templates now point at
+  where each requirement can really be enforced — a Keycloak authentication flow, an
+  Okta application sign-on policy, Entra Conditional Access. The enterprise
+  template's time and geographic restrictions become commented examples: a
+  restriction must name the providers it applies to, and a country restriction needs a
+  GeoIP database whose path a shipped template cannot name, since a missing database
+  is fatal at startup. `CONFIGURATION-GUIDE.md` gains a table of what a policy can
+  actually set, the list of keys that will now stop the broker on upgrade, and the
+  risk-signal table — including the note that there is deliberately no device-trust
+  signal, because device trust comes from the token's `amr` claim and policy is
+  evaluated before any token exists.
 
 ## [0.5.0] - 2026-08-14
 
