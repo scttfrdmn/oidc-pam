@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-15
+
 This release makes the broker refuse what it cannot honour. Most of what follows is
 one shape of defect: a control that was configured, reported as active, and not
 applied — a policy key nothing enforced, an audit log with nowhere to go, a response

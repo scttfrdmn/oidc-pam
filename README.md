@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
-[![Version](https://img.shields.io/badge/Version-0.5.0-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
+[![Version](https://img.shields.io/badge/Version-0.5.1-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
 A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH login — and any other interactive PAM service you wire it into — with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
 
@@ -69,7 +69,7 @@ bundled installer. The installer places the binaries, an example config, and the
 systemd unit; it does **not** modify PAM unless you pass `--configure-pam`.
 
 ```bash
-VERSION=v0.5.0
+VERSION=v0.5.1
 ARCH=amd64   # or arm64
 
 curl -fsSLO https://github.com/scttfrdmn/oidc-pam/releases/download/${VERSION}/oidc-pam-${VERSION}-linux-${ARCH}.tar.gz
@@ -246,7 +246,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📋 Roadmap
 
-### Delivered (through v0.5.0)
+### Delivered (through v0.5.1)
 - [x] OIDC device flow with nonce replay protection
 - [x] PAM module + helper (CGO) and authentication broker
 - [x] SSH key lifecycle management with symlink-safe `authorized_keys` writes
@@ -324,7 +324,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📈 Status
 
-**Current Status**: Pre-1.0 (v0.5.0) - Under active development
+**Current Status**: Pre-1.0 (v0.5.1) - Under active development
 
 Core functionality is implemented and the codebase has undergone a full security
 audit (all findings remediated). It is not yet recommended for unattended
