@@ -516,6 +516,14 @@ ExecStart=/usr/local/bin/oidc-auth-broker --config /etc/oidc-auth/broker.yaml
 Restart=always
 RestartSec=10
 
+# A ceiling on the broker's memory, so that a broker allocating without bound is a
+# broker restart rather than the OOM killer choosing a victim across the whole host.
+# MemoryHigh throttles and forces reclaim first; MemoryMax is the hard stop, and
+# Restart=always brings the broker back. Both are far above the few tens of MiB the
+# broker uses, so reaching either means something is wrong (#223).
+MemoryHigh=384M
+MemoryMax=512M
+
 # Security hardening
 NoNewPrivileges=true
 PrivateTmp=true

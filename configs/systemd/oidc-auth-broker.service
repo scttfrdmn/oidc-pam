@@ -34,6 +34,25 @@ TimeoutStopSec=30s
 Restart=always
 RestartSec=10s
 
+# A ceiling on the broker's memory, so that a broker allocating without bound is a
+# broker restart rather than the kernel's OOM killer choosing a victim across the
+# whole host — which on a login host is a worse outage than the one it resolves, and
+# is not a choice this service gets to make for everything else running there (#223).
+#
+# MemoryHigh comes first on purpose: it throttles the cgroup and pushes reclaim at
+# 384M, so a broker growing slowly is slowed and logged before anything is killed.
+# MemoryMax at 512M is the hard stop, and Restart=always brings the broker back
+# RestartSec later. Both are far above what the broker uses — a few tens of MiB with
+# the sessions of a busy host in it — so reaching either means something is wrong,
+# not that the host is busy. Raise them together if you have measured a need.
+#
+# Every JSON body the broker reads from a provider is separately bounded at 64 KiB
+# (maxProviderResponseBytes, pkg/auth/device_flow.go), which is what closes the path
+# that motivated this: an issuer that can answer with an unbounded body. This is the
+# backstop for everything nobody has bounded yet.
+MemoryHigh=384M
+MemoryMax=512M
+
 # Security settings
 NoNewPrivileges=true
 PrivateTmp=true
