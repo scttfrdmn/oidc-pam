@@ -75,6 +75,23 @@ jobs:
             fail=1
           fi
 
+          # The roadmap heading and the status line are how a reader judges whether
+          # the README is describing the release they downloaded. Both drifted to
+          # v0.4.0 while the badge said 0.5.0, so the document disagreed with itself
+          # a few screens apart (#147) — which is how readers learn to discount the
+          # parts that matter, like the OpenSSH 7.7 requirement.
+          roadmap=$(grep -oE '^### Delivered \(through v[^)]+\)' README.md | head -1 | sed -E 's/.*\(through v(.*)\)/\1/')
+          if [ "$roadmap" != "$VERSION" ]; then
+            echo "::error::README roadmap says 'Delivered (through v$roadmap)' but the tag is '$VERSION'. Use scripts/release.sh to cut releases."
+            fail=1
+          fi
+
+          status=$(grep -oE '^\*\*Current Status\*\*: Pre-1\.0 \(v[^)]+\)' README.md | head -1 | sed -E 's/.*\(v(.*)\)/\1/')
+          if [ "$status" != "$VERSION" ]; then
+            echo "::error::README status line says 'Pre-1.0 (v$status)' but the tag is '$VERSION'. Use scripts/release.sh to cut releases."
+            fail=1
+          fi
+
           # CHANGELOG must have a section header for this version.
           if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [${VERSION}]' section. Use scripts/release.sh to cut releases."

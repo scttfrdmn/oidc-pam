@@ -11,9 +11,19 @@
 /cmd/pam-module/ @scttfrdmn
 /cmd/pam-helper/ @scttfrdmn
 
-# Authentication and authorization core
+# Authentication and authorization core. There is deliberately no /pkg/policy/
+# entry: that package was removed (#126) and its policy engine now lives in
+# /pkg/auth/. A rule for a path that does not exist matches nothing, so it looked
+# like coverage while providing none (#147).
 /pkg/auth/ @scttfrdmn
-/pkg/policy/ @scttfrdmn
+
+# The IPC trust boundary: every PAM login crosses it, and it is where the peer
+# credential check and request validation live.
+/internal/ipc/ @scttfrdmn
+
+# Loads the token encryption key and every client secret, and enforces the
+# configuration file's permissions.
+/pkg/config/ @scttfrdmn
 
 # SSH key management
 /pkg/ssh/ @scttfrdmn

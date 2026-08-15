@@ -246,7 +246,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📋 Roadmap
 
-### Delivered (through v0.4.0)
+### Delivered (through v0.5.0)
 - [x] OIDC device flow with nonce replay protection
 - [x] PAM module + helper (CGO) and authentication broker
 - [x] SSH key lifecycle management with symlink-safe `authorized_keys` writes
@@ -256,6 +256,9 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 - [x] Risk-based policy engine and comprehensive audit logging
 - [x] Prometheus metrics, multi-arch release artifacts (amd64/arm64)
 - [x] Security-audited: AES-256-GCM token encryption, hardened IPC trust boundary
+- [x] Home directories resolved from the account database through NSS, never derived from the login name
+- [x] Key lifetime enforced by sshd itself via `expiry-time=`, so it holds whether or not the broker is running
+- [x] End-to-end suite in CI: real sshd, real PAM stack, real broker, every case an actual SSH login
 
 ### Planned
 - [ ] High availability / multiple broker instances
@@ -321,7 +324,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📈 Status
 
-**Current Status**: Pre-1.0 (v0.4.0) - Under active development
+**Current Status**: Pre-1.0 (v0.5.0) - Under active development
 
 Core functionality is implemented and the codebase has undergone a full security
 audit (all findings remediated). It is not yet recommended for unattended
