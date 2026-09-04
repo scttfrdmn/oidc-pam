@@ -1,0 +1,32 @@
+# Findings Trivy reports that this repository has decided not to act on, with the
+# reason recorded here rather than dismissed in the GitHub UI where nobody
+# reviewing the code can see it.
+#
+# The bar for an entry is high: it is for a finding with no fix to apply, not for
+# one that is merely inconvenient. Anything with a `FixedVersion` gets the fix.
+#
+# This file is not found by default — only the plain `.trivyignore` name is. The
+# `trivy` job in .github/workflows/security.yml names it explicitly through the
+# action's `trivyignores` input, and a local scan needs
+# `--ignorefile .trivyignore.yaml`. The YAML form is worth that: it is the only one
+# that carries a `statement`, and a suppression without a reason is a suppression
+# nobody can review.
+
+vulnerabilities:
+  - id: GO-2026-5932
+    # "golang.org/x/crypto/openpgp is unmaintained, unsafe by design, and has
+    # known security issues." It is a module-wide advisory with no fixed version,
+    # so it will be reported against golang.org/x/crypto for as long as that
+    # module is a dependency — which is forever, since pkg/ssh needs
+    # golang.org/x/crypto/ssh.
+    #
+    # This repository does not import golang.org/x/crypto/openpgp, and nothing in
+    # it handles OpenPGP data at all. Verified rather than assumed:
+    #
+    #   $ go list -deps ./... | grep openpgp   # no output
+    #
+    # Without an entry here the alert is permanent and unclosable, which is the
+    # exact failure mode #258 was filed about.
+    statement: >-
+      x/crypto/openpgp is not imported (go list -deps ./... does not name it);
+      the advisory has no fixed version, so the alert would never close.

@@ -68,6 +68,22 @@ jobs:
           go-version: '1.25.13'
           cache: true
 
+      # This job deliberately does not install libpam0g-dev/libjson-c-dev, unlike the
+      # govulncheck job below, and that is what makes it scan cmd/pam-module at all.
+      #
+      # gosec loads packages through go/packages, which for a cgo package hands back
+      # the *generated* Go files rather than the sources. With the PAM headers present
+      # cgo succeeds, and gosec then reports against paths inside
+      # /root/.cache/go-build — findings that point at no file in this repository and
+      # cannot become a useful alert, while the 16 unsafe.Pointer sites in
+      # {auth,args,recv}_linux.go go unexamined. Without the headers cgo fails, the
+      # loader falls back to the real sources, and gosec analyses the code a reviewer
+      # can actually read. Measured both ways in a golang:1.25 container: with the
+      # headers, 6 findings at build-cache paths and the _linux.go files never opened;
+      # without them, 41 files checked including all six _linux.go files.
+      #
+      # So if this job is ever "fixed" by adding the dev packages, coverage of the PAM
+      # module silently disappears.
       - name: Run Gosec Security Scanner
         run: |
           # Install gosec v2.26.1 (Go 1.25 compatible)
@@ -225,3 +241,74 @@ jobs:
         uses: github/codeql-action/upload-sarif@60d8f0d1f1f8c8d07ef53bd027032705d414ec28 # v3
         with:
           sarif_file: semgrep-results.sarif
+
+  # Restored (#258). This job existed until 9b6c0ae removed every security
+  # workflow, and its ten alerts — one critical — stayed open on main for the eight
+  # months since, describing dependency versions this repository no longer has.
+  # Code scanning retires an alert only when the tool that raised it runs again and
+  # stops reporting it, so removing a scanner does not retire its findings: it
+  # makes them permanent.
+  #
+  # Two things about this job are load-bearing and must not be "tidied":
+  #
+  #   - The job id is `trivy` and this file is `.github/workflows/security.yml`.
+  #   - The upload step passes no `category:`.
+  #
+  # GitHub derives the analysis key an alert is filed under from the workflow path
+  # and the job id, and the ten orphans carry
+  # `.github/workflows/security.yml:trivy` with no category (checked, not assumed:
+  # `most_recent_instance.analysis_key` on the open alerts). Retirement is
+  # per-analysis-key, so renaming the job, moving the file, or adding a category
+  # produces a *new* key and leaves the orphans exactly as unclosable as they are
+  # now. #258 proposed giving this upload its own category; that would have
+  # defeated the point of the issue.
+  trivy:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # What this adds over the govulncheck job above: govulncheck reports a
+      # vulnerability only when it can reach the affected symbol from this code,
+      # which is the right signal for "fix this now" and the wrong one for "what is
+      # in our dependency tree". Trivy answers by version, so a dependency that is
+      # vulnerable but not currently called still shows up — the case that becomes a
+      # live one the moment somebody writes a new call.
+      #
+      # `scanners: vuln,secret` is Trivy's default for a filesystem scan, written out
+      # so that it is a decision rather than a default. `misconfig` is deliberately
+      # off: the only files it has to look at here are the three test-harness
+      # Dockerfiles, whose containers run as root on purpose (the broker under test
+      # needs root, and the images are built by `make e2e` and thrown away), so it
+      # reports six findings of which none is actionable. Turn it on if this project
+      # ever ships a container image.
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-results.sarif
+          # Trivy does not pick .trivyignore.yaml up on its own — verified: the same
+          # scan reports GO-2026-5932 without this input and drops it with the input.
+          # Only the plain `.trivyignore` name is a default.
+          trivyignores: .trivyignore.yaml
+
+      # No `continue-on-error:` here, unlike the gosec and semgrep jobs. Those two
+      # tolerate a non-zero exit because their scanners exit non-zero *on findings*;
+      # Trivy with `format: sarif` does not (it needs `exit-code:` for that), so the
+      # only way this step fails is that the scan itself did not run — a DB download
+      # that 429'd, say. That has to be a red job. A scan that quietly did not happen,
+      # and an upload that therefore quietly did not reconcile anything, is precisely
+      # how ten alerts came to sit on main for eight months.
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@b20883b0cd1f46c72ae0ba6d1090936928f9fa30 # v4.32.0
+        with:
+          sarif_file: trivy-results.sarif

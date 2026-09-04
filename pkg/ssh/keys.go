@@ -203,9 +203,12 @@ func (km *KeyManager) SaveKey(keyID string, key *SSHKey) error {
 		return fmt.Errorf("failed to save private key: %w", err)
 	}
 
-	// Save public key
+	// Save public key. 0600 rather than the customary 0644 for a public key: the
+	// only reader is LoadKey, in this same process, and the enclosing directory is
+	// already 0700. A public key is not a secret, but a mode wider than anything
+	// that reads it is a permission granted for no reason (gosec G306).
 	publicKeyPath := filepath.Join(userDir, "id_rsa.pub")
-	if err := os.WriteFile(publicKeyPath, key.PublicKey, 0644); err != nil {
+	if err := os.WriteFile(publicKeyPath, key.PublicKey, 0600); err != nil {
 		return fmt.Errorf("failed to save public key: %w", err)
 	}
 
@@ -235,23 +238,30 @@ func (km *KeyManager) LoadKey(keyID string) (*SSHKey, error) {
 	}
 	userDir := filepath.Join(km.baseDir, keyID)
 
+	// The three reads below are gosec G304 (file inclusion via variable), and all
+	// three are safe for the same reason: keyID has already passed validateKeyID,
+	// whose allowlist is ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$. That admits neither "/"
+	// nor ".", so the joined path cannot escape km.baseDir however hostile the
+	// caller. The filenames are constants. If validateKeyID's pattern is ever
+	// loosened, these annotations are wrong and must come off.
+
 	// Load private key
 	privateKeyPath := filepath.Join(userDir, "id_rsa")
-	privateKeyBytes, err := os.ReadFile(privateKeyPath)
+	privateKeyBytes, err := os.ReadFile(privateKeyPath) // #nosec G304 -- keyID passed validateKeyID; cannot traverse
 	if err != nil {
 		return nil, fmt.Errorf("failed to load private key: %w", err)
 	}
 
 	// Load public key
 	publicKeyPath := filepath.Join(userDir, "id_rsa.pub")
-	publicKeyBytes, err := os.ReadFile(publicKeyPath)
+	publicKeyBytes, err := os.ReadFile(publicKeyPath) // #nosec G304 -- keyID passed validateKeyID; cannot traverse
 	if err != nil {
 		return nil, fmt.Errorf("failed to load public key: %w", err)
 	}
 
 	// Load metadata
 	metadataPath := filepath.Join(userDir, "key_metadata")
-	metadataBytes, err := os.ReadFile(metadataPath)
+	metadataBytes, err := os.ReadFile(metadataPath) // #nosec G304 -- keyID passed validateKeyID; cannot traverse
 	if err != nil {
 		return nil, fmt.Errorf("failed to load key metadata: %w", err)
 	}

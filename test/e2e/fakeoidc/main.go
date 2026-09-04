@@ -21,6 +21,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -181,13 +182,39 @@ func writeState(w http.ResponseWriter, iss *testoidc.Issuer, action string) {
 	}
 	if action != "" {
 		body["action"] = action
-		log.Printf("fakeoidc: control: %s (outcome=%v username=%v groups=%v)",
-			action, body["outcome"], body["username"], body["groups"])
+		// action is this file's own literal; the other three came off a control
+		// request's query string, so they go through logSafe.
+		log.Printf("fakeoidc: control: %s (outcome=%s username=%s groups=%s)",
+			action, logSafe(body["outcome"]), logSafe(body["username"]), logSafe(body["groups"]))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		log.Printf("fakeoidc: write control response: %v", err)
 	}
+}
+
+// logSafe renders a request-supplied value as one quoted log field.
+//
+// Everything this fake logs about a request — the method, the path, the identity
+// a case asked for — is whatever the caller sent, and log.Printf writes it
+// through unaltered. A value containing a newline therefore forges log lines: a
+// path of "/token\nfakeoidc: GET /control/approve" reads, in
+// `docker compose logs fakeoidc`, as a control request nobody made. That is the
+// whole of the exposure here (this binary is a test fixture, runs unprivileged
+// in a throwaway container, and ships in no release), but the container log is
+// exactly what an engineer reads to work out why an e2e case failed, and a log
+// that can be written by the thing under test is not evidence.
+//
+// strconv.Quote is the fix rather than stripping the newlines: it escapes every
+// control character, keeps the value legible and lossless, and makes the field
+// boundaries visible, so a path with a space in it stops looking like two
+// fields. Length is bounded because a query parameter is not.
+func logSafe(v any) string {
+	s := fmt.Sprintf("%v", v)
+	if r := []rune(s); len(r) > 256 {
+		s = string(r[:256]) + "…truncated"
+	}
+	return strconv.Quote(s)
 }
 
 // splitGroups turns the groups query parameter into a claim value. An empty
@@ -207,7 +234,7 @@ func splitGroups(raw string) []string {
 // shows what the broker actually asked for when a case fails.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("fakeoidc: %s %s", r.Method, r.URL.Path)
+		log.Printf("fakeoidc: %s %s", logSafe(r.Method), logSafe(r.URL.Path))
 		next.ServeHTTP(w, r)
 	})
 }

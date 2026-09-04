@@ -275,7 +275,7 @@ func NewOIDCProvider(providerCfg OIDCProviderConfig, secCfg config.SecurityConfi
 // It always enforces TLS 1.2 as the minimum version and optionally applies:
 //   - A custom CA bundle (TrustedCABundle) that replaces the system trust store
 //   - InsecureSkipVerify (SkipTLSVerify) with a loud warning log
-//   - Certificate pinning (PinnedCertificates) via VerifyPeerCertificate
+//   - Certificate pinning (PinnedCertificates) via VerifyConnection
 func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -310,9 +310,26 @@ func buildTLSConfig(secCfg config.SecurityConfig) (*tls.Config, error) {
 			pins[strings.ToLower(strings.ReplaceAll(pin, ":", ""))] = true
 		}
 
-		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			for _, raw := range rawCerts {
-				fp := fmt.Sprintf("%x", sha256.Sum256(raw))
+		// The check goes in VerifyConnection rather than VerifyPeerCertificate,
+		// because a resumed TLS session does not call VerifyPeerCertificate at all —
+		// verified by experiment, not read off a rule description: with a session
+		// cache in place, handshakes 2 and 3 both report DidResume and leave
+		// VerifyPeerCertificate's call count at 1 while VerifyConnection is called
+		// every time. VerifyConnection also receives the peer chain on a resumed
+		// handshake (ConnectionState.PeerCertificates is populated from the cached
+		// session), so it can do the same comparison.
+		//
+		// Nothing resumes as this stands: client-side resumption needs a non-nil
+		// tls.Config.ClientSessionCache, buildTLSConfig sets none, and net/http does
+		// not add one to a caller-supplied TLSClientConfig. So the pins were being
+		// enforced — but only because of that absence, which no comment stated and no
+		// test held. Setting a session cache is an ordinary performance change to make
+		// on a client that calls its IdP four times per login, and under
+		// VerifyPeerCertificate it would have silently stopped applying the operator's
+		// pins while the config key went on claiming they were in force.
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			for _, cert := range cs.PeerCertificates {
+				fp := fmt.Sprintf("%x", sha256.Sum256(cert.Raw))
 				if pins[fp] {
 					return nil
 				}
