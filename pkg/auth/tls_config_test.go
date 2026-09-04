@@ -34,6 +34,9 @@ func TestBuildTLSConfigDefault(t *testing.T) {
 	if tlsCfg.VerifyPeerCertificate != nil {
 		t.Error("Expected VerifyPeerCertificate=nil by default")
 	}
+	if tlsCfg.VerifyConnection != nil {
+		t.Error("Expected VerifyConnection=nil by default")
+	}
 }
 
 // TestBuildTLSConfigSkipVerify checks that SkipTLSVerify sets InsecureSkipVerify.
@@ -126,8 +129,8 @@ func TestBuildTLSConfigCertPinSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTLSConfig() unexpected error: %v", err)
 	}
-	if tlsCfg.VerifyPeerCertificate == nil {
-		t.Fatal("Expected VerifyPeerCertificate callback to be set")
+	if tlsCfg.VerifyConnection == nil {
+		t.Fatal("Expected VerifyConnection callback to be set")
 	}
 
 	client := &http.Client{
@@ -273,6 +276,83 @@ func TestBuildTLSConfigCertPinMultiple(t *testing.T) {
 		t.Fatalf("Expected success when one of multiple pins matches: %v", err)
 	}
 	_ = resp.Body.Close()
+}
+
+// The operator's pins must be checked on every handshake, including a resumed
+// one. This is the acceptance test for G123.
+//
+// A resumed TLS session does not call VerifyPeerCertificate — Go calls it only
+// during a full handshake — so pinning implemented there is enforced on the first
+// connection to a provider and on none of the resumptions after it. VerifyConnection
+// is called both times, and on a resumed handshake ConnectionState.PeerCertificates
+// is populated from the cached session, so the same comparison is available.
+//
+// Nothing in the broker resumes today, because client-side resumption needs a
+// non-nil ClientSessionCache and neither buildTLSConfig nor net/http sets one. That
+// is why this was not an exploitable bypass — and also why it needs a test: the
+// property was resting on an absence that no comment stated, one performance change
+// away from turning an operator's pins off silently. This test sets the cache
+// itself, which is the future change it exists to survive.
+func TestPinnedCertificatesAreCheckedOnAResumedSession(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tlsCfg, err := buildTLSConfig(config.SecurityConfig{
+		TLSVerification: config.TLSVerification{
+			PinnedCertificates: []string{certFingerprint(server.TLS.Certificates[0].Certificate[0])},
+			SkipTLSVerify:      true, // the httptest cert is self-signed; the pin is what is under test
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildTLSConfig() unexpected error: %v", err)
+	}
+
+	// The whole point: the check has to hang off VerifyConnection. If it is on
+	// VerifyPeerCertificate instead, every resumed handshake below skips it.
+	pinCheck := tlsCfg.VerifyConnection
+	if pinCheck == nil {
+		t.Fatal("pinned_certificates is not enforced through VerifyConnection, so a resumed " +
+			"session does not run the pin check at all")
+	}
+
+	var checked, resumedAndChecked int
+	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		checked++
+		if cs.DidResume {
+			resumedAndChecked++
+		}
+		return pinCheck(cs)
+	}
+
+	// Give the client somewhere to cache the session. Without this Go never resumes
+	// and the test would pass against either implementation.
+	tlsCfg.ClientSessionCache = tls.NewLRUClientSessionCache(4)
+
+	transport := &http.Transport{TLSClientConfig: tlsCfg}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	const handshakes = 3
+	for i := 1; i <= handshakes; i++ {
+		resp, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		_ = resp.Body.Close()
+		// Force the next request to handshake again rather than reuse the connection;
+		// with the session cached, that handshake is a resumption.
+		transport.CloseIdleConnections()
+	}
+
+	if checked != handshakes {
+		t.Errorf("the pin check ran on %d of %d handshakes", checked, handshakes)
+	}
+	if resumedAndChecked == 0 {
+		t.Fatalf("no handshake resumed, so this test proved nothing about resumption; "+
+			"pin check ran %d times, all on full handshakes", checked)
+	}
+	t.Logf("pin check ran on all %d handshakes, %d of them resumed", checked, resumedAndChecked)
 }
 
 // helpers

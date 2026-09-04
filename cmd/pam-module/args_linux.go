@@ -38,13 +38,13 @@ func parseModuleArgs(args []string) moduleArgs {
 	}
 	defer func() {
 		for _, p := range argv {
-			C.free(unsafe.Pointer(p))
+			C.free(unsafe.Pointer(p)) // #nosec G103 -- cgo: freeing a C.CString allocation
 		}
 	}()
 
 	var argvPtr **C.char
 	if len(argv) > 0 {
-		argvPtr = (**C.char)(unsafe.Pointer(&argv[0]))
+		argvPtr = (**C.char)(unsafe.Pointer(&argv[0])) // #nosec G103 -- cgo: passing the address of Go-allocated memory to C
 	}
 	C.parse_arguments(C.int(len(args)), argvPtr, &opts)
 

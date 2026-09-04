@@ -3,6 +3,23 @@
 package main
 
 // The package's #cgo CFLAGS/LDFLAGS live in bridge_linux.go.
+//
+// Every unsafe.Pointer in this file and its siblings carries a `#nosec G103`
+// annotation. G103 asks that uses of unsafe be audited, which is the right default
+// — so rather than excluding the rule for the repository, each site says which of
+// the two shapes it is:
+//
+//   - C.free(unsafe.Pointer(p)) — releasing a C.CString this function allocated.
+//     There is no other way to spell it; C.CString returns *C.char and C.free takes
+//     void*.
+//   - (**C.char)(unsafe.Pointer(&slice[0])) — handing C the address of Go memory.
+//     These obey cgo's pointer-passing rules: the slice outlives the call, the C
+//     side does not retain the pointer past it, and the element type is a C type,
+//     so nothing here can be moved or collected while C holds it.
+//
+// None of this is shipped. Since #198 the module PAM loads is compiled from C
+// alone; these wrappers exist so `go test` can drive that C, because cgo is not
+// permitted in _test.go files.
 
 /*
 #include <stdlib.h>
@@ -32,11 +49,11 @@ func performAuthentication(socketPath, username, service, rhost, tty string, tim
 	cRhost := C.CString(rhost)
 	cTTY := C.CString(tty)
 	defer func() {
-		C.free(unsafe.Pointer(cSocketPath))
-		C.free(unsafe.Pointer(cUsername))
-		C.free(unsafe.Pointer(cService))
-		C.free(unsafe.Pointer(cRhost))
-		C.free(unsafe.Pointer(cTTY))
+		C.free(unsafe.Pointer(cSocketPath)) // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cUsername))   // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cService))    // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cRhost))      // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cTTY))        // #nosec G103 -- cgo: freeing a C.CString allocation
 	}()
 
 	return pam.PAMResultCode(C.perform_authentication(nil, cSocketPath, cUsername, cService, cRhost, cTTY,
@@ -62,8 +79,8 @@ func startPAMHandleWithoutConversation(service, user string) (*pamHandle, pam.PA
 	cService := C.CString(service)
 	cUser := C.CString(user)
 	defer func() {
-		C.free(unsafe.Pointer(cService))
-		C.free(unsafe.Pointer(cUser))
+		C.free(unsafe.Pointer(cService)) // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cUser))    // #nosec G103 -- cgo: freeing a C.CString allocation
 	}()
 
 	var conv C.struct_pam_conv // zero value: no conversation function, no appdata
@@ -90,13 +107,13 @@ func smAuthenticate(p *pamHandle, args []string) pam.PAMResultCode {
 	}
 	defer func() {
 		for _, arg := range argv {
-			C.free(unsafe.Pointer(arg))
+			C.free(unsafe.Pointer(arg)) // #nosec G103 -- cgo: freeing a C.CString allocation
 		}
 	}()
 
 	var argvPtr **C.char
 	if len(argv) > 0 {
-		argvPtr = (**C.char)(unsafe.Pointer(&argv[0]))
+		argvPtr = (**C.char)(unsafe.Pointer(&argv[0])) // #nosec G103 -- cgo: passing the address of Go-allocated memory to C
 	}
 
 	return pam.PAMResultCode(C.pam_sm_authenticate(p.h, 0, C.int(len(args)), argvPtr))
@@ -118,8 +135,8 @@ func classifyLoginTypeC(service, tty string) string {
 	cService := C.CString(service)
 	cTTY := C.CString(tty)
 	defer func() {
-		C.free(unsafe.Pointer(cService))
-		C.free(unsafe.Pointer(cTTY))
+		C.free(unsafe.Pointer(cService)) // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cTTY))     // #nosec G103 -- cgo: freeing a C.CString allocation
 	}()
 
 	return C.GoString(C.classify_login_type(cService, cTTY))
@@ -147,7 +164,7 @@ const brokerPending = int(C.BROKER_PENDING)
 // be deleted without a single suite noticing (#197).
 func classifyBrokerResponse(response string) int {
 	cResponse := C.CString(response)
-	defer C.free(unsafe.Pointer(cResponse))
+	defer C.free(unsafe.Pointer(cResponse)) // #nosec G103 -- cgo: freeing a C.CString allocation
 
 	return int(C.classify_response_text(cResponse))
 }
@@ -164,7 +181,7 @@ func mapBrokerErrorCode(code *string) pam.PAMResultCode {
 	}
 
 	cCode := C.CString(*code)
-	defer C.free(unsafe.Pointer(cCode))
+	defer C.free(unsafe.Pointer(cCode)) // #nosec G103 -- cgo: freeing a C.CString allocation
 
 	return pam.PAMResultCode(C.map_error_code(cCode))
 }

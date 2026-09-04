@@ -224,7 +224,10 @@ func (lh *LocationHistory) Close() {
 }
 
 func (lh *LocationHistory) load(path string) error {
-	data, err := os.ReadFile(path)
+	// gosec G304, accepted: path is cfg.PersistPath, from the broker's root-owned
+	// configuration, and the only caller is NewLocationHistory at startup. No
+	// authenticating user supplies any part of it.
+	data, err := os.ReadFile(path) // #nosec G304 -- PersistPath from the trusted root-owned config
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // nothing saved yet — not an error

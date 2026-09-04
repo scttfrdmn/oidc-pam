@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Certificate pinning is enforced through `VerifyConnection` rather than
+  `VerifyPeerCertificate` (#259).** A resumed TLS session does not call
+  `VerifyPeerCertificate` at all, so a pinned-certificate configuration would have
+  stopped checking its pins from the second handshake onwards. It was not reachable
+  as the code stood — client-side resumption needs a non-nil
+  `tls.Config.ClientSessionCache`, `buildTLSConfig` sets none, and `net/http` does
+  not add one to a caller-supplied `TLSClientConfig` — so the pins were being
+  enforced, but only by that absence, which no comment stated and no test held.
+  Adding a session cache anywhere in the request path would have silently disabled
+  the pinning. There is now a test that installs a cache, drives three handshakes,
+  and fails unless at least one of them resumed *and* the pin check ran on all
+  three.
+- **The public half of a provisioned SSH key pair is written 0600 instead of 0644
+  (#259).** Its only reader is `LoadKey`, in the same process, and the enclosing
+  directory is already 0700.
+
+### Fixed
+
+- **Trivy scanning is restored to `.github/workflows/security.yml` (#258).** Every
+  security workflow was deleted in December 2025; ten Trivy alerts, one of them
+  critical, stayed open on `main` for the eight months since, all of them describing
+  dependency versions this repository no longer has — three named a module that is
+  not in `go.mod` at all. Code scanning retires an alert only when the tool that
+  raised it runs again and stops reporting it, so removing a scanner does not retire
+  its findings, it makes them permanent, and nothing in the UI can close them. The
+  restored job deliberately keeps the original job id and passes no SARIF
+  `category`, because the analysis key those ten alerts are filed under is derived
+  from the two; a rename would leave them orphaned forever.
+- **The end-to-end fake identity provider no longer writes request-controlled values
+  into its log unescaped (#259).** A request path or a `?username=` containing a
+  newline could forge whole log lines in `docker compose logs fakeoidc`, which is
+  what an engineer reads to find out why a case failed. Test-harness only, shipped
+  in no release.
+
+### Changed
+
+- **The 23 open gosec alerts on `main` are triaged in the source (#259).** Each
+  `unsafe.Pointer` in the cgo test wrappers, each `os.ReadFile` of a
+  configuration-supplied path, and the one file mode carry a `#nosec` annotation
+  naming the rule and the reason it does not apply — with, in the `pkg/ssh` case,
+  the specific allowlist that makes traversal impossible and a note that the
+  annotations must come off if it is ever loosened. No rule was excluded and no
+  directory was skipped, so G103 and G304 stay live everywhere a genuinely notable
+  use could appear.
+- A `.trivyignore.yaml` records, in the repository rather than in the GitHub UI, the
+  one advisory this project does not act on: `GO-2026-5932`, the module-wide
+  "x/crypto/openpgp is unmaintained" notice, which has no fixed version and so would
+  otherwise be an alert that can never close. `golang.org/x/crypto/openpgp` is not
+  imported anywhere here.
+
 ## [0.5.1] - 2026-08-15
 
 This release makes the broker refuse what it cannot honour. Most of what follows is

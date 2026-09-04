@@ -41,7 +41,7 @@ func receiveAuthResponseWithin(fd, bufSize, totalTimeoutMS int) (int, string) {
 
 	var into *C.char
 	if bufSize > 0 {
-		into = (*C.char)(unsafe.Pointer(&buf[0]))
+		into = (*C.char)(unsafe.Pointer(&buf[0])) // #nosec G103 -- cgo: passing the address of Go-allocated memory to C
 	}
 
 	rc := int(C.receive_auth_response_within(C.int(fd), into, C.size_t(bufSize),

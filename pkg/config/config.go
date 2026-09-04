@@ -902,7 +902,12 @@ func resolveSecretValue(value string) (string, error) {
 
 	if strings.HasPrefix(value, "file:") {
 		filePath := strings.TrimPrefix(value, "file:")
-		data, err := os.ReadFile(filePath)
+		// gosec G304, accepted: reading a caller-named path is the whole feature.
+		// The name comes from the broker's own configuration file, which is
+		// root-owned and is already trusted with the secret itself — a config that
+		// can write "file:/etc/oidc-auth/client-secret" can equally write the secret
+		// inline, so this indirection grants no reach that the config did not have.
+		data, err := os.ReadFile(filePath) // #nosec G304 -- path comes from the trusted root-owned config
 		if err != nil {
 			return "", fmt.Errorf("failed to read secret file %q: %w", filePath, err)
 		}
