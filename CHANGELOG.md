@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The public half of a provisioned SSH key pair is written 0600 instead of 0644
   (#259).** Its only reader is `LoadKey`, in the same process, and the enclosing
   directory is already 0700.
+- **`main` now enforces its required checks on administrators, and `v*` tags cannot
+  be created, moved or deleted below the admin role (#214).** Releases were being
+  pushed straight to `main`, and git said so out loud — v0.5.1's push reported
+  "Bypassed rule violations for refs/heads/main: 4 of 4 required status checks are
+  expected" — so each release was built, signed and published from a commit no test
+  had ever run against. The required set also grew from four jobs to thirteen: the
+  end-to-end suite, both PAM-module builds and every security scanner ran on each
+  pull request and none of them could block a merge. Separately, a `v*` tag push
+  *is* a publish (it builds, signs with a Sigstore certificate naming this
+  repository, and attaches provenance), and nothing restricted who could start one;
+  write access, or a token scoped to write and not admin, was enough to obtain
+  genuinely signed artifacts from an arbitrary commit.
 
 ### Fixed
 
@@ -53,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   annotations must come off if it is ever loosened. No rule was excluded and no
   directory was skipped, so G103 and G304 stay live everywhere a genuinely notable
   use could appear.
+- **`scripts/release.sh` runs in two phases, with a pull request in between
+  (#214).** Phase 1 stamps the docs and opens `release/vX.Y.Z`; phase 2, after that
+  PR is rebase-merged, checks that `main` carries the release commit and then
+  creates and pushes the tag. Both halves are forced by the protections above: the
+  release commit has to arrive through a PR now, and because a rebase-merge rewrites
+  the commit, a tag created before the merge would point at something no branch
+  contains.
+- **The protections on `main` and on `v*` tags are recorded in
+  `scripts/repo-settings.sh` (#214).** They live in GitHub's database, so previously
+  nothing in the tree said what they were or why, an admin could widen them without
+  leaving a trace, and a fork came up with none of them. `show` prints what GitHub
+  has; `apply` is idempotent.
 - A `.trivyignore.yaml` records, in the repository rather than in the GitHub UI, the
   one advisory this project does not act on: `GO-2026-5932`, the module-wide
   "x/crypto/openpgp is unmaintained" notice, which has no fixed version and so would

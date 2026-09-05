@@ -280,6 +280,54 @@ jobs:
           fi
           echo "release.yml's build job is gated on the CI workflow."
 
+      # main's required status checks are named by display name, and the names live
+      # in GitHub's database (recorded in scripts/repo-settings.sh, #214). Renaming a
+      # job here therefore breaks the protection rather than following it: the old
+      # context is never reported again, so every pull request waits on a check that
+      # can no longer arrive and nothing merges until somebody thinks to look at the
+      # branch settings. Catch the rename in the pull request that makes it.
+      #
+      # Only this direction is an error. A new job that nobody added to the required
+      # list is a judgment call — perhaps deliberately advisory — and repo-settings.sh
+      # says which jobs are excluded and why.
+      - name: Check main's required checks all name a real job
+        run: |
+          yq -r '.jobs | to_entries | .[] | .value.name // .key' \
+            .github/workflows/ci.yml .github/workflows/security.yml | sort -u > /tmp/job-names
+
+          # The REQUIRED_CHECKS array in the settings script, one bare name per line.
+          awk '/^REQUIRED_CHECKS=\(/{f=1;next} /^\)/{f=0} f' scripts/repo-settings.sh \
+            | sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^"//' -e 's/"$//' \
+            | grep -v '^$' > /tmp/required-checks
+
+          if [ ! -s /tmp/required-checks ]; then
+            echo "::error::could not read REQUIRED_CHECKS out of scripts/repo-settings.sh"
+            exit 1
+          fi
+
+          fail=0
+          while IFS= read -r ctx; do
+            if grep -qxF "$ctx" /tmp/job-names; then
+              continue
+            fi
+            # A matrix job's check is named "<job name> (<matrix value>)" — e.g.
+            # "CodeQL Analysis (go)" from a job named "CodeQL Analysis".
+            base=$(printf '%s' "$ctx" | sed -E 's/ \([^()]*\)$//')
+            if [ "$base" != "$ctx" ] && grep -qxF "$base" /tmp/job-names; then
+              continue
+            fi
+            echo "::error::required check '${ctx}' names no job in ci.yml or security.yml. Renaming a job breaks main's branch protection — update scripts/repo-settings.sh and run 'scripts/repo-settings.sh apply'."
+            fail=1
+          done < /tmp/required-checks
+
+          if [ "$fail" -ne 0 ]; then
+            echo "job names found:"
+            cat /tmp/job-names
+            exit 1
+          fi
+          echo "All $(wc -l < /tmp/required-checks | tr -d ' ') required checks name a real job."
+
       # The installer and uninstaller decide, in shell, whether a host stays
       # loggable-in: #207 was an uninstaller that reduced /etc/pam.d/sshd to
       # `auth requisite pam_deny.so` and reported success. This exercises that

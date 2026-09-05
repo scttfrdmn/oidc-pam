@@ -1,21 +1,49 @@
 #!/usr/bin/env bash
 #
-# Cut a release: stamp the README version badge and the CHANGELOG, commit, create
-# an annotated tag, and push. Tagging this way guarantees the README/CHANGELOG in
-# the tagged commit always match the version (no manual sync drift).
+# Cut a release, in two phases:
 #
-# Usage:
-#   scripts/release.sh <version>
+#   scripts/release.sh <version>        # 1. stamp the docs, commit on a release
+#                                       #    branch, push it, open the PR
+#   scripts/release.sh --tag <version>  # 2. once that PR has merged: tag main
+#
 # Example:
-#   scripts/release.sh 0.4.2          # leading 'v' optional
+#   scripts/release.sh 0.4.2            # leading 'v' optional
+#   scripts/release.sh --tag 0.4.2
+#
+# Why two phases, when this used to be one push.
+#
+# `main` requires its status checks of everyone, admins included (#214), so the
+# release commit cannot be pushed straight to it any more — it goes through a PR
+# like every other change. That is the point: the previous flow published a
+# release from a commit no test had ever run against, and the v0.5.1 push said so
+# out loud ("Bypassed rule violations for refs/heads/main: 4 of 4 required status
+# checks are expected").
+#
+# The tag then has to wait for the merge, and not for bureaucratic reasons: this
+# repository rebase-merges, which rewrites the commit. A tag created in phase 1
+# would point at a commit that is not on main, so the release workflow would
+# build, sign and publish something no branch contains — and `git describe` on
+# main would never find it. Phase 2 tags merged main after checking that main
+# really does carry the release commit for this version.
+#
+# Tagging from the stamped commit is still what keeps the README badge, the
+# download snippet and the CHANGELOG heading in agreement with the tag; phase 2
+# now verifies that rather than assuming it.
 #
 # Preconditions: clean working tree on the default branch, a "## [Unreleased]"
-# section in CHANGELOG.md with content, and push access.
+# section in CHANGELOG.md with content, push access, and `gh` authenticated.
 
 set -euo pipefail
 
+MODE="prepare"
+if [[ "${1:-}" == "--tag" ]]; then
+  MODE="tag"
+  shift
+fi
+
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <version>   (e.g. $0 0.4.2)" >&2
+  echo "usage: $0 <version>          (e.g. $0 0.4.2)" >&2
+  echo "       $0 --tag <version>    (after the release PR has merged)" >&2
   exit 2
 fi
 
@@ -31,14 +59,95 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# --- preconditions -----------------------------------------------------------
+RELEASE_BRANCH="release/${TAG}"
+
+# The branch the release is cut from, as origin reports it rather than as this
+# script assumes it.
+DEFAULT_BRANCH="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+
+# --- preconditions shared by both phases -------------------------------------
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "error: working tree is not clean; commit or stash first" >&2
   exit 1
 fi
 
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$BRANCH" != "$DEFAULT_BRANCH" ]]; then
+  echo "error: on branch '${BRANCH}'; releases are cut from '${DEFAULT_BRANCH}'" >&2
+  exit 1
+fi
+
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-  echo "error: tag ${TAG} already exists" >&2
+  echo "error: tag ${TAG} already exists locally" >&2
+  exit 1
+fi
+
+git fetch --quiet origin "${DEFAULT_BRANCH}" --tags
+
+if [[ -n "$(git ls-remote --tags origin "refs/tags/${TAG}")" ]]; then
+  echo "error: tag ${TAG} already exists on origin" >&2
+  exit 1
+fi
+
+if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/${DEFAULT_BRANCH}")" ]]; then
+  echo "error: ${DEFAULT_BRANCH} is not level with origin/${DEFAULT_BRANCH}; pull or push first" >&2
+  exit 1
+fi
+
+# --- phase 2: tag merged main -------------------------------------------------
+# Everything here is a check that the commit about to be tagged is the release
+# commit for this version. A tag on the wrong commit is not a cosmetic mistake:
+# the release workflow builds, signs and attests whatever the tag points at, and
+# the attestation then says that artifact came from this repository at that
+# commit — truthfully, about the wrong code.
+if [[ "$MODE" == "tag" ]]; then
+  if ! grep -q "badge/Version-${VER}-blue" README.md; then
+    echo "error: README's version badge does not read ${VER}; is the release PR merged?" >&2
+    exit 1
+  fi
+  if ! grep -qx "VERSION=${TAG}" README.md; then
+    echo "error: README's download snippet does not read VERSION=${TAG}" >&2
+    exit 1
+  fi
+  if ! grep -q "^## \[${VER}\] - " CHANGELOG.md; then
+    echo "error: CHANGELOG.md has no '## [${VER}] - <date>' section" >&2
+    exit 1
+  fi
+
+  SUBJECT="$(git log -1 --format=%s)"
+  if [[ "$SUBJECT" != "chore(release): ${TAG}" ]]; then
+    echo "error: HEAD is '${SUBJECT}', not 'chore(release): ${TAG}'" >&2
+    echo "       Phase 2 tags the release commit itself, so that the tag, the README" >&2
+    echo "       and the CHANGELOG cannot disagree. Rebase-merge the release PR and" >&2
+    echo "       pull, then run this again." >&2
+    exit 1
+  fi
+
+  git tag -a "${TAG}" -m "oidc-pam ${TAG}"
+  echo
+  echo "Tagged ${TAG} at $(git rev-parse --short HEAD) on ${DEFAULT_BRANCH}:"
+  git --no-pager show --stat --oneline HEAD | head -20
+  echo
+  read -r -p "Push tag ${TAG} to origin? [y/N] " ans
+  if [[ "${ans:-}" =~ ^[Yy]$ ]]; then
+    git push origin "${TAG}"
+    echo "Pushed ${TAG}. The release workflow will run the CI set, then build, sign"
+    echo "and publish the artifacts."
+  else
+    echo "Not pushed. To undo locally: git tag -d ${TAG}"
+  fi
+  exit 0
+fi
+
+# --- phase 1: stamp the docs and open the release PR -------------------------
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: gh is not installed; it is needed to open the release PR" >&2
+  exit 1
+fi
+
+if git rev-parse -q --verify "refs/heads/${RELEASE_BRANCH}" >/dev/null; then
+  echo "error: branch ${RELEASE_BRANCH} already exists; delete it or finish that release" >&2
   exit 1
 fi
 
@@ -117,21 +226,47 @@ awk -v ver="$VER" -v date="$TODAY" '
   { print }
 ' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
 
-# --- commit, tag, push -------------------------------------------------------
+# --- commit on a release branch and open the PR ------------------------------
+git checkout -q -b "${RELEASE_BRANCH}"
 git add README.md CHANGELOG.md
-git commit -m "chore(release): ${TAG}"
-git tag -a "${TAG}" -m "oidc-pam ${TAG}"
+git commit -q -m "chore(release): ${TAG}"
 
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo
-echo "Prepared ${TAG} on branch '${BRANCH}':"
+echo "Prepared ${TAG} on branch '${RELEASE_BRANCH}':"
 git --no-pager show --stat --oneline HEAD | head -20
 echo
-read -r -p "Push commit and tag to origin? [y/N] " ans
-if [[ "${ans:-}" =~ ^[Yy]$ ]]; then
-  git push origin "${BRANCH}"
-  git push origin "${TAG}"
-  echo "Pushed ${TAG}. The release workflow will build artifacts and publish the GitHub release."
-else
-  echo "Not pushed. To undo locally: git tag -d ${TAG} && git reset --hard HEAD~1"
+read -r -p "Push ${RELEASE_BRANCH} and open the release PR? [y/N] " ans
+if ! [[ "${ans:-}" =~ ^[Yy]$ ]]; then
+  echo "Not pushed. To undo locally:"
+  echo "  git checkout ${DEFAULT_BRANCH} && git branch -D ${RELEASE_BRANCH}"
+  exit 0
 fi
+
+git push -q -u origin "${RELEASE_BRANCH}"
+gh pr create \
+  --base "${DEFAULT_BRANCH}" \
+  --head "${RELEASE_BRANCH}" \
+  --title "chore(release): ${TAG}" \
+  --body "$(cat <<EOF
+Stamps the README version badge, the \`VERSION=${TAG}\` download snippet, the
+roadmap heading and the status line, and rolls \`## [Unreleased]\` into
+\`## [${VER}] - ${TODAY}\`.
+
+Generated by \`scripts/release.sh ${VER}\`. No code changes.
+
+Once this is **rebase-merged** and \`${DEFAULT_BRANCH}\` is pulled:
+
+\`\`\`bash
+scripts/release.sh --tag ${VER}
+\`\`\`
+
+That tags the merged release commit and pushes the tag, which is what triggers
+the release workflow. The tag is deliberately not created before the merge: a
+rebase-merge rewrites the commit, so a tag made now would point at a commit that
+is not on \`${DEFAULT_BRANCH}\`.
+EOF
+)"
+
+echo
+echo "Next: wait for the checks, rebase-merge the PR, then:"
+echo "  git checkout ${DEFAULT_BRANCH} && git pull && scripts/release.sh --tag ${VER}"
