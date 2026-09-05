@@ -302,28 +302,72 @@ This project follows [Semantic Versioning](https://semver.org/) (SemVer):
 ### Cutting a release
 
 Use the release script — it is the single source of truth and keeps the README
-version badge and CHANGELOG in sync with the tag automatically:
+version strings and the CHANGELOG in sync with the tag automatically. It runs in
+two phases, with a pull request in between:
 
 ```bash
 # 1. Land all changes for the release on main, with entries under
 #    "## [Unreleased]" in CHANGELOG.md.
-# 2. From a clean checkout of main:
+
+# 2. From a clean checkout of main — stamps the docs and opens the release PR:
 scripts/release.sh 0.4.2        # leading 'v' optional
+
+# 3. Wait for the checks, then rebase-merge that PR.
+
+# 4. From a fresh main — tags the merged release commit and pushes the tag:
+git checkout main && git pull
+scripts/release.sh --tag 0.4.2
 ```
 
-The script stamps the README badge, rolls `## [Unreleased]` into a dated
-`## [0.4.2]` section, commits `chore(release): v0.4.2`, creates the annotated tag,
-and (after confirmation) pushes both. Pushing the tag triggers the Release
-workflow, which **verifies** the tag, README badge, and CHANGELOG agree before
-building and publishing multi-arch artifacts. A manual tag whose docs are out of
-sync will fail that check.
+Phase 1 stamps the README version badge, the `VERSION=v0.4.2` download snippet,
+the roadmap heading and the status line, rolls `## [Unreleased]` into a dated
+`## [0.4.2]` section, commits `chore(release): v0.4.2` on `release/v0.4.2`, and
+opens the pull request. Phase 2 checks that `main` really does carry that commit
+— badge, snippet, CHANGELOG heading and commit subject — then creates the
+annotated tag and pushes it.
+
+Pushing the tag is what triggers the Release workflow, which re-verifies that the
+tag, the four README strings and the CHANGELOG agree, runs the full CI suite, and
+only then builds, signs and publishes the artifacts. A manual tag whose docs are
+out of sync fails that check.
+
+**Why two phases.** `main` enforces its required checks on admins too
+(`scripts/repo-settings.sh`), so the release commit cannot be pushed straight to
+it — it goes through a pull request like every other change. That is the point:
+the old single-phase flow published releases from a commit no test had ever run
+against. And because this repository rebase-merges, the merge rewrites the
+commit: a tag created before the merge would point at a commit that is not on
+`main`, so the release would be built and signed from something no branch
+contains. Hence the tag waits for phase 2.
 
 ### Release Checklist
 
 - [ ] All changes merged to `main` with entries under `## [Unreleased]`
 - [ ] All tests pass on `main`
-- [ ] `scripts/release.sh <version>` run (stamps README + CHANGELOG, tags, pushes)
+- [ ] `scripts/release.sh <version>` run (stamps README + CHANGELOG, opens the PR)
+- [ ] Release PR checks green, **rebase**-merged, `main` pulled
+- [ ] `scripts/release.sh --tag <version>` run (tags the merged commit, pushes)
 - [ ] Release workflow green; GitHub release and artifacts published
+
+### Repository settings
+
+The protections on `main` and on `v*` tags are recorded in
+`scripts/repo-settings.sh` — what they are and why each one is there:
+
+```bash
+scripts/repo-settings.sh show     # what GitHub has right now
+scripts/repo-settings.sh apply    # make GitHub match the script (idempotent)
+```
+
+They live in GitHub's database rather than in the tree, which means nothing
+otherwise records them, an admin can widen them without leaving a trace, and a
+fork or a restored repository comes up with none of them. Change them by editing
+that script and running `apply`, not through the web UI — otherwise the file
+stops being true, which is worse than not having it.
+
+In short: `main` takes no direct pushes and requires every CI and security job,
+including of admins; `v*` tags cannot be created, moved or deleted by anyone
+below admin, because pushing one publishes signed artifacts.
 
 ## Community
 
