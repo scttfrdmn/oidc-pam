@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The end-to-end fake identity provider no longer writes request-controlled values
   into its log unescaped (#259).** A request path or a `?username=` containing a
   newline could forge whole log lines in `docker compose logs fakeoidc`, which is
-  what an engineer reads to find out why a case failed. Test-harness only, shipped
-  in no release.
+  what an engineer reads to find out why a case failed. They are logged with `%q`
+  now. Test-harness only, shipped in no release.
 
 ### Changed
 
