@@ -135,8 +135,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
+      # Pinned, not @latest. govulncheck's own module carries a `go` directive,
+      # and `go install ...@latest` under `GOTOOLCHAIN: local` fails outright when
+      # that directive exceeds the Go set up above — it does not fall back to an
+      # older govulncheck. x/vuln v1.8.0 raised it to `go 1.26.0`, so on 2026-09-12
+      # every `@latest` install here (and on every PR, this being a required check)
+      # started failing before a single package was scanned, which reads in the
+      # checks list as "Go Vulnerability Check: fail" — indistinguishable at a
+      # glance from an actual vulnerability. v1.7.0 is the last release whose
+      # directive is `go 1.25.0`. Bump this in lockstep with the Go version (#261):
+      # a scanner pinned behind the toolchain is a scanner that stops seeing new
+      # advisories, so this pin is a debt tied to that move, not a resting place.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 # last release on go 1.25
 
       - name: Run govulncheck
         run: govulncheck ./...
