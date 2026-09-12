@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Go toolchain moves to 1.27.1 (#261).** The minimum required Go is now
+  1.27 (`go.mod`, the README badge, and the requirements in README/CONTRIBUTING);
+  CI, the release build and the e2e Docker images all pin `1.27.1`. This clears
+  the block on `golang.org/x/crypto` v0.56+, which sets `go 1.26.0` as its own
+  minimum — the reason a routine dependency bump had been failing every check
+  rather than merging. The security scanners move with it: gosec to v2.29.0 and
+  govulncheck to v1.8.0 (v1.8.0 requires Go 1.26, which is what had forced the
+  temporary v1.7.0 pin). Both stay version-pinned rather than `@latest`, so an
+  upstream release that raises its own Go floor can no longer break the scan
+  before it runs; the pins track the toolchain.
 - **The 23 open gosec alerts on `main` are triaged in the source (#259).** Each
   `unsafe.Pointer` in the cgo test wrappers, each `os.ReadFile` of a
   configuration-supplied path, and the one file mode carry a `#nosec` annotation

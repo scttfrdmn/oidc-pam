@@ -62,7 +62,7 @@ Enhancement suggestions are welcome! Please:
 
 ### Prerequisites
 
-- Go 1.25 or higher
+- Go 1.27 or higher
 - PAM development libraries (`libpam0g-dev libjson-c-dev`, or `pam-devel json-c-devel`)
 - systemd (for service management)
 - Docker (for integration tests, and for `make verify-linux` on macOS)

@@ -1,6 +1,6 @@
 module github.com/scttfrdmn/oidc-pam
 
-go 1.25.13
+go 1.27.1
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0

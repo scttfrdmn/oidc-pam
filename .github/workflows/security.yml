@@ -34,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.13'
+          go-version: '1.27.1'
           cache: true
 
       - name: Initialize CodeQL
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.13'
+          go-version: '1.27.1'
           cache: true
 
       # This job deliberately does not install libpam0g-dev/libjson-c-dev, unlike the
@@ -75,19 +75,30 @@ jobs:
       # the *generated* Go files rather than the sources. With the PAM headers present
       # cgo succeeds, and gosec then reports against paths inside
       # /root/.cache/go-build — findings that point at no file in this repository and
-      # cannot become a useful alert, while the 16 unsafe.Pointer sites in
-      # {auth,args,recv}_linux.go go unexamined. Without the headers cgo fails, the
-      # loader falls back to the real sources, and gosec analyses the code a reviewer
-      # can actually read. Measured both ways in a golang:1.25 container: with the
-      # headers, 6 findings at build-cache paths and the _linux.go files never opened;
-      # without them, 41 files checked including all six _linux.go files.
+      # cannot become a useful alert, while the unsafe.Pointer sites in
+      # cmd/pam-module's cgo {auth,args,bridge,recv}_linux.go go unexamined. Without
+      # the headers cgo fails, the loader falls back to the real sources, and gosec
+      # analyses the code a reviewer can actually read.
+      #
+      # Re-measured on golang:1.27.1 with gosec v2.29.0, both ways:
+      #   without headers: 41 files, Nosec 31, 0 issues, and all six *_linux.go opened
+      #                    — the four cgo pam-module files plus the two internal/ipc ones;
+      #   with headers:    37 files, Nosec 15, 6 findings at build-cache paths, and only
+      #                    the two internal/ipc *_linux.go opened.
+      # (internal/ipc's *_linux.go are plain SO_PEERCRED syscall code, not cgo, so they
+      # are analysed either way. It is the four cgo files that disappear — with them the
+      # 16 #nosec annotations they carry, which is why Nosec halves from 31 to 15.)
       #
       # So if this job is ever "fixed" by adding the dev packages, coverage of the PAM
       # module silently disappears.
       - name: Run Gosec Security Scanner
         run: |
-          # Install gosec v2.26.1 (Go 1.25 compatible)
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.26.1
+          # Pinned to a specific gosec release rather than @latest, for the same
+          # reason as govulncheck below: a reproducible scan, and no surprise the day
+          # upstream's module go directive outruns the Go set up here. `go install`
+          # compiles gosec with this job's toolchain, so it parses current-Go syntax
+          # regardless of the release's own age. Bump alongside the Go version.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
           # Run gosec with SARIF output for GitHub integration
           gosec -fmt sarif -out gosec-results.sarif -exclude-dir=test ./...
@@ -127,7 +138,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.13'
+          go-version: '1.27.1'
           cache: true
 
       - name: Install PAM development libraries
@@ -135,19 +146,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpam0g-dev libjson-c-dev
 
-      # Pinned, not @latest. govulncheck's own module carries a `go` directive,
-      # and `go install ...@latest` under `GOTOOLCHAIN: local` fails outright when
-      # that directive exceeds the Go set up above — it does not fall back to an
-      # older govulncheck. x/vuln v1.8.0 raised it to `go 1.26.0`, so on 2026-09-12
-      # every `@latest` install here (and on every PR, this being a required check)
-      # started failing before a single package was scanned, which reads in the
-      # checks list as "Go Vulnerability Check: fail" — indistinguishable at a
-      # glance from an actual vulnerability. v1.7.0 is the last release whose
-      # directive is `go 1.25.0`. Bump this in lockstep with the Go version (#261):
-      # a scanner pinned behind the toolchain is a scanner that stops seeing new
-      # advisories, so this pin is a debt tied to that move, not a resting place.
+      # Pinned, not @latest. govulncheck's own module carries a `go` directive, and
+      # `go install ...@latest` under `GOTOOLCHAIN: local` fails outright when that
+      # directive exceeds the Go set up above — it does not fall back to an older
+      # govulncheck. That is exactly what happened on 2026-09-12: x/vuln v1.8.0 raised
+      # its directive to `go 1.26.0`, and every `@latest` install here started failing
+      # before a single package was scanned — on every PR, this being a required
+      # check — reading in the checks list as "Go Vulnerability Check: fail",
+      # indistinguishable at a glance from an actual vulnerability. Pinning removes
+      # that whole failure mode: the install cannot start requiring a newer Go than
+      # the one above without someone changing this line. v1.8.0 builds under the Go
+      # set up here (1.27.1). Bump this in lockstep with the Go version (#261): a
+      # scanner pinned behind the toolchain stops seeing new advisories, so the pin
+      # tracks the toolchain rather than sitting still.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 # last release on go 1.25
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
       - name: Run govulncheck
         run: govulncheck ./...

@@ -6,7 +6,7 @@
 # socket; and what PAM does with its return code depends on the control flag in
 # /etc/pam.d/sshd. All three of those only exist once something actually logs in.
 
-FROM golang:1.25.13-bookworm AS builder
+FROM golang:1.27.1-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libpam0g-dev libjson-c-dev \

@@ -1,7 +1,7 @@
 # OIDC PAM: Modern Authentication for Linux Systems
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.25-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.27-blue)](https://golang.org/)
 [![Version](https://img.shields.io/badge/Version-0.5.1-blue)](https://github.com/scttfrdmn/oidc-pam/releases)
 
 A comprehensive Linux authentication solution using OpenID Connect (OIDC) that modernizes SSH login — and any other interactive PAM service you wire it into — with passkey support, automatic SSH key management, and enterprise-grade audit capabilities.
@@ -56,7 +56,7 @@ OIDC PAM provides a modern, secure, and user-friendly alternative.
 
 ### Prerequisites
 
-- Go 1.25 or higher
+- Go 1.27 or higher
 - PAM development libraries
 - systemd (for service management)
 
