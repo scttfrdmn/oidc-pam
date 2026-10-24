@@ -34,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: true
 
       - name: Initialize CodeQL
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: true
 
       # This job deliberately does not install libpam0g-dev/libjson-c-dev, unlike the
@@ -138,7 +138,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.3'
           cache: true
 
       - name: Install PAM development libraries
@@ -155,12 +155,12 @@ jobs:
       # check — reading in the checks list as "Go Vulnerability Check: fail",
       # indistinguishable at a glance from an actual vulnerability. Pinning removes
       # that whole failure mode: the install cannot start requiring a newer Go than
-      # the one above without someone changing this line. v1.8.0 builds under the Go
-      # set up here (1.27.1). Bump this in lockstep with the Go version (#261): a
+      # the one above without someone changing this line. v1.9.0 builds under the Go
+      # set up here (1.27.3). Bump this in lockstep with the Go version (#261): a
       # scanner pinned behind the toolchain stops seeing new advisories, so the pin
       # tracks the toolchain rather than sitting still.
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
 
       - name: Run govulncheck
         run: govulncheck ./...

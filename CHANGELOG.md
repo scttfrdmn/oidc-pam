@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The Go toolchain moves to 1.27.3 (#277).** go1.27.1 carries nine
+  standard-library vulnerabilities that govulncheck finds reachable from this code
+  (five in `net/http/internal/http2`, two in `net/http`, one each in `crypto/tls`
+  and `mime/multipart`), all fixed in 1.27.3. Binaries are statically linked
+  against the standard library, so the fix only takes effect when the binaries are
+  rebuilt. `go.mod`, every `setup-go` pin and the e2e images now say `1.27.3`, and
+  govulncheck moves to v1.9.0 in lockstep. Because `Go Vulnerability Check` is a
+  required check, this was also blocking every open dependency pull request.
+
 ## [0.5.2] - 2026-09-12
 
 ### Security
