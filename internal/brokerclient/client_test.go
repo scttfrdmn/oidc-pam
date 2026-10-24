@@ -127,7 +127,7 @@ func testClient(t *testing.T, socketPath string) (*Client, func() time.Time) {
 
 func deviceStarted(sessionID string, pollSeconds float64) *Response {
 	return &Response{
-		Success:        true,
+		Status:         StatusPending,
 		SessionID:      sessionID,
 		DeviceCode:     "WDJB-MJHT",
 		DeviceURL:      "https://idp.example.com/device",
@@ -142,7 +142,7 @@ func deviceStarted(sessionID string, pollSeconds float64) *Response {
 
 func devicePending(sessionID string) *Response {
 	return &Response{
-		Success:        true,
+		Status:         StatusPending,
 		SessionID:      sessionID,
 		RequiresDevice: true,
 		Metadata:       map[string]interface{}{"status": "pending"},
@@ -150,21 +150,20 @@ func devicePending(sessionID string) *Response {
 }
 
 func authenticated(sessionID string) *Response {
-	return &Response{Success: true, SessionID: sessionID, UserID: "testuser"}
+	return &Response{Status: StatusAuthorized, Success: true, SessionID: sessionID, UserID: "testuser"}
 }
 
 func denied(errorCode string) *Response {
-	return &Response{Success: false, ErrorCode: errorCode, ErrorMessage: "denied by test"}
+	return &Response{Status: "error", Success: false, ErrorCode: errorCode, ErrorMessage: "denied by test"}
 }
 
 func authRequest() *Request {
 	return &Request{UserID: "testuser", TargetHost: "10.0.0.1", LoginType: "ssh"}
 }
 
-// The headline regression test: the broker reports Success together with
-// RequiresDevice as soon as the flow starts, and identity binding and
-// require_groups are only enforced afterwards. Treating that as success grants
-// the login before the user has proved anything.
+// The headline regression test: the broker answers "pending" as soon as the flow
+// starts, and identity binding and require_groups are only enforced afterwards.
+// Treating that as success grants the login before the user has proved anything.
 func TestAuthenticateAndWaitDeniesWhenDeviceFlowNeverCompletes(t *testing.T) {
 	broker := newFakeBroker(t, func(_ int, req Request) interface{} {
 		if req.Type == "authenticate" {
@@ -214,7 +213,7 @@ func TestAuthenticateAndWaitSucceedsAfterDeviceApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuthenticateAndWait: %v", err)
 	}
-	if !resp.Success || resp.RequiresDevice {
+	if !resp.Granted("testuser") {
 		t.Fatalf("unexpected granting response: %+v", resp)
 	}
 
@@ -368,7 +367,7 @@ func TestAuthenticateAndWaitTransportFailuresAreNotDenials(t *testing.T) {
 
 	t.Run("device flow without a session_id", func(t *testing.T) {
 		broker := newFakeBroker(t, func(_ int, _ Request) interface{} {
-			return &Response{Success: true, RequiresDevice: true}
+			return &Response{Status: StatusPending, RequiresDevice: true}
 		})
 		client, _ := testClient(t, broker.socketPath)
 		_, err := client.AuthenticateAndWait(context.Background(), authRequest(), 30*time.Second)
@@ -508,5 +507,68 @@ func TestThisHostIsThisHost(t *testing.T) {
 	}
 	if got := ThisHost(); got != want {
 		t.Errorf("ThisHost() = %q, want this machine's name %q", got, want)
+	}
+}
+
+// success=true is not a grant without status "authorized" for the account being
+// logged into (#146). Every reply here is one this client granted before version 1.
+func TestAuthenticateAndWaitGrantsOnlyAnAuthorizedStatus(t *testing.T) {
+	replies := map[string]*Response{
+		"the pre-v1 device-flow reply":   {Success: true, SessionID: "s", RequiresDevice: true},
+		"the pre-v1 grant":               {Success: true, SessionID: "s", UserID: "testuser"},
+		"an unknown status":              {Status: "approved", Success: true, UserID: "testuser"},
+		"pending and success at once":    {Status: StatusPending, Success: true, SessionID: "s"},
+		"authorized for another account": {Status: StatusAuthorized, Success: true, UserID: "root"},
+		"authorized with no user_id":     {Status: StatusAuthorized, Success: true},
+	}
+	for name, reply := range replies {
+		t.Run(name, func(t *testing.T) {
+			broker := newFakeBroker(t, func(_ int, _ Request) interface{} { return reply })
+			client, _ := testClient(t, broker.socketPath)
+
+			resp, err := client.AuthenticateAndWait(context.Background(), authRequest(), 30*time.Second)
+			if err == nil {
+				t.Fatalf("granted on %+v", resp)
+			}
+			var denial *DenialError
+			if !errors.As(err, &denial) {
+				t.Fatalf("expected *DenialError, got %T: %v", err, err)
+			}
+			if n := len(broker.received()); n != 1 {
+				t.Errorf("expected exactly 1 request, got %d: none of these is a flow to poll", n)
+			}
+		})
+	}
+}
+
+// Every request carries protocol_version, and a reply in a version this client does
+// not implement is a transport failure rather than a decision about the user.
+func TestProtocolVersionOnTheWire(t *testing.T) {
+	broker := newFakeBroker(t, func(_ int, _ Request) interface{} {
+		return `{"protocol_version":2,"status":"authorized","success":true,"user_id":"testuser"}` + "\n"
+	})
+	client, _ := testClient(t, broker.socketPath)
+
+	_, err := client.AuthenticateAndWait(context.Background(), authRequest(), 30*time.Second)
+	var denial *DenialError
+	if err == nil || errors.As(err, &denial) {
+		t.Fatalf("a reply in protocol version 2 gave %v, want a transport failure, not a decision", err)
+	}
+
+	requests := broker.received()
+	if len(requests) != 1 || requests[0].ProtocolVersion != ProtocolVersion {
+		t.Fatalf("requests = %+v, want one carrying protocol_version %d", requests, ProtocolVersion)
+	}
+}
+
+func TestResponseVersion(t *testing.T) {
+	tests := map[string]int{
+		``: 1, `null`: 1, `0`: 1, `1`: 1, `"2"`: 1, `1.5`: 1, `2`: 2, `-1`: -1,
+	}
+	for raw, want := range tests {
+		r := &Response{ProtocolVersion: json.RawMessage(raw)}
+		if got := r.Version(); got != want {
+			t.Errorf("protocol_version %q: Version() = %d, want %d", raw, got, want)
+		}
 	}
 }

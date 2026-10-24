@@ -23,7 +23,12 @@ type AuthRequest struct {
 
 // AuthResponse represents an authentication response from the broker.
 // The JSON field names mirror the IPC server Response struct.
+//
+// Status is authoritative and Success is derived from it: a grant is Success with
+// status "authorized" (#146). RequiresDevice is a legacy hint, not a decision.
 type AuthResponse struct {
+	ProtocolVersion  int      `json:"protocol_version,omitempty"`
+	Status           string   `json:"status,omitempty"`
 	Success          bool     `json:"success"`
 	UserID           string   `json:"user_id,omitempty"`
 	Email            string   `json:"email,omitempty"`

@@ -255,6 +255,7 @@ int send_auth_request(int sock, const char *username, const char *service, const
     // Build request. Each value is added exactly once and owned by the tree, so
     // a single json_object_put(request) frees everything (L-11: previously the
     // login_type object was allocated but never attached, leaking each call).
+    json_object_object_add(request, "protocol_version", json_object_new_int(PROTOCOL_VERSION));
     json_object_object_add(request, "type", type);
     json_object_object_add(request, "user_id", user_id);
     json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
@@ -300,6 +301,7 @@ int send_auth_request(int sock, const char *username, const char *service, const
 int send_check_session_request(int sock, const char *session_id, const char *username) {
     json_object *request = json_object_new_object();
 
+    json_object_object_add(request, "protocol_version", json_object_new_int(PROTOCOL_VERSION));
     json_object_object_add(request, "type", json_object_new_string("check_session"));
     json_object_object_add(request, "session_id", json_object_new_string(session_id));
     json_object_object_add(request, "user_id", json_object_new_string(username));
@@ -705,67 +707,104 @@ int map_error_code(const char *error_code) {
     return PAM_AUTH_ERR;
 }
 
-// Decide what a broker response means: a PAM result code, or BROKER_PENDING if
-// the device flow is still in progress.
-static int classify_response(json_object *obj) {
+// Read a reply's protocol_version. Absent, JSON null and 0 all mean 1: a broker
+// that predates the field speaks version 1 by definition, and an in-place upgrade
+// of the module must keep working against one. A value that is not an integer is
+// read as absent too, which is where the module is deliberately more forgiving
+// than the broker: what must never happen is nonsense read as a *known* version
+// other than 1, and this cannot produce one.
+static int response_protocol_version(json_object *obj) {
+    json_object *field = NULL;
+    int version;
+
+    if (!json_object_object_get_ex(obj, "protocol_version", &field) ||
+        !json_object_is_type(field, json_type_int)) {
+        return PROTOCOL_VERSION;
+    }
+    version = json_object_get_int(field);
+    return version == 0 ? PROTOCOL_VERSION : version;
+}
+
+// Decide what a broker response means for username: a PAM result code, or
+// BROKER_PENDING if the device flow is still in progress.
+//
+// This is the client half of the wire contract's one rule (#146, #179): access is
+// granted only when success is true *and* status is "authorized", and only for the
+// account named in user_id. status is authoritative; success is redundant with it
+// on purpose, and the two are required to agree.
+//
+// requires_device is no longer read. It used to be the only thing standing between
+// a started device flow and a grant — the broker sent success=true with
+// requires_device=true, and a client that honoured success first let anyone who
+// could reach the broker log in — and it took two separate fixes to stop a missing
+// or non-boolean requires_device reading as "no device step" (#168, #201). A field
+// whose absence turns a non-grant into a grant cannot be made safe by reading it
+// more carefully; version 1 replaces it with a status that has no such reading.
+static int classify_response(json_object *obj, const char *username) {
     json_object *success_obj = NULL;
-    json_object *requires_device_obj = NULL;
+    const char *status;
+    const char *user_id;
+    int version;
+
+    version = response_protocol_version(obj);
+    if (version != PROTOCOL_VERSION) {
+        log_pam_message(LOG_ERR, "Broker replied with protocol version %d; this module speaks %d. "
+                                 "Upgrade the broker and the module together",
+                        version, PROTOCOL_VERSION);
+        return PAM_AUTHINFO_UNAVAIL;
+    }
 
     // A response we cannot interpret is not a grant.
     //
     // The type is checked, not just the presence: json_object_get_boolean answers
     // true for any non-empty JSON *string*, so `"success":"false"` used to be read
-    // as a success (#168). The real broker emits a JSON bool, which is exactly why
-    // nothing is given up by insisting on one here.
+    // as a success (#168).
     if (!json_object_object_get_ex(obj, "success", &success_obj) ||
         !json_object_is_type(success_obj, json_type_boolean)) {
         log_pam_message(LOG_ERR, "Broker response has no boolean success field");
         return PAM_AUTHINFO_UNAVAIL;
     }
 
+    // NULL when absent or not a JSON string; see json_get_string.
+    status = json_get_string(obj, "status");
+
+    if (status != NULL && strcmp(status, "pending") == 0) {
+        if (json_object_get_boolean(success_obj)) {
+            log_pam_message(LOG_ERR, "Broker response says both pending and success; refusing to read it");
+            return PAM_AUTHINFO_UNAVAIL;
+        }
+        return BROKER_PENDING;
+    }
+
     if (!json_object_get_boolean(success_obj)) {
         const char *code = json_get_string(obj, "error_code");
         const char *message = json_get_string(obj, "error_message");
 
-        log_pam_message(LOG_INFO, "Broker refused authentication (error_code=%s): %s",
+        log_pam_message(LOG_INFO, "Broker refused authentication (status=%s, error_code=%s): %s",
+                        status != NULL ? status : "(none)",
                         code != NULL ? code : "(none)",
                         message != NULL ? message : "(no message)");
         return map_error_code(code);
     }
 
-    // success=true is not on its own a grant. The broker sets it *together with*
-    // requires_device=true when it has merely started the device flow: the user
-    // has not visited the device URL yet, and identity binding and
-    // require_groups are still checked afterwards, in a background goroutine.
-    // requires_device must therefore be tested before success is honored, or
-    // `auth sufficient pam_oidc.so` short-circuits the auth stack and grants
-    // login to anyone who can reach the broker.
-    //
-    // This read used to go through json_object_get_boolean with no type check, so
-    // a `requires_device` that was not a boolean was silently read as false and
-    // the device step vanished: `{"success":true,"requires_device":null}` — or
-    // `{}`, `[]`, `""` — returned PAM_SUCCESS for an arbitrary user_id, with no
-    // device flow, no identity binding and no require_groups check (#201). It is
-    // the exact grant the paragraph above says must be impossible, so a
-    // requires_device that is present but not a boolean is treated as a response
-    // that cannot be interpreted, not as false. Fail closed, as with `success`.
-    //
-    // Absent is still read as "no device step": internal/ipc.Response declares
-    // `json:"requires_device"` with no omitempty, so the broker emits the field on
-    // every response and only a *different* producer can omit it.
-    if (json_object_object_get_ex(obj, "requires_device", &requires_device_obj)) {
-        // json_object_object_get_ex answers TRUE with a NULL object for a JSON
-        // null, which is how a null used to reach the "absent" path; here it is a
-        // present field of the wrong type, and json_object_is_type answers false
-        // for NULL unless the type asked for is json_type_null.
-        if (!json_object_is_type(requires_device_obj, json_type_boolean)) {
-            log_pam_message(LOG_ERR, "Broker response has a non-boolean requires_device field; "
-                                     "refusing to read it as 'no device authorization needed'");
-            return PAM_AUTHINFO_UNAVAIL;
-        }
-        if (json_object_get_boolean(requires_device_obj)) {
-            return BROKER_PENDING;
-        }
+    // success=true from here on, which on its own is not a grant. A status that is
+    // absent or one this module does not know fails closed: unknown means no.
+    if (status == NULL || strcmp(status, "authorized") != 0) {
+        log_pam_message(LOG_ERR, "Broker response has success=true but status=%s; "
+                                 "only \"authorized\" grants access",
+                        status != NULL ? status : "(none)");
+        return PAM_AUTH_ERR;
+    }
+
+    // The broker binds the identity to the account before it activates a session.
+    // It is checked again here, on the value about to be acted on, because the
+    // broker is a different process and may be an older version of itself.
+    user_id = json_get_string(obj, "user_id");
+    if (user_id == NULL || username == NULL || strcmp(user_id, username) != 0) {
+        log_pam_message(LOG_ERR, "Broker authorized user_id=%s for a login as %s; refusing",
+                        user_id != NULL ? user_id : "(none)",
+                        username != NULL ? username : "(none)");
+        return PAM_AUTH_ERR;
     }
 
     return PAM_SUCCESS;
@@ -790,7 +829,7 @@ static int classify_response(json_object *obj) {
 // decision: the parse and the classification are the two steps
 // perform_authentication takes on every reply it receives, in the same order and
 // with the same verdict for a reply that is not JSON at all.
-int classify_response_text(const char *response) {
+int classify_response_text(const char *response, const char *username) {
     json_object *obj;
     int result;
 
@@ -806,7 +845,7 @@ int classify_response_text(const char *response) {
         return PAM_AUTHINFO_UNAVAIL;
     }
 
-    result = classify_response(obj);
+    result = classify_response(obj, username);
     json_object_put(obj);
     return result;
 }
@@ -938,7 +977,7 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
         return PAM_AUTHINFO_UNAVAIL;
     }
 
-    result = classify_response(response_obj);
+    result = classify_response(response_obj, username);
     if (result != BROKER_PENDING) {
         if (result == PAM_SUCCESS) {
             log_pam_message(LOG_INFO, "Authentication successful for user: %s", username);
@@ -991,7 +1030,7 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
             return PAM_AUTHINFO_UNAVAIL;
         }
 
-        result = classify_response(response_obj);
+        result = classify_response(response_obj, username);
         json_object_put(response_obj);
 
         if (result != BROKER_PENDING) {

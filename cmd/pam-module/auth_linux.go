@@ -162,11 +162,24 @@ const brokerPending = int(C.BROKER_PENDING)
 // only indirectly through a fake broker that a real one resembles, and e2e cannot
 // construct a malformed reply at all. A decision nothing tests is a decision that can
 // be deleted without a single suite noticing (#197).
+//
+// The login is always for "testuser", the account every fixture names; see
+// classifyBrokerResponseFor for a reply judged against another account.
 func classifyBrokerResponse(response string) int {
-	cResponse := C.CString(response)
-	defer C.free(unsafe.Pointer(cResponse)) // #nosec G103 -- cgo: freeing a C.CString allocation
+	return classifyBrokerResponseFor(response, "testuser")
+}
 
-	return int(C.classify_response_text(cResponse))
+// classifyBrokerResponseFor is classifyBrokerResponse for a login as username: a
+// grant is honoured only when the reply's user_id is that account.
+func classifyBrokerResponseFor(response, username string) int {
+	cResponse := C.CString(response)
+	cUsername := C.CString(username)
+	defer func() {
+		C.free(unsafe.Pointer(cResponse)) // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cUsername)) // #nosec G103 -- cgo: freeing a C.CString allocation
+	}()
+
+	return int(C.classify_response_text(cResponse, cUsername))
 }
 
 // mapBrokerErrorCode runs the C module's error_code -> PAM result mapping, the

@@ -98,16 +98,19 @@ func (b *fakeBroker) received() []map[string]interface{} {
 }
 
 // deviceStarted is what the broker returns when it has only just started the
-// device flow: success=true *and* requires_device=true. The user has not
-// authenticated yet at this point.
+// device flow: status "pending", success=false. The user has not authenticated
+// yet at this point. requires_device is the legacy hint the broker still sends;
+// the module must not read it.
 func deviceStarted(sessionID string) map[string]interface{} {
 	return map[string]interface{}{
-		"success":         true,
-		"session_id":      sessionID,
-		"device_code":     "WDJB-MJHT",
-		"device_url":      "https://idp.example.com/device",
-		"requires_device": true,
-		"instructions":    "Visit https://idp.example.com/device and enter WDJB-MJHT",
+		"protocol_version": 1,
+		"status":           "pending",
+		"success":          false,
+		"session_id":       sessionID,
+		"device_code":      "WDJB-MJHT",
+		"device_url":       "https://idp.example.com/device",
+		"requires_device":  true,
+		"instructions":     "Visit https://idp.example.com/device and enter WDJB-MJHT",
 		"metadata": map[string]interface{}{
 			"provider":         "test",
 			"polling_interval": 1,
@@ -116,39 +119,44 @@ func deviceStarted(sessionID string) map[string]interface{} {
 }
 
 // devicePending is CheckSession's reply while the user has not finished: also
-// success=true with requires_device=true.
+// status "pending".
 func devicePending(sessionID string) map[string]interface{} {
 	return map[string]interface{}{
-		"success":         true,
-		"session_id":      sessionID,
-		"requires_device": true,
-		"metadata":        map[string]interface{}{"status": "pending"},
+		"protocol_version": 1,
+		"status":           "pending",
+		"success":          false,
+		"session_id":       sessionID,
+		"requires_device":  true,
+		"metadata":         map[string]interface{}{"status": "pending"},
 	}
 }
 
 func authenticated(sessionID string) map[string]interface{} {
 	return map[string]interface{}{
-		"success":    true,
-		"session_id": sessionID,
-		"user_id":    "testuser",
-		"email":      "testuser@example.com",
+		"protocol_version": 1,
+		"status":           "authorized",
+		"success":          true,
+		"session_id":       sessionID,
+		"user_id":          "testuser",
+		"email":            "testuser@example.com",
 	}
 }
 
 func denied(errorCode string) map[string]interface{} {
 	return map[string]interface{}{
-		"success":       false,
-		"error_code":    errorCode,
-		"error_message": "denied by test",
+		"protocol_version": 1,
+		"status":           "error",
+		"success":          false,
+		"error_code":       errorCode,
+		"error_message":    "denied by test",
 	}
 }
 
-// The headline regression test: the broker reports success=true together with
-// requires_device=true as soon as the device flow starts, and the identity
-// binding and require_groups checks only happen afterwards. If the module reads
-// success before requires_device it returns PAM_SUCCESS here, and with the
-// shipped `auth sufficient pam_oidc.so` that grants login to anyone who can
-// reach the broker without them ever visiting the device URL.
+// The headline regression test: the broker answers "pending" as soon as the device
+// flow starts, and the identity binding and require_groups checks only happen
+// afterwards. A module that decided on the initiation response would grant here,
+// and with the shipped `auth sufficient pam_oidc.so` that is a login for anyone
+// who can reach the broker without them ever visiting the device URL (#120, #146).
 func TestPerformAuthenticationDeniesWhenDeviceFlowNeverCompletes(t *testing.T) {
 	t.Parallel()
 
@@ -332,8 +340,8 @@ func TestPerformAuthenticationUnavailable(t *testing.T) {
 		{
 			name: "device flow without a session_id",
 			reply: map[string]interface{}{
-				"success":         true,
-				"requires_device": true,
+				"status":  "pending",
+				"success": false,
 			},
 		},
 	}
@@ -417,42 +425,33 @@ func TestPerformAuthenticationRequiresABooleanSuccess(t *testing.T) {
 	}
 }
 
-// The other half of the same trap, and the dangerous half: requires_device was
-// read with json_object_get_boolean and no type check, so anything that was not a
-// JSON boolean was silently read as *false* — "no device authorization needed" —
-// and success=true was then honored on its own (#201).
+// success=true is not a grant without status "authorized" (#146).
 //
-// That is the grant the comment in classify_response says must be impossible:
-// `{"success":true,"requires_device":null}` returned PAM_SUCCESS for an arbitrary
-// user_id with no device flow, no identity binding and no require_groups check,
-// and with the shipped `auth sufficient pam_oidc.so` a grant is a login. JSON null
-// is the worst of them, because json_object_object_get_ex answers TRUE with a NULL
-// object for it, so it took the "absent" path rather than looking like a value at
-// all.
-//
-// A requires_device that is present but not a boolean is therefore a response the
-// module cannot interpret, not a false. The real broker emits a JSON bool
-// (internal/ipc.Response, no omitempty), so nothing is given up by insisting on
-// one.
-func TestPerformAuthenticationRequiresABooleanRequiresDevice(t *testing.T) {
+// These are the replies the broker sent before version 1: success=true, with
+// requires_device saying whether the device step was still outstanding. That
+// convention took three fixes to make safe — success read before requires_device
+// (#120), then a requires_device that was not a JSON boolean read as "no device
+// step", which made `{"success":true,"requires_device":null}` a login for an
+// arbitrary user_id (#201) — and every one of them was a reading of requires_device.
+// The module no longer reads it at all, so none of these can be a grant, whatever
+// type requires_device has or whether it is there.
+func TestPerformAuthenticationRefusesSuccessWithoutAnAuthorizedStatus(t *testing.T) {
 	t.Parallel()
 
-	// success is a real JSON bool in every one of these: the point is what the
-	// module does *after* it has honored success, which is where the device step
-	// either survives or vanishes. Written verbatim, so the JSON type is the test.
+	// Written verbatim, so the JSON type is the test.
 	replies := []struct {
 		name  string
 		reply string
 	}{
-		{"null", `{"success":true,"session_id":"s","requires_device":null}` + "\n"},
-		{"an empty object", `{"success":true,"session_id":"s","requires_device":{}}` + "\n"},
-		{"an empty array", `{"success":true,"session_id":"s","requires_device":[]}` + "\n"},
-		{"the empty string", `{"success":true,"session_id":"s","requires_device":""}` + "\n"},
-		{"the string false", `{"success":true,"session_id":"s","requires_device":"false"}` + "\n"},
-		{"the string true", `{"success":true,"session_id":"s","requires_device":"true"}` + "\n"},
-		{"the number 0", `{"success":true,"session_id":"s","requires_device":0}` + "\n"},
-		{"the number 1", `{"success":true,"session_id":"s","requires_device":1}` + "\n"},
-		{"the float 0.0", `{"success":true,"session_id":"s","requires_device":0.0}` + "\n"},
+		{"the pre-v1 device-flow reply", `{"success":true,"session_id":"s","requires_device":true}` + "\n"},
+		{"the pre-v1 grant", `{"success":true,"session_id":"s","user_id":"testuser","requires_device":false}` + "\n"},
+		{"requires_device absent", `{"success":true,"session_id":"s","user_id":"testuser"}` + "\n"},
+		{"requires_device null", `{"success":true,"session_id":"s","requires_device":null}` + "\n"},
+		{"requires_device an empty object", `{"success":true,"session_id":"s","requires_device":{}}` + "\n"},
+		{"requires_device the string false", `{"success":true,"session_id":"s","requires_device":"false"}` + "\n"},
+		{"requires_device the number 0", `{"success":true,"session_id":"s","requires_device":0}` + "\n"},
+		{"an unknown status", `{"status":"approved","success":true,"user_id":"testuser"}` + "\n"},
+		{"status of the wrong type", `{"status":1,"success":true,"user_id":"testuser"}` + "\n"},
 	}
 
 	for _, tt := range replies {
@@ -465,15 +464,13 @@ func TestPerformAuthenticationRequiresABooleanRequiresDevice(t *testing.T) {
 
 			got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30)
 			if got == pam.PAMSuccess {
-				t.Fatalf("requires_device=%s was read as 'no device step' and success=true was "+
-					"honored on its own: PAM_SUCCESS from `auth sufficient pam_oidc.so` is a "+
-					"login, with no device flow and no group check", tt.name)
+				t.Fatalf("%s: success=true was honored without status \"authorized\": PAM_SUCCESS "+
+					"from `auth sufficient pam_oidc.so` is a login", tt.name)
 			}
-			if got != pam.PAMAuthInfoUnavail {
-				t.Fatalf("requires_device=%s: got PAM result %d, want pam.PAMAuthInfoUnavail (%d)",
-					tt.name, got, pam.PAMAuthInfoUnavail)
+			if got != pam.PAMAuthError {
+				t.Fatalf("%s: got PAM result %d, want pam.PAMAuthError (%d)", tt.name, got, pam.PAMAuthError)
 			}
-			// An uninterpretable response is not something to keep polling on.
+			// Not a pending flow either, so nothing to poll.
 			if n := len(broker.received()); n != 1 {
 				t.Errorf("expected exactly 1 request, got %d", n)
 			}
@@ -493,11 +490,11 @@ func TestPerformAuthenticationRequiresAStringSessionID(t *testing.T) {
 		name  string
 		reply string
 	}{
-		{"a number", `{"success":true,"requires_device":true,"session_id":12345}` + "\n"},
-		{"a bool", `{"success":true,"requires_device":true,"session_id":true}` + "\n"},
-		{"an object", `{"success":true,"requires_device":true,"session_id":{"id":"s"}}` + "\n"},
-		{"an array", `{"success":true,"requires_device":true,"session_id":["s"]}` + "\n"},
-		{"null", `{"success":true,"requires_device":true,"session_id":null}` + "\n"},
+		{"a number", `{"status":"pending","success":false,"session_id":12345}` + "\n"},
+		{"a bool", `{"status":"pending","success":false,"session_id":true}` + "\n"},
+		{"an object", `{"status":"pending","success":false,"session_id":{"id":"s"}}` + "\n"},
+		{"an array", `{"status":"pending","success":false,"session_id":["s"]}` + "\n"},
+		{"null", `{"status":"pending","success":false,"session_id":null}` + "\n"},
 	}
 
 	for _, tt := range replies {
@@ -565,7 +562,7 @@ func TestPerformAuthenticationIgnoresANonNumericPollInterval(t *testing.T) {
 
 	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
 		if n == 1 {
-			return `{"success":true,"session_id":"sess-pi","requires_device":true,` +
+			return `{"status":"pending","success":false,"session_id":"sess-pi",` +
 				`"metadata":{"polling_interval":"1"}}` + "\n"
 		}
 		return devicePending("sess-pi")

@@ -52,15 +52,18 @@ const (
 
 // Request represents a request from PAM module
 type Request struct {
-	Type       string                 `json:"type"`
-	UserID     string                 `json:"user_id"`
-	SourceIP   string                 `json:"source_ip"`
-	UserAgent  string                 `json:"user_agent"`
-	TargetHost string                 `json:"target_host"`
-	LoginType  string                 `json:"login_type"`
-	DeviceID   string                 `json:"device_id"`
-	SessionID  string                 `json:"session_id"`
-	Metadata   map[string]interface{} `json:"metadata"`
+	// ProtocolVersion is the wire contract version the client speaks. Absent or 0
+	// means 1; see requestProtocolVersionSupported.
+	ProtocolVersion int                    `json:"protocol_version"`
+	Type            string                 `json:"type"`
+	UserID          string                 `json:"user_id"`
+	SourceIP        string                 `json:"source_ip"`
+	UserAgent       string                 `json:"user_agent"`
+	TargetHost      string                 `json:"target_host"`
+	LoginType       string                 `json:"login_type"`
+	DeviceID        string                 `json:"device_id"`
+	SessionID       string                 `json:"session_id"`
+	Metadata        map[string]interface{} `json:"metadata"`
 }
 
 // Response represents a response to PAM module.
@@ -69,7 +72,14 @@ type Request struct {
 // used to be a qr_code field alongside Instructions, which already embeds the same
 // ASCII art: no client ever read it, and the two copies together put an ordinary
 // device-flow response ~20 bytes under the module's 8 KiB buffer (#162).
+//
+// Status is the authoritative field, and ProtocolVersion is on every reply; both
+// are set by finalizeResponse, which also derives Success from Status (#146).
+// RequiresDevice and RequiresApproval are legacy hints from before status existed,
+// still sent for older readers, and must never decide a grant.
 type Response struct {
+	ProtocolVersion  int                    `json:"protocol_version"`
+	Status           string                 `json:"status"`
 	Success          bool                   `json:"success"`
 	UserID           string                 `json:"user_id"`
 	Email            string                 `json:"email"`
@@ -447,6 +457,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// A version this broker does not implement is refused before anything else
+	// reads the request, and does no work: its fields may not mean what this
+	// broker would take them to mean. It is charged like a malformed request,
+	// since no handler sees it either.
+	if !requestProtocolVersionSupported(request.ProtocolVersion) {
+		log.Warn().
+			Int("protocol_version", request.ProtocolVersion).
+			Int("supported", ProtocolVersion).
+			Msg("Refusing IPC request for an unsupported protocol version")
+		s.rejectMalformed(conn, peerUID, "UNSUPPORTED_PROTOCOL", clientErrorMessage("UNSUPPORTED_PROTOCOL"))
+		return
+	}
+
 	// Validate request fields
 	if err := validateRequest(&request); err != nil {
 		log.Warn().
@@ -593,6 +616,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 
 	// Convert response
 	response := &Response{
+		Status:           authStatus(authResponse),
 		Success:          authResponse.Success,
 		UserID:           authResponse.UserID,
 		Email:            authResponse.Email,
@@ -635,6 +659,7 @@ func (s *Server) handleCheckSession(request *Request) *Response {
 	}
 
 	return &Response{
+		Status:           authStatus(authResponse),
 		Success:          authResponse.Success,
 		UserID:           authResponse.UserID,
 		Email:            authResponse.Email,
@@ -668,6 +693,7 @@ func (s *Server) handleRefreshSession(request *Request) *Response {
 	}
 
 	return &Response{
+		Status:       authStatus(authResponse),
 		Success:      authResponse.Success,
 		UserID:       authResponse.UserID,
 		Email:        authResponse.Email,
@@ -699,7 +725,7 @@ func (s *Server) handleRevokeSession(request *Request) *Response {
 	}
 
 	return &Response{
-		Success: true,
+		Status: StatusRevoked,
 	}
 }
 

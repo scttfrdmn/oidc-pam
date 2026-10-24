@@ -17,8 +17,8 @@ The defects this project has shipped were not defects in either half of a
 boundary — they were two halves disagreeing, with unit tests passing on both
 sides because each half was self-consistent:
 
-- **#120** — the broker returns `success: true` *together with*
-  `requires_device: true` when it *starts* a device flow, and the module checked
+- **#120** — the broker returned `success: true` *together with*
+  `requires_device: true` when it *started* a device flow, and the module checked
   `success` first. `auth sufficient pam_oidc.so` then granted the login before
   the user had visited the verification URL. Both halves were individually
   reasonable.

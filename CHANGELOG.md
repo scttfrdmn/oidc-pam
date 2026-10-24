@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The broker and the PAM module speak protocol version 1, and must be upgraded
+  together (#146, #179).** Version 1 is oauth2-pam's `docs/wire-protocol.md`. That
+  project owns the contract and this one consumes it. Every reply now carries a
+  `status` (`pending`, `authorized`, `denied`, `expired`, `error`, `revoked`) and a
+  `protocol_version`, and `success` is true only when `status` is `authorized` (or
+  `revoked`). A started device flow used to be reported as `success: true` with
+  `requires_device: true`; it is now `status: "pending"` with `success: false`. Both
+  mismatched pairings fail closed rather than misreading each other. An old module
+  against a new broker refuses every login, because it reads the pending reply as a
+  refusal. A new module against an old broker also refuses every login, because
+  that broker sends no `status`.
+
+### Security
+
+- **The module grants a login only on `success: true` *and* `status: "authorized"`,
+  and only when the reply's `user_id` is the account being logged into (#146,
+  #179).** It no longer reads `requires_device` at all. That field took three fixes
+  to read safely (#120, #168, #201), and every one of those bugs was a reading of
+  it. Its absence or wrong type no longer has any reading that grants. The
+  `user_id` comparison duplicates the broker's identity binding on purpose: the
+  broker is a different process, and may be an older version of itself.
+  `internal/brokerclient`, which `oidc-pam-helper` uses, applies the same rule.
+- **Both ends refuse a protocol version they do not implement.** The broker
+  answers `UNSUPPORTED_PROTOCOL` and does no work, and the module and
+  `brokerclient` treat such a reply as a transport failure rather than reading
+  its fields. A reply's `user_id` is now populated only when it is `authorized`.
+
 ## [0.5.3] - 2026-10-24
 
 ### Security

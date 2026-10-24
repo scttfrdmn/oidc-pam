@@ -568,7 +568,9 @@ case_nonroot_ipc_rejected() {
     response="$(runuser -u alice -- \
         bash -c "printf '%s' '${request}' | timeout 5 nc -U '${SOCKET}'" 2>&1)"
     log "broker answered a non-root authenticate request: ${response:-<nothing>}"
-    if grep -q '"success":true' <<<"${response}"; then
+    # A served authenticate answers status "pending" with success false (protocol
+    # version 1, #146), so success alone no longer shows that one was served.
+    if grep -qE '"success":true|"status":"pending"' <<<"${response}"; then
         fail "the broker started an authentication for a non-root process"
     fi
 
