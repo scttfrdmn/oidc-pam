@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `typecheck` error. Because `Go Vulnerability Check` is a required check, this was
   also blocking every open dependency pull request.
 
+### Changed
+
+- **Every CodeQL Action reference moves to v4.39.1 (#263).** v3 is deprecated in
+  December 2026. `security.yml` had five references on v3 (`init`, `autobuild`,
+  `analyze`, and the gosec and Semgrep SARIF uploads) and two on v4.32.0. All seven
+  now pin the same SHA. Job ids and SARIF categories are unchanged, so the analysis
+  keys that existing alerts are filed under stay the same (#258).
+
 ## [0.5.2] - 2026-09-12
 
 ### Security
