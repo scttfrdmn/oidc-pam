@@ -17,8 +17,21 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+)
+
+// ProtocolVersion is the wire contract version this client speaks: version 1 of
+// oauth2-pam's docs/wire-protocol.md, which that project owns (#179). It is sent on
+// every request, and a reply carrying another version is refused rather than read.
+const ProtocolVersion = 1
+
+// The reply statuses of version 1 that this client acts on. Any other status, or
+// none, is never a grant.
+const (
+	StatusPending    = "pending"
+	StatusAuthorized = "authorized"
 )
 
 const (
@@ -51,15 +64,16 @@ const (
 // that reads source_ip evaluating the empty string. Use SourceIPFromRHost and
 // ThisHost rather than filling them in by hand.
 type Request struct {
-	Type       string                 `json:"type"`
-	UserID     string                 `json:"user_id,omitempty"`
-	SourceIP   string                 `json:"source_ip,omitempty"`
-	UserAgent  string                 `json:"user_agent,omitempty"`
-	TargetHost string                 `json:"target_host,omitempty"`
-	LoginType  string                 `json:"login_type,omitempty"`
-	DeviceID   string                 `json:"device_id,omitempty"`
-	SessionID  string                 `json:"session_id,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	ProtocolVersion int                    `json:"protocol_version"`
+	Type            string                 `json:"type"`
+	UserID          string                 `json:"user_id,omitempty"`
+	SourceIP        string                 `json:"source_ip,omitempty"`
+	UserAgent       string                 `json:"user_agent,omitempty"`
+	TargetHost      string                 `json:"target_host,omitempty"`
+	LoginType       string                 `json:"login_type,omitempty"`
+	DeviceID        string                 `json:"device_id,omitempty"`
+	SessionID       string                 `json:"session_id,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // MaxSourceIPLen is the wire contract's bound on source_ip: an IPv6 literal with
@@ -106,7 +120,14 @@ func ThisHost() string {
 }
 
 // Response is an IPC response. It mirrors ipc.Response.
+//
+// Status is authoritative. ProtocolVersion is kept raw because the contract reads a
+// malformed one as absent rather than failing the whole reply; see Version.
+// RequiresDevice and RequiresApproval are the legacy hints from before status
+// existed, and nothing here decides on them.
 type Response struct {
+	ProtocolVersion  json.RawMessage        `json:"protocol_version,omitempty"`
+	Status           string                 `json:"status,omitempty"`
 	Success          bool                   `json:"success"`
 	UserID           string                 `json:"user_id,omitempty"`
 	Email            string                 `json:"email,omitempty"`
@@ -123,6 +144,34 @@ type Response struct {
 	Instructions     string                 `json:"instructions,omitempty"`
 	RiskScore        int                    `json:"risk_score,omitempty"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// Version reports the reply's protocol_version. Absent, null and 0 mean 1, and so
+// does a value that is not an integer: a broker that predates the field speaks
+// version 1, and what must never happen is nonsense read as a known version other
+// than 1.
+func (r *Response) Version() int {
+	n, err := strconv.Atoi(strings.TrimSpace(string(r.ProtocolVersion)))
+	if err != nil || n == 0 {
+		return ProtocolVersion
+	}
+	return n
+}
+
+// Granted reports whether r grants access to the local account userID: success and
+// status "authorized" must agree, and the account the broker authorized must be the
+// one being logged into. The broker checks that binding too; it is checked again
+// here because the broker is a different process and may be an older version of
+// itself.
+func (r *Response) Granted(userID string) bool {
+	return r.Success && r.Status == StatusAuthorized && userID != "" && r.UserID == userID
+}
+
+// Pending reports whether r is a device flow that has started and not finished.
+// A reply that says pending and success at once contradicts itself, and is not
+// pending.
+func (r *Response) Pending() bool {
+	return r.Status == StatusPending && !r.Success
 }
 
 // DenialError reports that the broker refused the authentication. It is a
@@ -238,7 +287,9 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		return nil, fmt.Errorf("set broker connection deadline: %w", err)
 	}
 
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
+	stamped := *req
+	stamped.ProtocolVersion = ProtocolVersion
+	if err := json.NewEncoder(conn).Encode(&stamped); err != nil {
 		return nil, fmt.Errorf("send %s request: %w", req.Type, err)
 	}
 
@@ -246,13 +297,19 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("read response to %s request: %w", req.Type, err)
 	}
+	// A transport failure, not a decision about the user: the reply may parse fine
+	// and "authorized" may mean something new.
+	if v := resp.Version(); v != ProtocolVersion {
+		return nil, fmt.Errorf("broker replied with protocol version %d; this client speaks %d",
+			v, ProtocolVersion)
+	}
 
 	return &resp, nil
 }
 
 // Authenticate starts an authentication and returns the broker's first
-// response. A response with RequiresDevice set means the device flow has begun
-// and is *not* a successful authentication — see AuthenticateAndWait.
+// response. A pending response means the device flow has begun and is *not* a
+// successful authentication — see AuthenticateAndWait.
 func (c *Client) Authenticate(ctx context.Context, req *Request) (*Response, error) {
 	authRequest := *req
 	authRequest.Type = "authenticate"
@@ -278,10 +335,10 @@ func (c *Client) CheckSession(ctx context.Context, sessionID, userID string) (*R
 // ordinary error when the broker could not be reached or understood — callers
 // that map to PAM codes should return PAM_AUTHINFO_UNAVAIL only for the latter.
 //
-// A response is treated as a grant only when Success is set *and* RequiresDevice
-// is not: the broker reports Success together with RequiresDevice while the flow
-// is merely pending, and identity binding and require_groups are enforced after
-// that point.
+// A response is a grant only by Response.Granted: success and status "authorized"
+// together, for req.UserID. A pending response is polled; anything else is a
+// denial. This used to decide on Success and RequiresDevice, the convention before
+// status existed, in which a started flow reported Success (#146).
 func (c *Client) AuthenticateAndWait(ctx context.Context, req *Request, timeout time.Duration) (*Response, error) {
 	if timeout <= 0 {
 		timeout = DefaultAuthTimeout
@@ -292,15 +349,8 @@ func (c *Client) AuthenticateAndWait(ctx context.Context, req *Request, timeout 
 		return nil, err
 	}
 
-	if !resp.RequiresDevice {
-		if !resp.Success {
-			return nil, &DenialError{ErrorCode: resp.ErrorCode, Message: resp.ErrorMessage}
-		}
-		return resp, nil
-	}
-	if !resp.Success {
-		// A refusal that also happens to set requires_device is still a refusal.
-		return nil, &DenialError{ErrorCode: resp.ErrorCode, Message: resp.ErrorMessage}
+	if !resp.Pending() {
+		return decided(resp, req.UserID)
 	}
 	if resp.SessionID == "" {
 		return nil, fmt.Errorf("broker requires device authorization but returned no session_id")
@@ -333,17 +383,31 @@ func (c *Client) AuthenticateAndWait(ctx context.Context, req *Request, timeout 
 		if err != nil {
 			return nil, err
 		}
-		if !resp.Success {
-			return nil, &DenialError{ErrorCode: resp.ErrorCode, Message: resp.ErrorMessage}
-		}
-		if !resp.RequiresDevice {
-			return resp, nil
+		if !resp.Pending() {
+			return decided(resp, userID)
 		}
 
 		if !now().Before(deadline) {
 			return nil, &TimeoutError{Waited: timeout}
 		}
 	}
+}
+
+// decided turns a reply that is not pending into the grant or the denial it is.
+func decided(resp *Response, userID string) (*Response, error) {
+	if resp.Granted(userID) {
+		return resp, nil
+	}
+	code := resp.ErrorCode
+	if resp.Success && code == "" {
+		// success=true that is not a grant: no status, an unknown one, or an
+		// authorization for a different account. Named, so the log says which.
+		code = "NOT_AUTHORIZED"
+		if resp.Status == StatusAuthorized {
+			code = "USER_MISMATCH"
+		}
+	}
+	return nil, &DenialError{ErrorCode: code, Message: resp.ErrorMessage}
 }
 
 // pollInterval reads metadata.polling_interval (seconds) from a response,

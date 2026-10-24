@@ -246,7 +246,10 @@ func TestWriteResponseReplacesAnOversizedResponse(t *testing.T) {
 func responseOfExactWireSize(t *testing.T, want int) *Response {
 	t.Helper()
 
-	response := &Response{Success: true, SessionID: "sess-1"}
+	// Finalized first, so what is measured here is what writeResponse would send:
+	// finalizeResponse adds protocol_version and status to every reply.
+	response := &Response{Status: StatusAuthorized, SessionID: "sess-1"}
+	finalizeResponse(response)
 	payload, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)

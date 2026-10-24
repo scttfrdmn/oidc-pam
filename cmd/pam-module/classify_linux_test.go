@@ -27,10 +27,13 @@ import (
 //     success=true was honored on its own with no device flow, no identity binding
 //     and no require_groups check (#201).
 //
-// Every field these two functions read is covered below with a value of the wrong
-// JSON type: success, requires_device, error_code and error_message. The rule is
-// the same for all of them — with `auth sufficient pam_oidc.so`, PAM_SUCCESS is a
-// login, so a reply the module cannot interpret must never produce one.
+// Since version 1 of the wire contract (#146, #179) requires_device is not read at
+// all: a grant is success=true *and* status "authorized" *and* a user_id equal to
+// the account being logged into, and nothing else. TestClassifyResponseFollowsTheV1Rule
+// holds that rule; the tables after it cover every field the decision still reads
+// with a value of the wrong JSON type. The rule is the same for all of them — with
+// `auth sufficient pam_oidc.so`, PAM_SUCCESS is a login, so a reply the module
+// cannot interpret must never produce one.
 
 // The replies the module is entitled to grant on, and the one it must hold on.
 //
@@ -46,27 +49,22 @@ func TestClassifyResponseGrantsOnlyACompletedAuthentication(t *testing.T) {
 		want  int
 	}{
 		{
-			// The only shape that is a grant: success=true and the broker has said,
-			// with a real JSON false, that no device step is outstanding.
-			name:  "success with requires_device false",
-			reply: `{"success":true,"session_id":"s","user_id":"testuser","requires_device":false}`,
+			// The only shape that is a grant.
+			name:  "authorized",
+			reply: `{"protocol_version":1,"status":"authorized","success":true,"session_id":"s","user_id":"testuser"}`,
 			want:  int(pam.PAMSuccess),
 		},
 		{
-			// internal/ipc.Response declares requires_device with no omitempty, so
-			// the real broker always sends it; absent can only come from a different
-			// producer, and is read as "no device step".
-			name:  "success with requires_device absent",
-			reply: `{"success":true,"session_id":"s","user_id":"testuser"}`,
+			// A broker that predates protocol_version speaks version 1 by definition.
+			name:  "authorized, protocol_version absent",
+			reply: `{"status":"authorized","success":true,"session_id":"s","user_id":"testuser"}`,
 			want:  int(pam.PAMSuccess),
 		},
 		{
-			// success=true *with* requires_device=true is the broker reporting that
-			// it has only started the device flow. Neither a grant nor a denial: the
-			// user has not visited the device URL yet, and identity binding and
-			// require_groups are still to come.
+			// Neither a grant nor a denial: the user has not visited the device URL
+			// yet, and identity binding and require_groups are still to come.
 			name:  "device flow started",
-			reply: `{"success":true,"session_id":"s","requires_device":true}`,
+			reply: `{"protocol_version":1,"status":"pending","success":false,"session_id":"s","requires_device":true}`,
 			want:  brokerPending,
 		},
 	}
@@ -112,25 +110,17 @@ func TestClassifyResponseDeniesAnythingItCannotInterpret(t *testing.T) {
 		{"success is an empty array", `{"success":[]}`},
 
 		// success absent entirely. A reply with no verdict in it is not a verdict.
-		{"success absent", `{"session_id":"s","user_id":"testuser","requires_device":false}`},
+		{"success absent", `{"status":"authorized","session_id":"s","user_id":"testuser"}`},
 		{"empty object", `{}`},
 		{"success spelled differently", `{"Success":true,"user_id":"testuser"}`},
 
-		// requires_device of the wrong type, with a real boolean success=true. This
-		// is the dangerous half: anything not a JSON boolean was silently read as
-		// false — "no device authorization needed" — and success=true was then
-		// honored on its own (#201). JSON null is the worst of them, because
-		// json_object_object_get_ex answers TRUE with a NULL object for it, so it
-		// took the "absent" path rather than looking like a value at all.
-		{"requires_device is null", `{"success":true,"session_id":"s","requires_device":null}`},
-		{"requires_device is the string false", `{"success":true,"session_id":"s","requires_device":"false"}`},
-		{"requires_device is the string true", `{"success":true,"session_id":"s","requires_device":"true"}`},
-		{"requires_device is the empty string", `{"success":true,"session_id":"s","requires_device":""}`},
-		{"requires_device is the number 0", `{"success":true,"session_id":"s","requires_device":0}`},
-		{"requires_device is the number 1", `{"success":true,"session_id":"s","requires_device":1}`},
-		{"requires_device is the float 0.0", `{"success":true,"session_id":"s","requires_device":0.0}`},
-		{"requires_device is an empty object", `{"success":true,"session_id":"s","requires_device":{}}`},
-		{"requires_device is an empty array", `{"success":true,"session_id":"s","requires_device":[]}`},
+		// pending and success=true at once is a reply that contradicts itself.
+		{"pending with success true", `{"status":"pending","success":true,"session_id":"s"}`},
+
+		// A version this module does not implement may parse fine with "authorized"
+		// meaning something new, so its fields are not read at all.
+		{"a later protocol version", `{"protocol_version":2,"status":"authorized","success":true,"user_id":"testuser"}`},
+		{"a negative protocol version", `{"protocol_version":-1,"status":"authorized","success":true,"user_id":"testuser"}`},
 
 		// Not a JSON object at all. json_object_object_get_ex answers FALSE for
 		// these, which is the "no success field" path — but only because it is
@@ -224,10 +214,16 @@ func TestClassifyResponseDeniesARefusal(t *testing.T) {
 			pam.PAMAuthError,
 		},
 
-		// success is read before requires_device, so a refusal that also asks for a
-		// device step is still a refusal — not a pending device flow to sit and poll
-		// until the login grace time runs out.
+		// requires_device is not read, so a refusal that also asks for a device step
+		// is still a refusal — not a pending device flow to sit and poll until the
+		// login grace time runs out.
 		{"a refusal that also wants a device step", `{"success":false,"requires_device":true}`, pam.PAMAuthError},
+
+		// status says which kind of refusal; the error_code still selects the PAM
+		// result, and success=false wins over a status that claims otherwise.
+		{"denied", `{"status":"denied","success":false,"error_code":"POLICY_DENIED"}`, pam.PAMPermDenied},
+		{"expired", `{"status":"expired","success":false,"error_code":"SESSION_EXPIRED"}`, pam.PAMAuthError},
+		{"authorized but success false", `{"status":"authorized","success":false,"user_id":"testuser"}`, pam.PAMAuthError},
 	}
 
 	for _, tc := range cases {
@@ -317,5 +313,107 @@ func TestMapErrorCodeAlwaysDenies(t *testing.T) {
 				t.Fatalf("map_error_code(%s) = %d, want %d", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// The client half of the contract's one rule (#146, #179): access only on
+// success=true *and* status "authorized", and only for the account being logged
+// into. Every case here has success=true, so each is a reply the module would have
+// granted before version 1.
+func TestClassifyResponseFollowsTheV1Rule(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		reply string
+		user  string
+		want  pam.PAMResultCode
+	}{
+		{"the pre-v1 grant has no status", `{"success":true,"user_id":"testuser","requires_device":false}`, "testuser", pam.PAMAuthError},
+		{"the pre-v1 device-flow reply", `{"success":true,"session_id":"s","requires_device":true}`, "testuser", pam.PAMAuthError},
+		{"an unknown status", `{"status":"approved","success":true,"user_id":"testuser"}`, "testuser", pam.PAMAuthError},
+		{"a status of the wrong type", `{"status":true,"success":true,"user_id":"testuser"}`, "testuser", pam.PAMAuthError},
+		{"status differs in case", `{"status":"Authorized","success":true,"user_id":"testuser"}`, "testuser", pam.PAMAuthError},
+
+		// Conformance item 3: the broker binds the identity to the account too, and
+		// that is the point — it is a different process, and may be older.
+		{"authorized for another account", `{"status":"authorized","success":true,"user_id":"root"}`, "testuser", pam.PAMAuthError},
+		{"authorized with no user_id", `{"status":"authorized","success":true}`, "testuser", pam.PAMAuthError},
+		{"authorized with an empty user_id", `{"status":"authorized","success":true,"user_id":""}`, "testuser", pam.PAMAuthError},
+		{"user_id of the wrong type", `{"status":"authorized","success":true,"user_id":0}`, "testuser", pam.PAMAuthError},
+		{"user_id is a prefix of the login", `{"status":"authorized","success":true,"user_id":"test"}`, "testuser", pam.PAMAuthError},
+		{"the matching account", `{"status":"authorized","success":true,"user_id":"alice"}`, "alice", pam.PAMSuccess},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := classifyBrokerResponseFor(tc.reply, tc.user); got != int(tc.want) {
+				t.Fatalf("classify(%s) for %s = %d, want %d", tc.reply, tc.user, got, int(tc.want))
+			}
+		})
+	}
+}
+
+// protocol_version on a reply, per the table in the wire contract: absent, null and
+// 0 are 1; a string or a non-integral number is read as absent, so 1; anything else
+// is a version this module does not implement and is refused before any other
+// field is read.
+func TestClassifyResponseReadsTheReplyProtocolVersion(t *testing.T) {
+	t.Parallel()
+
+	const rest = `"status":"authorized","success":true,"user_id":"testuser"}`
+	cases := []struct {
+		version string
+		want    pam.PAMResultCode
+	}{
+		{`null`, pam.PAMSuccess},
+		{`0`, pam.PAMSuccess},
+		{`1`, pam.PAMSuccess},
+		{`"2"`, pam.PAMSuccess},
+		{`1.5`, pam.PAMSuccess},
+		{`2`, pam.PAMAuthInfoUnavail},
+		{`-1`, pam.PAMAuthInfoUnavail},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.version, func(t *testing.T) {
+			t.Parallel()
+
+			reply := `{"protocol_version":` + tc.version + `,` + rest
+			if got := classifyBrokerResponse(reply); got != int(tc.want) {
+				t.Fatalf("classify(%s) = %d, want %d", reply, got, int(tc.want))
+			}
+		})
+	}
+}
+
+// Both ends, the contract's test for an extension field: delete it and the
+// decision must not change. requires_device and requires_approval are what the
+// broker sent before status existed, and making the grant depend on one of them is
+// what version 1 replaced.
+func TestClassifyResponseIgnoresTheLegacyHints(t *testing.T) {
+	t.Parallel()
+
+	bases := []string{
+		`"status":"authorized","success":true,"user_id":"testuser"`,
+		`"status":"pending","success":false,"session_id":"s"`,
+		`"status":"denied","success":false,"error_code":"POLICY_DENIED"`,
+	}
+	hints := []string{
+		`"requires_device":true`, `"requires_device":false`, `"requires_device":null`,
+		`"requires_device":"false"`, `"requires_approval":true`,
+	}
+
+	for _, base := range bases {
+		want := classifyBrokerResponse(`{` + base + `}`)
+		for _, hint := range hints {
+			reply := `{` + base + `,` + hint + `}`
+			if got := classifyBrokerResponse(reply); got != want {
+				t.Errorf("classify(%s) = %d, but %d without %s: a legacy hint changed the decision",
+					reply, got, want, hint)
+			}
+		}
 	}
 }

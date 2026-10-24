@@ -78,6 +78,7 @@ func (s *Server) setDeviceInstructions(response *Response, loginType, qrCode str
 // fitsModuleBuffer reports whether response, once marshalled and newline
 // terminated, is small enough for the PAM module to read.
 func fitsModuleBuffer(response *Response) bool {
+	finalizeResponse(response)
 	payload, err := json.Marshal(response)
 	if err != nil {
 		// Unmarshallable is not "fits": the caller's fallback is smaller, and
@@ -95,6 +96,9 @@ func fitsModuleBuffer(response *Response) bool {
 // module maps to a distinct PAM result and which says in the broker log how big
 // the response was.
 func (s *Server) writeResponse(conn net.Conn, response any) {
+	if r, forModule := response.(*Response); forModule {
+		finalizeResponse(r)
+	}
 	payload, err := json.Marshal(response)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to encode IPC response")
@@ -107,11 +111,12 @@ func (s *Server) writeResponse(conn net.Conn, response any) {
 			Int("max_response_size", maxResponseWire).
 			Msg("Response does not fit the PAM module's buffer; sending RESPONSE_TOO_LARGE instead of a truncated response")
 
-		payload, err = json.Marshal(&Response{
-			Success:      false,
+		tooLarge := &Response{
 			ErrorCode:    "RESPONSE_TOO_LARGE",
 			ErrorMessage: clientErrorMessage("RESPONSE_TOO_LARGE"),
-		})
+		}
+		finalizeResponse(tooLarge)
+		payload, err = json.Marshal(tooLarge)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to encode RESPONSE_TOO_LARGE response")
 			return

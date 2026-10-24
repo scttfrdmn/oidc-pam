@@ -36,6 +36,14 @@
 // Two names for one size is how a size ends up changed in one place only.
 #define MAX_RESPONSE_SIZE 16384
 
+// Version of the broker<->module wire contract this module speaks: oauth2-pam's
+// docs/wire-protocol.md, which that project owns and versions (#179). Sent on every
+// request; a reply carrying any other version is refused rather than interpreted,
+// because it may parse fine and "authorized" may mean something new.
+// ProtocolVersion in internal/ipc/protocol.go is the broker's half, and
+// TestProtocolVersionMatchesTheModule holds the two equal.
+#define PROTOCOL_VERSION 1
+
 // receive_auth_response results. A response that does not fit MAX_RESPONSE_SIZE is
 // distinguished from a transport failure so the caller can say so: the two mean
 // very different things to whoever is reading the log.
@@ -44,8 +52,8 @@
 #define RECV_RESPONSE_TOO_LARGE (-2)
 
 // Sentinel returned by classify_response_text for a device flow that has been
-// started but not yet completed: the broker said success=true *and*
-// requires_device=true, which is neither a grant nor a denial. Every PAM_* return
+// started but not yet completed: the broker said status "pending", which is
+// neither a grant nor a denial. Every PAM_* return
 // code is non-negative, so a negative value cannot collide with one.
 //
 // It lives here rather than in cgo_bridge_linux.c so a test can name the value the
@@ -116,7 +124,9 @@ int receive_auth_response(int sock, char *response, size_t response_size);
 int receive_auth_response_within(int sock, char *response, size_t response_size, int total_timeout_ms);
 // The two functions that decide whether a broker reply is a grant or a denial.
 // Declared here so they are reachable from a test — neither had one (#197).
-int classify_response_text(const char *response);
+// username is the account being logged into: a grant is honoured only for that
+// account, whatever the broker checked on its side.
+int classify_response_text(const char *response, const char *username);
 int map_error_code(const char *error_code);
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s);

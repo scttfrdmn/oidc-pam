@@ -41,6 +41,8 @@ func clientErrorMessage(code string) string {
 		return "Failed to list managed SSH keys"
 	case "RESPONSE_TOO_LARGE":
 		return "Authentication response too large to send"
+	case "UNSUPPORTED_PROTOCOL":
+		return "Unsupported protocol version"
 	default:
 		return "An error occurred"
 	}
