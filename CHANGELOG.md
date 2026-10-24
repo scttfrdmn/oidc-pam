@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `mime/multipart`), all fixed in 1.27.3. Binaries are statically linked
   against the standard library, so the fix only takes effect when the binaries are
   rebuilt. `go.mod`, every `setup-go` pin and the e2e images now say `1.27.3`, and
-  govulncheck moves to v1.9.0 in lockstep. Because `Go Vulnerability Check` is a
-  required check, this was also blocking every open dependency pull request.
+  govulncheck moves to v1.9.0 in lockstep. golangci-lint moves to v2.15.0: the
+  v2.13.2 binary cannot read go1.27.3's export data and fails every package as a
+  `typecheck` error. Because `Go Vulnerability Check` is a required check, this was
+  also blocking every open dependency pull request.
 
 ## [0.5.2] - 2026-09-12
 

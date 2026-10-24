@@ -73,7 +73,7 @@ func TestPeerCredentialLookupLeavesTheReadDeadlineWorking(t *testing.T) {
 		// for that reference to be dropped — so leaving it there would hang the
 		// test's cleanup instead of reporting the failure above.
 		_ = clientConn.Close()
-		<-readDone
+		t.Logf("blocked read ended after close with: %v", <-readDone)
 	}
 }
 
