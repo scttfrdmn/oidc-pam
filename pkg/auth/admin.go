@@ -18,6 +18,10 @@ const (
 	// sweep has not removed yet. It is not usable: every lookup path rechecks
 	// expiry rather than trusting the sweep.
 	SessionStatusExpired = "expired"
+	// SessionStatusEnded is a login whose device flow failed — refused, out of
+	// time, or broken — kept briefly so the client polling it learns why. It was
+	// never a session and grants nothing.
+	SessionStatusEnded = "ended"
 )
 
 // BrokerStatus is a snapshot of the broker's runtime state, as reported by
@@ -79,9 +83,10 @@ func (b *Broker) Status() BrokerStatus {
 	b.sessionMutex.RLock()
 	defer b.sessionMutex.RUnlock()
 	for _, session := range b.sessions {
-		if session.IsActive {
+		switch {
+		case session.IsActive:
 			status.ActiveSessions++
-		} else {
+		case !session.isEnded():
 			status.PendingSessions++
 		}
 	}
@@ -128,6 +133,8 @@ func (b *Broker) ListSessions() []SessionInfo {
 
 func sessionStatus(session *Session, now time.Time) string {
 	switch {
+	case session.isEnded():
+		return SessionStatusEnded
 	case !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt):
 		return SessionStatusExpired
 	case session.IsActive:

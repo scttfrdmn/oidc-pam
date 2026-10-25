@@ -129,6 +129,50 @@ type Session struct {
 	// expiry, up to 24 hours later. A cap on how many pending logins the host holds
 	// means nothing if the work each one costs outlives the accounting.
 	cancel chan struct{}
+
+	// outcome is set on the record a login leaves behind when its device flow ended
+	// without authorizing anything, and nil on every live session. See endSession.
+	outcome *sessionOutcome
+}
+
+// terminalSessionGrace is how long a login that ended without being authorized
+// stays queryable. The wire contract requires that one poll after a terminal
+// outcome gets the outcome (oauth2-pam docs/wire-protocol.md, #179), and two
+// minutes is the length the reference broker uses. Clients are told not to rely on
+// the exact figure, only on there being one.
+const terminalSessionGrace = 2 * time.Minute
+
+// sessionOutcome is why a login ended, as check_session reports it. Both fields
+// go on the wire, so they carry a code from the contract's vocabulary and a fixed
+// message — never an error string from the provider or the filesystem, whose
+// detail belongs in the broker's log and audit trail.
+type sessionOutcome struct {
+	errorCode    string
+	errorMessage string
+}
+
+// The outcomes a device flow can end with. The three denials are decisions about
+// the identity — refused at the provider, mapped to a different account, short of
+// a required group — and are reported with status "denied". Running out of time is
+// "expired", and anything else is an internal failure whose detail stays off the
+// wire.
+var (
+	outcomeAccessDenied = sessionOutcome{"ACCESS_DENIED",
+		"the sign-in was declined at the identity provider"}
+	outcomeIdentityMismatch = sessionOutcome{"IDENTITY_MISMATCH",
+		"the identity that signed in does not match the requested account"}
+	outcomeGroupDenied = sessionOutcome{"GROUP_DENIED",
+		"the identity is not in a group this login requires"}
+	outcomeExpired = sessionOutcome{"SESSION_EXPIRED",
+		"the device code expired before the sign-in was completed"}
+	outcomeFailed = sessionOutcome{"AUTHENTICATION_FAILED",
+		"authentication could not be completed; the broker's log has the detail"}
+)
+
+// isEnded reports whether s is the record of a login that ended without being
+// authorized, rather than a session.
+func (s *Session) isEnded() bool {
+	return s.outcome != nil
 }
 
 // AuthRequest represents an authentication request
@@ -803,6 +847,18 @@ func (b *Broker) CheckSession(sessionID, userID string) (*AuthResponse, error) {
 		}, nil
 	}
 
+	// A login that ended says how, for as long as its record lasts. This is after
+	// the ownership check on purpose: why somebody else's login failed is not the
+	// caller's business.
+	if session.isEnded() {
+		return &AuthResponse{
+			Success:      false,
+			SessionID:    sessionID,
+			ErrorCode:    session.outcome.errorCode,
+			ErrorMessage: session.outcome.errorMessage,
+		}, nil
+	}
+
 	if !session.IsActive {
 		return &AuthResponse{
 			Success:        true,
@@ -1213,10 +1269,61 @@ func (b *Broker) RevokeSession(sessionID, userID string) error {
 
 // Helper methods
 
+// getSession returns the stored session, or nil if there is none. The record of
+// an ended login counts as none once its grace period is over, whether or not the
+// sweep has got to it yet: the sweep runs every five minutes, and the grace period
+// is not meant to be anything up to seven.
 func (b *Broker) getSession(sessionID string) *Session {
 	b.sessionMutex.RLock()
 	defer b.sessionMutex.RUnlock()
-	return b.sessions[sessionID]
+	session := b.sessions[sessionID]
+	if session != nil && session.isEnded() && !time.Now().Before(session.ExpiresAt) {
+		return nil
+	}
+	return session
+}
+
+// endSession replaces a pending login that has just failed with the record of
+// how it failed, so that the client still polling for it learns the outcome
+// instead of SESSION_NOT_FOUND. The record lives for terminalSessionGrace and is
+// then swept like any other expired session.
+//
+// (#179) Deleting the session outright was how every failure used to end, which
+// turned every denial into "not found" — indistinguishable on the wire from a
+// broker restart, and from a session that never existed.
+//
+// The record is built fresh rather than cloned. It carries who and where, which is
+// what ownership checks and the session listing read, and nothing that could be
+// mistaken for a credential: no token ID, no key, no identity the provider
+// asserted.
+//
+// The store is conditional on the pointer, as in replaceSession. A login that was
+// revoked or displaced while its flow ran is already gone, and is not brought back
+// as a record of a failure.
+func (b *Broker) endSession(session *Session, outcome sessionOutcome) {
+	now := time.Now()
+	ended := &Session{
+		ID:           session.ID,
+		UserID:       session.UserID,
+		Provider:     session.Provider,
+		LoginType:    session.LoginType,
+		SourceIP:     session.SourceIP,
+		CreatedAt:    session.CreatedAt,
+		ExpiresAt:    now.Add(terminalSessionGrace),
+		LastAccessed: now,
+		outcome:      &outcome,
+	}
+
+	b.sessionMutex.Lock()
+	defer b.sessionMutex.Unlock()
+	if b.sessions[session.ID] != session {
+		return
+	}
+	b.sessions[session.ID] = ended
+	// The flow's own goroutine is the caller and is about to return, so closing
+	// the channel tells nobody anything; it is closed anyway so that this path
+	// releases a pending session exactly as removeSession does.
+	stopPendingFlow(session)
 }
 
 // getAndRemoveIfExpiredSession atomically checks a session and removes it if it
@@ -1493,7 +1600,10 @@ func (b *Broker) admitPendingSession(session *Session, now time.Time) pendingAdm
 	oldest := make(map[string]*Session)
 	hostTotal := 0
 	for _, s := range b.sessions {
-		if s.IsActive {
+		// The record of an ended login holds no flow, so it holds no slot either.
+		// Counting it let every failure occupy a share of the pool for the length of
+		// the grace period, which is a cap a client could fill by failing on purpose.
+		if s.IsActive || s.isEnded() {
 			continue
 		}
 		if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now) {
@@ -1784,7 +1894,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 			return
 		case <-timeout.C:
 			// Device flow expired
-			b.removeSession(session.ID)
+			b.endSession(session, outcomeExpired)
 			return
 		case <-ticker.C:
 			// Poll for authorization using a per-attempt context with timeout.
@@ -1835,7 +1945,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
-				b.removeSession(session.ID)
+				b.endSession(session, pollFailureOutcome(err))
 				return
 			}
 
@@ -1849,7 +1959,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 				if b.metrics != nil {
 					b.metrics.RecordAuth(provider.Name, "failure", "USER_INFO_FAILED")
 				}
-				b.removeSession(session.ID)
+				b.endSession(session, outcomeFailed)
 				return
 			}
 
@@ -1896,7 +2006,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
-				b.removeSession(session.ID)
+				b.endSession(session, identityOutcome(errCode))
 				return
 			}
 
@@ -1943,7 +2053,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
-				b.removeSession(session.ID)
+				b.endSession(session, identityOutcome(errCode))
 				return
 			}
 
@@ -1975,7 +2085,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 						"reports no hardware-backed or FIDO authentication method",
 					Timestamp: time.Now(),
 				})
-				b.removeSession(session.ID)
+				b.endSession(session, identityOutcome("DEVICE_NOT_TRUSTED"))
 				return
 			}
 
@@ -2002,7 +2112,7 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					ErrorMessage: err.Error(),
 					Timestamp:    time.Now(),
 				})
-				b.removeSession(session.ID)
+				b.endSession(session, outcomeFailed)
 				return
 			}
 
@@ -2063,11 +2173,10 @@ func (b *Broker) pollDeviceAuthorization(session *Session, provider *OIDCProvide
 					// the user was told they were authenticated and then could not
 					// log in — and, worse, the *reason* they could not was that the
 					// broker had written the key to a directory that was not their
-					// home, or had failed to at all. Dropping the session makes the
-					// module report the denial it already has a code for
-					// (SESSION_NOT_FOUND on the next poll), so no wire change is
-					// needed to carry this.
-					b.removeSession(updated.ID)
+					// home, or had failed to at all. Ending the session makes the next
+					// poll report AUTHENTICATION_FAILED, and the cause is in the audit
+					// record above rather than on the wire.
+					b.endSession(session, outcomeFailed)
 					return
 				}
 				updated.SSHKeyID = sshKey.ID
@@ -2722,6 +2831,47 @@ func claimToUsername(userInfo *UserInfo, claimName string) (string, error) {
 // classifyPollError maps a device-authorization polling error to a small, fixed
 // set of metric label values. Raw error strings must never be used as metric
 // labels (unbounded cardinality + info leak).
+// pollFailureOutcome is what a client polling a login is told when the provider
+// answered the device-code poll with a failure. Only two failures are things the
+// user can act on — they declined, or they ran out of time — and the rest are the
+// broker's problem, reported as one code with the detail left in the audit record.
+//
+// It matches the sentinels, not classifyPollError's codes: that classifier labels
+// metrics, and files both of these under TOKEN_ERROR because it tests for the
+// "token error" prefix first.
+func pollFailureOutcome(err error) sessionOutcome {
+	switch {
+	case errors.Is(err, ErrAccessDenied):
+		return outcomeAccessDenied
+	case errors.Is(err, ErrExpiredToken):
+		return outcomeExpired
+	default:
+		return outcomeFailed
+	}
+}
+
+// identityOutcome is what a client polling a login is told when the identity that
+// signed in was refused. code is one of the codes the identity and group checks
+// already audit with, so the wire and the audit trail agree on what happened.
+func identityOutcome(code string) sessionOutcome {
+	switch code {
+	case "IDENTITY_MISMATCH":
+		return outcomeIdentityMismatch
+	case "GROUP_DENIED":
+		return outcomeGroupDenied
+	case "GROUP_NOT_ALLOWED":
+		return sessionOutcome{code, "the identity is in none of the groups or roles this host allows"}
+	case "PRIVILEGED_ACCOUNT_DENIED":
+		return sessionOutcome{code, "an identity provider login may not become a privileged local account"}
+	case "USERNAME_CLAIM_MISSING":
+		return sessionOutcome{code, "the identity provider did not send the claim this host maps accounts from"}
+	case "DEVICE_NOT_TRUSTED":
+		return sessionOutcome{code, "this login requires a hardware-backed sign-in method"}
+	default:
+		return outcomeFailed
+	}
+}
+
 func classifyPollError(err error) string {
 	if err == nil {
 		return "OK"

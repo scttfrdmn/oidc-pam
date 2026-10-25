@@ -35,7 +35,16 @@ func requestProtocolVersionSupported(version int) bool {
 // other failure — capacity, rate limits, a session verb aimed at someone else's
 // session, an internal error — is status "error": a capacity refusal in particular
 // is a statement about the broker's load, not a judgement about the user.
+//
+// The first three are how a device flow ends when the identity is refused, and
+// reach the wire through check_session's grace period (#179): declined at the
+// provider, signed in as a different account, short of a required group. They are
+// the three things the contract's "denied" row lists, and are oidc-pam's spellings
+// until the contract registers its own.
 var deniedErrorCodes = map[string]bool{
+	"ACCESS_DENIED":             true,
+	"IDENTITY_MISMATCH":         true,
+	"GROUP_DENIED":              true,
 	"POLICY_DENIED":             true,
 	"NO_LOCAL_ACCOUNT":          true,
 	"DEVICE_NOT_TRUSTED":        true,

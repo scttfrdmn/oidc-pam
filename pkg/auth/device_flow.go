@@ -36,6 +36,15 @@ var (
 	ErrSlowDown             = errors.New("slow_down")
 )
 
+// ErrAccessDenied and ErrExpiredToken are the two terminal token endpoint errors
+// of RFC 8628 §3.5: the user declined, or the device code ran out of time. They
+// end the flow like any other failure, and are told apart from the rest only so
+// that a client polling the login can be told which of them it was (#179).
+var (
+	ErrAccessDenied = errors.New("access_denied")
+	ErrExpiredToken = errors.New("expired_token")
+)
+
 // Polling interval bounds, in seconds. RFC 8628 §3.5 requires clients to wait at
 // least the interval the provider asks for, and to add slowDownIncrement to it on
 // each slow_down. The minimum also keeps time.NewTicker from panicking on a
@@ -670,6 +679,10 @@ func tokenEndpointError(code string) error {
 		return fmt.Errorf("token error: %w", ErrAuthorizationPending)
 	case "slow_down":
 		return fmt.Errorf("token error: %w", ErrSlowDown)
+	case "access_denied":
+		return fmt.Errorf("token error: %w", ErrAccessDenied)
+	case "expired_token":
+		return fmt.Errorf("token error: %w", ErrExpiredToken)
 	default:
 		return fmt.Errorf("token error: %s", code)
 	}
