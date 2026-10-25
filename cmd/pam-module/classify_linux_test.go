@@ -10,7 +10,7 @@ import (
 
 // Tests for the two functions that turn a broker reply into a PAM result:
 // classify_response (reached here through classify_response_text) and
-// map_error_code. Between them they are the module's entire decision about whether
+// map_refusal. Between them they are the module's entire decision about whether
 // a login is granted, refused, or still waiting on the device flow, and until now
 // neither had a test of any kind — both are static, and the tests in this package
 // drove them only through a fake broker whose replies resemble a real one's, while
@@ -165,9 +165,13 @@ func TestClassifyResponseDeniesAnythingItCannotInterpret(t *testing.T) {
 }
 
 // A refusal stays a refusal whatever its error_code looks like. The code only
-// selects which kind of denial it is; it can never turn one into a grant, and it
-// must never turn one into "I could not reach an opinion" either, because that is
-// the answer that tells an operator the broker is down when in fact it answered.
+// selects which kind of failure it is, and can never turn one into a grant.
+//
+// Which kind is decided by status first (#179, #230). "denied" and "expired" are
+// answers about this login. "error" is the broker failing to decide — capacity,
+// overload, a code this module does not know — and only that reads as "could not
+// reach an opinion", PAM_AUTHINFO_UNAVAIL. A reply with no status at all is not a
+// version 1 reply anyone should act on, and fails closed as PAM_AUTH_ERR.
 func TestClassifyResponseDeniesARefusal(t *testing.T) {
 	t.Parallel()
 
@@ -176,15 +180,24 @@ func TestClassifyResponseDeniesARefusal(t *testing.T) {
 		reply string
 		want  pam.PAMResultCode
 	}{
-		{"a recognized rate limit", `{"success":false,"error_code":"RATE_LIMIT_EXCEEDED"}`, pam.PAMMaxTries},
-		{"a policy denial", `{"success":false,"error_code":"POLICY_DENIED"}`, pam.PAMPermDenied},
-		{"an unknown code", `{"success":false,"error_code":"WHO_KNOWS"}`, pam.PAMAuthError},
+		{"a recognized rate limit", `{"status":"error","success":false,"error_code":"RATE_LIMITED"}`, pam.PAMMaxTries},
+		{"a policy denial", `{"status":"denied","success":false,"error_code":"POLICY_DENIED"}`, pam.PAMPermDenied},
+		{"an unknown denial", `{"status":"denied","success":false,"error_code":"WHO_KNOWS"}`, pam.PAMAuthError},
+		{"an unknown error", `{"status":"error","success":false,"error_code":"WHO_KNOWS"}`, pam.PAMAuthInfoUnavail},
+		{"a busy broker", `{"status":"error","success":false,"error_code":"SERVER_BUSY"}`, pam.PAMAuthInfoUnavail},
+		{"an error with no code", `{"status":"error","success":false}`, pam.PAMAuthInfoUnavail},
 		{"no code at all", `{"success":false}`, pam.PAMAuthError},
+		// The code does not override the status: a capacity code under "denied"
+		// is a denial, and a policy code with no status is not one this module
+		// can tell apart from garbage.
+		{"a capacity code that says denied", `{"status":"denied","success":false,"error_code":"SERVER_BUSY"}`, pam.PAMAuthError},
+		{"a policy code with no status", `{"success":false,"error_code":"POLICY_DENIED"}`, pam.PAMAuthError},
+		{"an unknown status", `{"status":"maybe","success":false,"error_code":"SERVER_BUSY"}`, pam.PAMAuthError},
 
 		// json_object_get_string does not read a string, it renders whatever it is
 		// given: an error_code of 404 came back as the text "404" (#201). A value of
 		// the wrong type is not a code the broker's contract can express, so it maps
-		// as an unrecognized one rather than as text map_error_code might match.
+		// as an unrecognized one rather than as text map_refusal might match.
 		{"the code is a number", `{"success":false,"error_code":404}`, pam.PAMAuthError},
 		{"the code is null", `{"success":false,"error_code":null}`, pam.PAMAuthError},
 		{"the code is a bool", `{"success":false,"error_code":true}`, pam.PAMAuthError},
@@ -195,17 +208,17 @@ func TestClassifyResponseDeniesARefusal(t *testing.T) {
 		// cannot change the verdict or crash on the way to it.
 		{
 			"the message is an object",
-			`{"success":false,"error_code":"POLICY_DENIED","error_message":{"m":1}}`,
+			`{"status":"denied","success":false,"error_code":"POLICY_DENIED","error_message":{"m":1}}`,
 			pam.PAMPermDenied,
 		},
 		{
 			"the message is a number",
-			`{"success":false,"error_code":"POLICY_DENIED","error_message":42}`,
+			`{"status":"denied","success":false,"error_code":"POLICY_DENIED","error_message":42}`,
 			pam.PAMPermDenied,
 		},
 		{
 			"the message is null",
-			`{"success":false,"error_code":"POLICY_DENIED","error_message":null}`,
+			`{"status":"denied","success":false,"error_code":"POLICY_DENIED","error_message":null}`,
 			pam.PAMPermDenied,
 		},
 		{
@@ -247,70 +260,72 @@ func TestClassifyResponseDeniesARefusal(t *testing.T) {
 	}
 }
 
-// map_error_code on its own: which denial each broker error code becomes.
+// map_refusal on its own: which kind of failure each (status, error_code)
+// becomes. It mirrors pkg/pam's refusalToPAMResult, and TestRefusalToPAMResult there
+// is the same table.
 //
-// Every answer here is a denial. The mapping exists so an operator reading auth.log
-// can tell a rate limit from a policy refusal, not to decide whether to let anyone
-// in, and nothing it is given — including NULL — may return PAM_SUCCESS.
-func TestMapErrorCodeAlwaysDenies(t *testing.T) {
+// Every answer here is a failure. The mapping exists so an operator reading
+// auth.log — and a PAM stack deciding what to do next — can tell a busy broker from
+// a refused user, not to decide whether to let anyone in, and nothing it is given,
+// including NULL for either argument, may return PAM_SUCCESS.
+func TestMapRefusal(t *testing.T) {
 	t.Parallel()
 
-	code := func(s string) *string { return &s }
+	str := func(s string) *string { return &s }
 
 	cases := []struct {
-		name string
-		code *string
-		want pam.PAMResultCode
+		name   string
+		status *string
+		code   *string
+		want   pam.PAMResultCode
 	}{
-		// NULL: what the module has whenever error_code is absent or is not a JSON
-		// string. Reached from classify_response on every malformed refusal.
-		{"NULL", nil, pam.PAMAuthError},
-		{"empty", code(""), pam.PAMAuthError},
+		// NULL is what the module has whenever a field is absent or is not a JSON
+		// string. No status is not a version 1 refusal, and fails closed.
+		{"no status, no code", nil, nil, pam.PAMAuthError},
+		{"no status", nil, str("SERVER_BUSY"), pam.PAMAuthError},
+		{"empty status", str(""), str("SERVER_BUSY"), pam.PAMAuthError},
+		{"unknown status", str("maybe"), str("SERVER_BUSY"), pam.PAMAuthError},
+		{"authorized is not a refusal it can map", str("authorized"), nil, pam.PAMAuthError},
 
-		{"RATE_LIMIT_EXCEEDED", code("RATE_LIMIT_EXCEEDED"), pam.PAMMaxTries},
-		// RATE_LIMITED is the code pkg/auth actually emits, and the C side maps it
-		// where the comment above map_error_code says it mirrors
-		// errorCodeToPAMResult in pkg/pam/pam.go — which does not list it, and so
-		// answers PAM_AUTH_ERR for the same reply. Both are denials, so nothing is
-		// unsafe here; the two are simply not in step, and this line pins the C
-		// side's answer rather than papering over the difference.
-		{"RATE_LIMITED", code("RATE_LIMITED"), pam.PAMMaxTries},
-		{"TOO_MANY_CONCURRENT_AUTHS", code("TOO_MANY_CONCURRENT_AUTHS"), pam.PAMMaxTries},
+		{"denied by policy", str("denied"), str("POLICY_DENIED"), pam.PAMPermDenied},
+		{"declined at the provider", str("denied"), str("ACCESS_DENIED"), pam.PAMAuthError},
+		{"denied, no code", str("denied"), nil, pam.PAMAuthError},
+		{"denied, unknown code", str("denied"), str("SOMETHING_NEW"), pam.PAMAuthError},
+		{"expired", str("expired"), str("SESSION_EXPIRED"), pam.PAMAuthError},
 
-		{"TOO_MANY_SESSIONS", code("TOO_MANY_SESSIONS"), pam.PAMPermDenied},
-		{"POLICY_DENIED", code("POLICY_DENIED"), pam.PAMPermDenied},
-		{"NO_PROVIDER", code("NO_PROVIDER"), pam.PAMPermDenied},
+		{"rate limited", str("error"), str("RATE_LIMITED"), pam.PAMMaxTries},
+		{"no provider", str("error"), str("NO_PROVIDER"), pam.PAMPermDenied},
+		{"forbidden", str("error"), str("FORBIDDEN"), pam.PAMAuthError},
+		// (#230) The broker failing to decide is not the user failing to log in.
+		{"session limit", str("error"), str("SESSION_LIMIT_REACHED"), pam.PAMAuthInfoUnavail},
+		{"auth limit", str("error"), str("AUTH_LIMIT_REACHED"), pam.PAMAuthInfoUnavail},
+		{"source auth limit", str("error"), str("SOURCE_AUTH_LIMIT_REACHED"), pam.PAMAuthInfoUnavail},
+		{"busy", str("error"), str("SERVER_BUSY"), pam.PAMAuthInfoUnavail},
+		{"internal", str("error"), str("AUTHENTICATION_FAILED"), pam.PAMAuthInfoUnavail},
+		{"session not found", str("error"), str("SESSION_NOT_FOUND"), pam.PAMAuthInfoUnavail},
+		{"unknown code", str("error"), str("SOMETHING_NEW"), pam.PAMAuthInfoUnavail},
+		{"error, no code", str("error"), nil, pam.PAMAuthInfoUnavail},
 
-		// The denials the module reaches by way of a vanished session: the broker
-		// deletes the session when identity binding fails, when require_groups
-		// rejects the user, when device-flow polling fails, and when it expires, so
-		// a poll that can no longer find its session was refused.
-		{"SESSION_NOT_FOUND", code("SESSION_NOT_FOUND"), pam.PAMAuthError},
-		{"SESSION_EXPIRED", code("SESSION_EXPIRED"), pam.PAMAuthError},
-		{"FORBIDDEN", code("FORBIDDEN"), pam.PAMAuthError},
-		{"AUTHENTICATION_FAILED", code("AUTHENTICATION_FAILED"), pam.PAMAuthError},
-		{"INVALID_REQUEST", code("INVALID_REQUEST"), pam.PAMAuthError},
-
-		// The comparison is exact, and an unrecognized code is a denial rather than
-		// anything softer, so near-misses need no special handling to be safe.
-		{"unknown", code("SOMETHING_NEW"), pam.PAMAuthError},
-		{"wrong case", code("policy_denied"), pam.PAMAuthError},
-		{"trailing space", code("POLICY_DENIED "), pam.PAMAuthError},
-		{"prefix only", code("POLICY_"), pam.PAMAuthError},
+		// The comparisons are exact. A near-miss of a status fails closed; a
+		// near-miss of a code under "error" is an unknown code.
+		{"status wrong case", str("Denied"), str("POLICY_DENIED"), pam.PAMAuthError},
+		{"status trailing space", str("error "), str("SERVER_BUSY"), pam.PAMAuthError},
+		{"code wrong case", str("denied"), str("policy_denied"), pam.PAMAuthError},
+		{"code prefix only", str("error"), str("RATE_"), pam.PAMAuthInfoUnavail},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := mapBrokerErrorCode(tc.code)
+			got := mapBrokerRefusal(tc.status, tc.code)
 
 			if got == pam.PAMSuccess {
-				t.Fatalf("map_error_code(%s) = PAM_SUCCESS: this function is only ever reached "+
+				t.Fatalf("map_refusal(%s) = PAM_SUCCESS: this function is only ever reached "+
 					"because the broker refused the authentication", tc.name)
 			}
 			if got != tc.want {
-				t.Fatalf("map_error_code(%s) = %d, want %d", tc.name, got, tc.want)
+				t.Fatalf("map_refusal(%s) = %d, want %d", tc.name, got, tc.want)
 			}
 		})
 	}

@@ -592,7 +592,7 @@ cap on it alone can be filled on somebody else's behalf — which is what #163
 was: unfinished logins counted towards `max_concurrent_sessions`, so a handful of
 connection attempts naming one account locked its owner out. They no longer count
 towards it. Raise this if your users routinely open more than five terminals at
-once and see `TOO_MANY_PENDING_AUTHS`; the value is clamped to 32 because a
+once and see `SOURCE_AUTH_LIMIT_REACHED`; the value is clamped to 32 because a
 per-source cap as large as the host-wide pool is not a cap.
 
 `pending_auth_lifetime` is the broker's own deadline on an unfinished login,

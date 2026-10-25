@@ -20,6 +20,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a new broker refuses every login, because it reads the pending reply as a
   refusal. A new module against an old broker also refuses every login, because
   that broker sends no `status`.
+- **Error codes take the spellings protocol version 1 registers (#179).** The
+  change shows on the wire and in the audit log's `error_code`, so anything that
+  filters on the old names needs updating:
+
+  | Was | Now | Means |
+  |---|---|---|
+  | `RATE_LIMIT_EXCEEDED` | `RATE_LIMITED` | the per-account request budget, or a peer's malformed-request budget |
+  | `TOO_MANY_SESSIONS` | `SESSION_LIMIT_REACHED` | this user's `max_concurrent_sessions` |
+  | `TOO_MANY_PENDING_AUTHS` | `SOURCE_AUTH_LIMIT_REACHED` | this (account, address)'s unfinished logins |
+  | `RATE_LIMITED` (pending pool full) | `AUTH_LIMIT_REACHED` | the host's unfinished logins |
+  | `TOO_MANY_CONCURRENT_AUTHS` | `SERVER_BUSY` | the broker is already handling as many `authenticate` requests as it allows |
+
+  `SERVER_BUSY` was already what the connection cap sent. The contract does not
+  register it yet.
+
+### Changed
+
+- **A broker that cannot decide is no longer reported as a failed login (#230).**
+  The module and `pkg/pam` now map a refusal by its `status` first, then its
+  `error_code`:
+  - `denied` and `expired` are `PAM_AUTH_ERR`, except `POLICY_DENIED`, which stays
+    `PAM_PERM_DENIED`.
+  - `error` is the broker failing to decide, which is `PAM_AUTHINFO_UNAVAIL`. That
+    covers the four capacity codes, `SERVER_BUSY`, internal failures, a session the
+    broker no longer knows, and any code the module does not recognise.
+    `RATE_LIMITED` stays `PAM_MAXTRIES`, `NO_PROVIDER` stays `PAM_PERM_DENIED`,
+    and `FORBIDDEN` stays `PAM_AUTH_ERR`.
+  - A reply with no `status`, or an unknown one, is `PAM_AUTH_ERR`.
+
+  Before this, an overloaded broker told sshd, and `pam_faillock` where it is
+  configured, that the user had failed to authenticate, so a load spike could lock
+  accounts out. Every shipped stack is `auth sufficient pam_oidc.so` followed by
+  `pam_deny`, so no refusal becomes a login. A custom stack that acts on
+  `authinfo_unavail` (for example `[authinfo_unavail=ignore]` before a password
+  module) now takes that branch when the broker is busy.
 
 ### Security
 

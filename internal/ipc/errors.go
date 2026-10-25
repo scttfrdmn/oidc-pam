@@ -31,11 +31,11 @@ func clientErrorMessage(code string) string {
 		return "Authentication provider not available"
 	case "REFRESH_FAILED":
 		return "Token refresh failed"
-	case "RATE_LIMIT_EXCEEDED":
+	case "RATE_LIMITED":
 		return "Too many requests, please try again later"
-	case "TOO_MANY_CONCURRENT_AUTHS":
-		return "Too many concurrent authentication requests"
-	case "TOO_MANY_SESSIONS":
+	case "SERVER_BUSY":
+		return "Server at capacity, try again"
+	case "SESSION_LIMIT_REACHED":
 		return "Maximum concurrent sessions reached"
 	case "KEY_LIST_FAILED":
 		return "Failed to list managed SSH keys"

@@ -266,10 +266,10 @@ func TestParseBrokerResponse(t *testing.T) {
 		},
 		{
 			name:  "rate limit response",
-			input: `{"success":false,"error_code":"RATE_LIMIT_EXCEEDED","error_message":"Too many requests"}`,
+			input: `{"success":false,"error_code":"RATE_LIMITED","error_message":"Too many requests"}`,
 			checkResp: func(t *testing.T, r *AuthResponse) {
-				if r.ErrorCode != "RATE_LIMIT_EXCEEDED" {
-					t.Errorf("Expected RATE_LIMIT_EXCEEDED, got %q", r.ErrorCode)
+				if r.ErrorCode != "RATE_LIMITED" {
+					t.Errorf("Expected RATE_LIMITED, got %q", r.ErrorCode)
 				}
 			},
 		},
@@ -297,30 +297,46 @@ func TestParseBrokerResponse(t *testing.T) {
 	}
 }
 
-// TestErrorCodeToPAMResult verifies the mapping of broker error codes to PAM
-// result codes.
-func TestErrorCodeToPAMResult(t *testing.T) {
+// TestRefusalToPAMResult verifies the mapping of a broker refusal — its status,
+// then its error code — onto a PAM result. It is the same table as the C module's
+// TestMapRefusal, because the two mappings are required to agree.
+func TestRefusalToPAMResult(t *testing.T) {
 	tests := []struct {
+		status    string
 		errorCode string
 		want      PAMResultCode
 	}{
-		{"RATE_LIMIT_EXCEEDED", PAMMaxTries},
-		{"TOO_MANY_CONCURRENT_AUTHS", PAMMaxTries},
-		{"TOO_MANY_SESSIONS", PAMPermDenied},
-		{"POLICY_DENIED", PAMPermDenied},
-		{"NO_PROVIDER", PAMPermDenied},
-		{"SESSION_EXPIRED", PAMAuthError},
-		{"SESSION_NOT_FOUND", PAMAuthError},
-		{"REFRESH_FAILED", PAMAuthError},
-		{"", PAMAuthError},
-		{"UNKNOWN_CODE", PAMAuthError},
+		{"denied", "POLICY_DENIED", PAMPermDenied},
+		{"denied", "ACCESS_DENIED", PAMAuthError},
+		{"denied", "IDENTITY_MISMATCH", PAMAuthError},
+		{"denied", "SOMETHING_NEW", PAMAuthError},
+		{"expired", "SESSION_EXPIRED", PAMAuthError},
+
+		{"error", "RATE_LIMITED", PAMMaxTries},
+		{"error", "NO_PROVIDER", PAMPermDenied},
+		{"error", "FORBIDDEN", PAMAuthError},
+		// (#230) The broker failing to decide is not the user failing to log in.
+		{"error", "SESSION_LIMIT_REACHED", PAMAuthInfoUnavail},
+		{"error", "AUTH_LIMIT_REACHED", PAMAuthInfoUnavail},
+		{"error", "SOURCE_AUTH_LIMIT_REACHED", PAMAuthInfoUnavail},
+		{"error", "SERVER_BUSY", PAMAuthInfoUnavail},
+		{"error", "AUTHENTICATION_FAILED", PAMAuthInfoUnavail},
+		{"error", "SESSION_NOT_FOUND", PAMAuthInfoUnavail},
+		{"error", "SOMETHING_NEW", PAMAuthInfoUnavail},
+		{"error", "", PAMAuthInfoUnavail},
+
+		// No status, or one this client does not know, fails closed.
+		{"", "SERVER_BUSY", PAMAuthError},
+		{"", "", PAMAuthError},
+		{"authorized", "USER_MISMATCH", PAMAuthError},
+		{"something-new", "SERVER_BUSY", PAMAuthError},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.errorCode, func(t *testing.T) {
-			got := errorCodeToPAMResult(tt.errorCode)
+		t.Run(tt.status+"/"+tt.errorCode, func(t *testing.T) {
+			got := refusalToPAMResult(tt.status, tt.errorCode)
 			if got != tt.want {
-				t.Errorf("errorCodeToPAMResult(%q) = %d, want %d", tt.errorCode, got, tt.want)
+				t.Errorf("refusalToPAMResult(%q, %q) = %d, want %d", tt.status, tt.errorCode, got, tt.want)
 			}
 		})
 	}

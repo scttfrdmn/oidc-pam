@@ -74,14 +74,36 @@ func ParseBrokerResponse(jsonStr string) (*AuthResponse, error) {
 	return &resp, nil
 }
 
-// errorCodeToPAMResult maps broker error codes to the most appropriate PAM
-// result code. Unknown codes default to PAM_AUTH_ERR.
-func errorCodeToPAMResult(errorCode string) PAMResultCode {
-	switch errorCode {
-	case "RATE_LIMIT_EXCEEDED", "TOO_MANY_CONCURRENT_AUTHS":
-		return PAMMaxTries
-	case "TOO_MANY_SESSIONS", "POLICY_DENIED", "NO_PROVIDER":
-		return PAMPermDenied
+// refusalToPAMResult maps a broker refusal onto the most appropriate PAM result.
+// It mirrors map_refusal in cmd/pam-module/cgo_bridge_linux.c, which explains the
+// mapping; keep the two in step.
+//
+// In short: status decides first. "denied" and "expired" are PAM_AUTH_ERR, except
+// POLICY_DENIED, which is PAM_PERM_DENIED. "error" is the broker failing to
+// decide: RATE_LIMITED is PAM_MAXTRIES, NO_PROVIDER is PAM_PERM_DENIED, FORBIDDEN
+// is PAM_AUTH_ERR, and capacity, overload and every unknown code are
+// PAM_AUTHINFO_UNAVAIL, so that a busy broker is not reported as a failed login
+// (#230). No status, or an unknown one, is PAM_AUTH_ERR.
+func refusalToPAMResult(status, errorCode string) PAMResultCode {
+	switch status {
+	case brokerclient.StatusDenied:
+		if errorCode == "POLICY_DENIED" {
+			return PAMPermDenied
+		}
+		return PAMAuthError
+	case brokerclient.StatusExpired:
+		return PAMAuthError
+	case brokerclient.StatusError:
+		switch errorCode {
+		case "RATE_LIMITED":
+			return PAMMaxTries
+		case "NO_PROVIDER":
+			return PAMPermDenied
+		case "FORBIDDEN":
+			return PAMAuthError
+		default:
+			return PAMAuthInfoUnavail
+		}
 	default:
 		return PAMAuthError
 	}
@@ -235,7 +257,7 @@ func (p *PAMModule) authFailure(err error) error {
 			p.LogMessage(logErr, fmt.Sprintf("OIDC authentication failed: %s", msg))
 		}
 		return &PAMAuthFailure{
-			Code:    errorCodeToPAMResult(denial.ErrorCode),
+			Code:    refusalToPAMResult(denial.Status, denial.ErrorCode),
 			Message: msg,
 		}
 	}

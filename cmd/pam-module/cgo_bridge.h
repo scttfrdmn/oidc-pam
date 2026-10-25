@@ -127,7 +127,7 @@ int receive_auth_response_within(int sock, char *response, size_t response_size,
 // username is the account being logged into: a grant is honoured only for that
 // account, whatever the broker checked on its side.
 int classify_response_text(const char *response, const char *username);
-int map_error_code(const char *error_code);
+int map_refusal(const char *status, const char *error_code);
 int perform_authentication(pam_handle_t *pamh, const char *socket_path, const char *username,
                            const char *service, const char *rhost, const char *tty, int timeout_s);
 int display_message(pam_handle_t *pamh, const char *message);

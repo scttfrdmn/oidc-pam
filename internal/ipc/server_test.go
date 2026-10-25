@@ -639,7 +639,7 @@ func TestServerRateLimitOverSocket(t *testing.T) {
 
 	for i := 0; i < budget; i++ {
 		resp := sendRequestOverSocket(t, socketPath, req)
-		if resp.ErrorCode == "RATE_LIMIT_EXCEEDED" {
+		if resp.ErrorCode == "RATE_LIMITED" {
 			t.Fatalf("request %d of a budget of %d was rate-limited", i+1, budget)
 		}
 		// The request reached the broker, which is what proves the limiter is being
@@ -652,8 +652,8 @@ func TestServerRateLimitOverSocket(t *testing.T) {
 	}
 
 	resp := sendRequestOverSocket(t, socketPath, req)
-	if resp.ErrorCode != "RATE_LIMIT_EXCEEDED" {
-		t.Fatalf("expected RATE_LIMIT_EXCEEDED on request %d, got error_code=%q", budget+1, resp.ErrorCode)
+	if resp.ErrorCode != "RATE_LIMITED" {
+		t.Fatalf("expected RATE_LIMITED on request %d, got error_code=%q", budget+1, resp.ErrorCode)
 	}
 	if resp.Success {
 		t.Fatal("rate-limited response should not be successful")
@@ -686,8 +686,8 @@ func TestMalformedRequestsAreChargedToThePeer(t *testing.T) {
 	}
 
 	resp := sendRequestOverSocket(t, socketPath, malformed)
-	if resp.ErrorCode != "RATE_LIMIT_EXCEEDED" {
-		t.Fatalf("malformed request %d got error_code=%q, want RATE_LIMIT_EXCEEDED: malformed "+
+	if resp.ErrorCode != "RATE_LIMITED" {
+		t.Fatalf("malformed request %d got error_code=%q, want RATE_LIMITED: malformed "+
 			"requests are rejected before any limiter counts them, so a local peer can spin the "+
 			"accept loop, the decode and the validator for free (#189)", budget+1, resp.ErrorCode)
 	}
@@ -728,7 +728,7 @@ func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
 	}
 
 	// Test at the handleRequest level: hold one auth slot, then verify second
-	// authenticate request gets TOO_MANY_CONCURRENT_AUTHS.
+	// authenticate request gets SERVER_BUSY.
 
 	// Acquire the single auth slot
 	if !server.rateLimiter.AcquireAuth() {
@@ -741,8 +741,8 @@ func TestServerConcurrentAuthLimitOverSocket(t *testing.T) {
 	}
 
 	resp := authResponse(t, server.handleRequest(req))
-	if resp.ErrorCode != "TOO_MANY_CONCURRENT_AUTHS" {
-		t.Fatalf("expected TOO_MANY_CONCURRENT_AUTHS, got error_code=%q", resp.ErrorCode)
+	if resp.ErrorCode != "SERVER_BUSY" {
+		t.Fatalf("expected SERVER_BUSY, got error_code=%q", resp.ErrorCode)
 	}
 	if resp.Success {
 		t.Fatal("response should not be successful when auth limit exceeded")

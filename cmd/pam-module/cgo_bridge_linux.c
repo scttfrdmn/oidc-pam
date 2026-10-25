@@ -675,36 +675,64 @@ static int response_poll_interval(json_object *obj) {
     return interval;
 }
 
-// Map a broker error_code onto a PAM result. This mirrors errorCodeToPAMResult
-// in pam.go; keep the two in step.
+// Map a broker refusal onto a PAM result. This mirrors refusalToPAMResult in
+// pkg/pam/pam.go; keep the two in step.
 //
-// SESSION_NOT_FOUND, SESSION_EXPIRED and FORBIDDEN are denials, not transient
-// failures: the broker deletes the session when identity binding fails, when
-// require_groups rejects the user, when device-flow polling fails, and when the
-// session expires, so a poll that can no longer find its session means the
-// authentication was refused.
+// status decides first, because it is what says whether anybody decided anything
+// (protocol version 1, #179):
+//
+//   - "denied" and "expired" are answers about this login. They are PAM_AUTH_ERR,
+//     except a policy refusal, which is PAM_PERM_DENIED so that auth.log can tell an
+//     administrator's rule from the user's own mistake.
+//   - "error" is the broker failing to decide. Capacity and overload —
+//     SESSION_LIMIT_REACHED, AUTH_LIMIT_REACHED, SOURCE_AUTH_LIMIT_REACHED,
+//     SERVER_BUSY — and every code this module does not know are
+//     PAM_AUTHINFO_UNAVAIL: the service could not answer. Reporting them as
+//     PAM_AUTH_ERR told sshd, and pam_faillock, that the user had failed to
+//     authenticate, so a load spike locked accounts out (#230). An unknown code
+//     from a newer broker is the same case: it must fail, and it must not read as
+//     "denied". RATE_LIMITED is PAM_MAXTRIES; FORBIDDEN, a session verb aimed at
+//     somebody else's session, is PAM_AUTH_ERR; NO_PROVIDER is a configuration
+//     refusal and stays PAM_PERM_DENIED.
+//   - Anything else — no status, or one this module does not know — is PAM_AUTH_ERR.
+//     The contract requires an unrecognised status to fail closed.
+//
+// Every answer is a failure. Nothing here can produce PAM_SUCCESS.
 //
 // Not static, and declared in cgo_bridge.h, only so that it is linkable from a
 // test: this is one of the two functions that turn a broker reply into a PAM
 // result, and neither had a test of any kind, which means `return PAM_SUCCESS`
-// here was green in every suite in this repository (#197). error_code is NULL
-// whenever the field is absent or is not a JSON string, which is why the NULL
-// case is a denial rather than an accident.
-int map_error_code(const char *error_code) {
-    if (error_code == NULL) {
+// here was green in every suite in this repository (#197). Either argument is NULL
+// whenever its field is absent or is not a JSON string.
+int map_refusal(const char *status, const char *error_code) {
+    if (status == NULL) {
         return PAM_AUTH_ERR;
     }
-    if (strcmp(error_code, "RATE_LIMIT_EXCEEDED") == 0 ||
-        strcmp(error_code, "RATE_LIMITED") == 0 ||
-        strcmp(error_code, "TOO_MANY_CONCURRENT_AUTHS") == 0) {
+    if (strcmp(status, "denied") == 0) {
+        if (error_code != NULL && strcmp(error_code, "POLICY_DENIED") == 0) {
+            return PAM_PERM_DENIED;
+        }
+        return PAM_AUTH_ERR;
+    }
+    if (strcmp(status, "expired") == 0) {
+        return PAM_AUTH_ERR;
+    }
+    if (strcmp(status, "error") != 0) {
+        return PAM_AUTH_ERR;
+    }
+    if (error_code == NULL) {
+        return PAM_AUTHINFO_UNAVAIL;
+    }
+    if (strcmp(error_code, "RATE_LIMITED") == 0) {
         return PAM_MAXTRIES;
     }
-    if (strcmp(error_code, "TOO_MANY_SESSIONS") == 0 ||
-        strcmp(error_code, "POLICY_DENIED") == 0 ||
-        strcmp(error_code, "NO_PROVIDER") == 0) {
+    if (strcmp(error_code, "NO_PROVIDER") == 0) {
         return PAM_PERM_DENIED;
     }
-    return PAM_AUTH_ERR;
+    if (strcmp(error_code, "FORBIDDEN") == 0) {
+        return PAM_AUTH_ERR;
+    }
+    return PAM_AUTHINFO_UNAVAIL;
 }
 
 // Read a reply's protocol_version. Absent, JSON null and 0 all mean 1: a broker
@@ -784,7 +812,7 @@ static int classify_response(json_object *obj, const char *username) {
                         status != NULL ? status : "(none)",
                         code != NULL ? code : "(none)",
                         message != NULL ? message : "(no message)");
-        return map_error_code(code);
+        return map_refusal(status, code);
     }
 
     // success=true from here on, which on its own is not a grant. A status that is
@@ -816,7 +844,7 @@ static int classify_response(json_object *obj, const char *username) {
 //
 // This exists so classify_response — the module's entire decision about whether a
 // reply is a grant or a denial — is reachable from a test. It had none: both it and
-// map_error_code are static and absent from cgo_bridge.h, the Go tests in this
+// map_error_code (now map_refusal) were static and absent from cgo_bridge.h, the Go tests in this
 // package did not call into them, and e2e drives an honest broker that cannot
 // construct the replies these functions exist to reject, so `classify_response`
 // returning PAM_SUCCESS unconditionally passed everything (#197). Two grants had

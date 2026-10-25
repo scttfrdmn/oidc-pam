@@ -621,7 +621,7 @@ case_rate_limit_is_per_account() {
         response="$(printf '%s' "${request}" | timeout 5 nc -U "${SOCKET}")"
     done
 
-    if grep -q 'RATE_LIMIT_EXCEEDED' <<<"${response}"; then
+    if grep -q 'RATE_LIMITED' <<<"${response}"; then
         log "bob's budget is spent after $((budget + 1)) requests naming him"
     else
         fail "$((budget + 1)) requests naming bob did not exhaust his budget: ${response:-<nothing>}"

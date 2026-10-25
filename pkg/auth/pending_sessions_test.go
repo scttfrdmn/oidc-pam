@@ -25,7 +25,7 @@ import (
 // #163 is what happens when such a login is counted as though it had succeeded.
 // Ten connection attempts naming one account filled that account's
 // max_concurrent_sessions with authentications nobody had approved, and the real
-// user was refused TOO_MANY_SESSIONS for as long as the device codes lived; a
+// user was refused SESSION_LIMIT_REACHED for as long as the device codes lived; a
 // hundred of them across invented usernames filled a host-wide pool and refused
 // every login on the machine. Both are driven through Authenticate here, because
 // both were properties of how the counting and the storing were ordered rather than
@@ -222,7 +222,7 @@ func isClosed(ch chan struct{}) bool {
 // Before the fix, each abandoned request took a slot in the victim's
 // max_concurrent_sessions and held it for the device code's lifetime, so the fourth
 // request against a limit of three locked the account out and the victim's own login
-// was refused TOO_MANY_SESSIONS. After it, unfinished logins are counted separately,
+// was refused SESSION_LIMIT_REACHED. After it, unfinished logins are counted separately,
 // against the (account, source address) pair that asked for them — the address being
 // the part of the request a remote client does not choose — so the flood exhausts the
 // attacker's own budget and the victim, arriving from a different address, is served.
@@ -244,7 +244,7 @@ func TestAbandonedPendingFlowsDoNotDenyTheAccountItsLogin(t *testing.T) {
 		switch {
 		case resp.Success:
 			admitted++
-		case resp.ErrorCode == "TOO_MANY_PENDING_AUTHS":
+		case resp.ErrorCode == "SOURCE_AUTH_LIMIT_REACHED":
 			refused++
 		default:
 			t.Fatalf("attempt %d was refused %q (%s), want either a device code or the "+
@@ -259,7 +259,7 @@ func TestAbandonedPendingFlowsDoNotDenyTheAccountItsLogin(t *testing.T) {
 			admitted, defaultMaxPendingAuthsPerSource)
 	}
 	if refused != 10-defaultMaxPendingAuthsPerSource {
-		t.Errorf("%d attempts were refused with TOO_MANY_PENDING_AUTHS, want %d",
+		t.Errorf("%d attempts were refused with SOURCE_AUTH_LIMIT_REACHED, want %d",
 			refused, 10-defaultMaxPendingAuthsPerSource)
 	}
 	if held := env.countPending(victim, attackerIP); held != defaultMaxPendingAuthsPerSource {
@@ -303,8 +303,8 @@ func TestPendingLoginSlotIsReleasedWhenItsWindowCloses(t *testing.T) {
 		env.broker.setSession(pendingSessionFixture(fmt.Sprintf("pending-%d", i), user, sourceIP))
 	}
 
-	if resp := env.authenticate(t, user, sourceIP); resp.ErrorCode != "TOO_MANY_PENDING_AUTHS" {
-		t.Fatalf("a login at the pending cap answered %q, want TOO_MANY_PENDING_AUTHS", resp.ErrorCode)
+	if resp := env.authenticate(t, user, sourceIP); resp.ErrorCode != "SOURCE_AUTH_LIMIT_REACHED" {
+		t.Fatalf("a login at the pending cap answered %q, want SOURCE_AUTH_LIMIT_REACHED", resp.ErrorCode)
 	}
 
 	// Time passes, on the broker's clock rather than the test's: every one of those
@@ -430,8 +430,8 @@ func TestFullPendingPoolDisplacesItsLargestHolder(t *testing.T) {
 	if hogResp.Success {
 		t.Fatalf("the pair holding the largest share of a full pool was admitted again: %+v", hogResp)
 	}
-	if hogResp.ErrorCode != "RATE_LIMITED" {
-		t.Errorf("error_code = %q, want RATE_LIMITED", hogResp.ErrorCode)
+	if hogResp.ErrorCode != "AUTH_LIMIT_REACHED" {
+		t.Errorf("error_code = %q, want AUTH_LIMIT_REACHED", hogResp.ErrorCode)
 	}
 	if got := env.deviceRequests.Load(); got != requests {
 		t.Errorf("the refused login still made %d device-authorization request(s); admission has "+
@@ -464,9 +464,9 @@ func TestPendingLoginsDoNotCountTowardsTheSessionLimit(t *testing.T) {
 		env.broker.setSession(established)
 	}
 	resp := env.authenticate(t, user, "203.0.113.9")
-	if resp.ErrorCode != "TOO_MANY_SESSIONS" {
+	if resp.ErrorCode != "SESSION_LIMIT_REACHED" {
 		t.Errorf("a login with the account's session limit already granted answered %q, want "+
-			"TOO_MANY_SESSIONS: the limit still has to be enforced against sessions that exist",
+			"SESSION_LIMIT_REACHED: the limit still has to be enforced against sessions that exist",
 			resp.ErrorCode)
 	}
 }

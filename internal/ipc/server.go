@@ -295,7 +295,7 @@ func (s *Server) acceptConnections(ctx context.Context) {
 				// socket buffer and never reads must not be able to park the loop
 				// that every other login depends on (#216).
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				s.sendErrorResponse(conn, "SERVER_BUSY", "Server at capacity, try again")
+				s.sendErrorResponse(conn, "SERVER_BUSY", clientErrorMessage("SERVER_BUSY"))
 				_ = conn.Close()
 				continue
 			}
@@ -361,7 +361,7 @@ func (s *Server) verifyPeer(conn net.Conn) (uint32, error) {
 // rejectMalformed answers a request that no handler will ever see — one that would
 // not decode, or that validateRequest refused — and charges it against the sending
 // peer's malformed-request budget. Once that budget is spent the peer is told
-// RATE_LIMIT_EXCEEDED instead, and its next well-formed request is unaffected.
+// RATE_LIMITED instead, and its next well-formed request is unaffected.
 //
 // The budget is consulted after the request has been recognised as malformed rather
 // than before it is read, and that ordering is deliberate: at the earlier point a
@@ -380,7 +380,7 @@ func (s *Server) rejectMalformed(conn net.Conn, peerUID uint32, errorCode, error
 	log.Warn().
 		Uint32("peer_uid", peerUID).
 		Msg("Malformed-request budget exhausted for peer; refusing further malformed requests")
-	s.sendErrorResponse(conn, "RATE_LIMIT_EXCEEDED", clientErrorMessage("RATE_LIMIT_EXCEEDED"))
+	s.sendErrorResponse(conn, "RATE_LIMITED", clientErrorMessage("RATE_LIMITED"))
 }
 
 // handleConnection handles a single IPC connection
@@ -522,8 +522,8 @@ func (s *Server) handleRequest(request *Request) any {
 				Msg("Rate limit exceeded for account")
 			return &Response{
 				Success:      false,
-				ErrorCode:    "RATE_LIMIT_EXCEEDED",
-				ErrorMessage: clientErrorMessage("RATE_LIMIT_EXCEEDED"),
+				ErrorCode:    "RATE_LIMITED",
+				ErrorMessage: clientErrorMessage("RATE_LIMITED"),
 			}
 		}
 	}
@@ -534,8 +534,8 @@ func (s *Server) handleRequest(request *Request) any {
 			log.Warn().Msg("Concurrent auth limit reached")
 			return &Response{
 				Success:      false,
-				ErrorCode:    "TOO_MANY_CONCURRENT_AUTHS",
-				ErrorMessage: clientErrorMessage("TOO_MANY_CONCURRENT_AUTHS"),
+				ErrorCode:    "SERVER_BUSY",
+				ErrorMessage: clientErrorMessage("SERVER_BUSY"),
 			}
 		}
 		defer s.rateLimiter.ReleaseAuth()
