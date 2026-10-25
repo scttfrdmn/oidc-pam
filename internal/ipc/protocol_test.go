@@ -92,7 +92,7 @@ func TestAuthStatusMapsEveryOutcome(t *testing.T) {
 // status "error", whichever limit was reached. The way this goes wrong is two
 // refusals of the same shape written in different places, each self-consistent.
 func TestCapacityRefusalsAreErrorsNotDenials(t *testing.T) {
-	for _, code := range []string{"TOO_MANY_SESSIONS", "TOO_MANY_PENDING_AUTHS", "TOO_MANY_CONCURRENT_AUTHS"} {
+	for _, code := range []string{"SESSION_LIMIT_REACHED", "AUTH_LIMIT_REACHED", "SOURCE_AUTH_LIMIT_REACHED", "SERVER_BUSY"} {
 		if got := authStatus(&auth.AuthResponse{ErrorCode: code}); got != StatusError {
 			t.Errorf("%s: status = %q, want %q: running out of capacity is not a decision about the user",
 				code, got, StatusError)

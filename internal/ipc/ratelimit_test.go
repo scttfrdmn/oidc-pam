@@ -384,8 +384,8 @@ func TestHandleRequestChargesTheAccountNamedInTheRequest(t *testing.T) {
 	if response.Success {
 		t.Error("a request over the account's budget was allowed")
 	}
-	if response.ErrorCode != "RATE_LIMIT_EXCEEDED" {
-		t.Errorf("ErrorCode = %q, want RATE_LIMIT_EXCEEDED", response.ErrorCode)
+	if response.ErrorCode != "RATE_LIMITED" {
+		t.Errorf("ErrorCode = %q, want RATE_LIMITED", response.ErrorCode)
 	}
 
 	// bob's budget was not spent by alice's traffic — the point of the fix. (Had it

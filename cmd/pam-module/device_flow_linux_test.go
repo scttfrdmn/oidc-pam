@@ -142,10 +142,25 @@ func authenticated(sessionID string) map[string]interface{} {
 	}
 }
 
+// refusalStatus is the status a version 1 broker sends with errorCode: "denied"
+// for a decision about the identity, "expired" for running out of time, and
+// "error" for everything else (internal/ipc's authStatus).
+func refusalStatus(errorCode string) string {
+	switch errorCode {
+	case "POLICY_DENIED", "NO_LOCAL_ACCOUNT", "ACCESS_DENIED", "IDENTITY_MISMATCH", "GROUP_DENIED",
+		"GROUP_NOT_ALLOWED", "DEVICE_NOT_TRUSTED", "PRIVILEGED_ACCOUNT_DENIED", "USERNAME_CLAIM_MISSING":
+		return "denied"
+	case "SESSION_EXPIRED":
+		return "expired"
+	default:
+		return "error"
+	}
+}
+
 func denied(errorCode string) map[string]interface{} {
 	return map[string]interface{}{
 		"protocol_version": 1,
-		"status":           "error",
+		"status":           refusalStatus(errorCode),
 		"success":          false,
 		"error_code":       errorCode,
 		"error_message":    "denied by test",
@@ -218,10 +233,11 @@ func TestPerformAuthenticationSucceedsAfterDeviceApproval(t *testing.T) {
 	}
 }
 
-// The broker deletes the session when identity binding fails, when
-// require_groups rejects the user, when polling the IdP fails, and when the
-// session expires. A poll that can no longer find its session is therefore a
-// denial, not a transient error.
+// A poll that is answered with a refusal ends the login with that refusal's PAM
+// result. Since #179 a failed device flow is reported on the next poll with the
+// reason it failed, so the reasons arrive here as themselves; SESSION_NOT_FOUND
+// now means the broker no longer knows the session — typically a restart — which
+// is the service being unavailable, not the user being refused (#230).
 func TestPerformAuthenticationDeniesOnTerminalPollErrors(t *testing.T) {
 	t.Parallel()
 
@@ -229,13 +245,15 @@ func TestPerformAuthenticationDeniesOnTerminalPollErrors(t *testing.T) {
 		errorCode string
 		want      pam.PAMResultCode
 	}{
-		{"SESSION_NOT_FOUND", pam.PAMAuthError},
+		{"ACCESS_DENIED", pam.PAMAuthError},
+		{"IDENTITY_MISMATCH", pam.PAMAuthError},
+		{"GROUP_DENIED", pam.PAMAuthError},
 		{"SESSION_EXPIRED", pam.PAMAuthError},
 		{"FORBIDDEN", pam.PAMAuthError},
-		{"DEVICE_FLOW_FAILED", pam.PAMAuthError},
 		{"POLICY_DENIED", pam.PAMPermDenied},
-		{"TOO_MANY_SESSIONS", pam.PAMPermDenied},
 		{"RATE_LIMITED", pam.PAMMaxTries},
+		{"SESSION_NOT_FOUND", pam.PAMAuthInfoUnavail},
+		{"AUTHENTICATION_FAILED", pam.PAMAuthInfoUnavail},
 	}
 
 	for _, tt := range tests {
@@ -282,10 +300,16 @@ func TestPerformAuthenticationDeniesUpFront(t *testing.T) {
 	}{
 		{"NO_PROVIDER", pam.PAMPermDenied},
 		{"POLICY_DENIED", pam.PAMPermDenied},
-		{"TOO_MANY_CONCURRENT_AUTHS", pam.PAMMaxTries},
-		{"RATE_LIMIT_EXCEEDED", pam.PAMMaxTries},
-		{"AUTHENTICATION_FAILED", pam.PAMAuthError},
-		{"", pam.PAMAuthError},
+		{"NO_LOCAL_ACCOUNT", pam.PAMAuthError},
+		{"RATE_LIMITED", pam.PAMMaxTries},
+		// (#230) Capacity and overload are the broker failing to decide.
+		{"SERVER_BUSY", pam.PAMAuthInfoUnavail},
+		{"SESSION_LIMIT_REACHED", pam.PAMAuthInfoUnavail},
+		{"AUTH_LIMIT_REACHED", pam.PAMAuthInfoUnavail},
+		{"SOURCE_AUTH_LIMIT_REACHED", pam.PAMAuthInfoUnavail},
+		{"DEVICE_FLOW_FAILED", pam.PAMAuthInfoUnavail},
+		{"AUTHENTICATION_FAILED", pam.PAMAuthInfoUnavail},
+		{"", pam.PAMAuthInfoUnavail},
 	}
 
 	for _, tt := range tests {
@@ -517,10 +541,10 @@ func TestPerformAuthenticationRequiresAStringSessionID(t *testing.T) {
 	}
 }
 
-// error_code is read with the same strictness, and a refusal whose error_code is
-// not a string stays a refusal: it maps as an unrecognized code (PAM_AUTH_ERR)
-// rather than being rendered into text that map_error_code might match, and never
-// becomes "I could not reach an opinion".
+// error_code is read with the same strictness, and a denial whose error_code is
+// not a string stays a denial: it maps as no code at all (PAM_AUTH_ERR) rather than
+// being rendered into text that map_refusal might match — `["POLICY_DENIED"]` is
+// not a policy denial.
 func TestPerformAuthenticationDeniesWithANonStringErrorCode(t *testing.T) {
 	t.Parallel()
 
@@ -528,9 +552,9 @@ func TestPerformAuthenticationDeniesWithANonStringErrorCode(t *testing.T) {
 		name  string
 		reply string
 	}{
-		{"a number", `{"success":false,"error_code":404,"error_message":"nope"}` + "\n"},
-		{"an array", `{"success":false,"error_code":["POLICY_DENIED"],"error_message":{"m":1}}` + "\n"},
-		{"null", `{"success":false,"error_code":null,"error_message":null}` + "\n"},
+		{"a number", `{"protocol_version":1,"status":"denied","success":false,"error_code":404,"error_message":"nope"}` + "\n"},
+		{"an array", `{"protocol_version":1,"status":"denied","success":false,"error_code":["POLICY_DENIED"],"error_message":{"m":1}}` + "\n"},
+		{"null", `{"protocol_version":1,"status":"denied","success":false,"error_code":null,"error_message":null}` + "\n"},
 	}
 
 	for _, tt := range replies {
@@ -592,7 +616,7 @@ func TestAuthenticateSurvivesAMissingConversationFunction(t *testing.T) {
 			// Carries instructions, so the module tries to show them.
 			return deviceStarted("sess-noconv")
 		}
-		return denied("SESSION_NOT_FOUND")
+		return denied("ACCESS_DENIED")
 	})
 
 	handle, rc := startPAMHandleWithoutConversation("other", "testuser")
@@ -622,7 +646,7 @@ func TestDebugFlagDoesNotOutliveItsInvocation(t *testing.T) {
 	// Not parallel: debug_enabled is process-wide, which is the subject here.
 	broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
 		// Refused up front: no device step, so neither authentication sleeps.
-		return denied("AUTHENTICATION_FAILED")
+		return denied("NO_LOCAL_ACCOUNT")
 	})
 
 	handle, rc := startPAMHandleWithoutConversation("other", "testuser")

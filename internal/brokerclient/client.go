@@ -28,10 +28,14 @@ import (
 const ProtocolVersion = 1
 
 // The reply statuses of version 1 that this client acts on. Any other status, or
-// none, is never a grant.
+// none, is never a grant. The three failures are told apart only to report which
+// kind of failure a refusal was; see pkg/pam's refusalToPAMResult.
 const (
 	StatusPending    = "pending"
 	StatusAuthorized = "authorized"
+	StatusDenied     = "denied"
+	StatusExpired    = "expired"
+	StatusError      = "error"
 )
 
 const (
@@ -174,14 +178,16 @@ func (r *Response) Pending() bool {
 	return r.Status == StatusPending && !r.Success
 }
 
-// DenialError reports that the broker refused the authentication. It is a
-// decision, not a failure to obtain one: callers must treat it as a denial.
+// DenialError reports that the broker answered and did not grant the
+// authentication. Callers must treat it as a failure, never as a grant.
 //
-// A poll answered with SESSION_NOT_FOUND, SESSION_EXPIRED or FORBIDDEN is also a
-// denial, because the broker deletes the session when identity binding fails,
-// when require_groups rejects the user, when polling the IdP fails, and when the
-// session expires.
+// Status says what kind of answer it was: "denied" or "expired" is a decision about
+// this login, and "error" is the broker failing to make one — at capacity, busy, or
+// broken. A failed device flow is reported on the next poll with the reason it
+// failed (#179), so a poll that gets SESSION_NOT_FOUND means the broker no longer
+// knows the session at all, typically because it restarted.
 type DenialError struct {
+	Status    string
 	ErrorCode string
 	Message   string
 }
@@ -407,7 +413,7 @@ func decided(resp *Response, userID string) (*Response, error) {
 			code = "USER_MISMATCH"
 		}
 	}
-	return nil, &DenialError{ErrorCode: code, Message: resp.ErrorMessage}
+	return nil, &DenialError{Status: resp.Status, ErrorCode: code, Message: resp.ErrorMessage}
 }
 
 // pollInterval reads metadata.polling_interval (seconds) from a response,

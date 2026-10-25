@@ -397,8 +397,8 @@ func TestAuthenticateTooManySessions(t *testing.T) {
 	if resp.Success {
 		t.Fatal("Expected failure when session limit exceeded")
 	}
-	if resp.ErrorCode != "TOO_MANY_SESSIONS" {
-		t.Fatalf("Expected TOO_MANY_SESSIONS error code, got %q", resp.ErrorCode)
+	if resp.ErrorCode != "SESSION_LIMIT_REACHED" {
+		t.Fatalf("Expected SESSION_LIMIT_REACHED error code, got %q", resp.ErrorCode)
 	}
 }
 

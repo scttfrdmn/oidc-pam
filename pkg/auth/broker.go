@@ -604,12 +604,12 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		// A capacity refusal is still a login that did not happen, and one an
 		// operator has to be able to tell apart from a policy denial — this is the
 		// host being full, not a decision about the identity.
-		event := b.denialEvent(req, "TOO_MANY_SESSIONS", "maximum concurrent sessions reached for this user")
+		event := b.denialEvent(req, "SESSION_LIMIT_REACHED", "maximum concurrent sessions reached for this user")
 		event.Metadata["max_sessions"] = maxSessions
 		b.auditLogger.LogAuthEvent(event)
 		return &AuthResponse{
 			Success:      false,
-			ErrorCode:    "TOO_MANY_SESSIONS",
+			ErrorCode:    "SESSION_LIMIT_REACHED",
 			ErrorMessage: "Maximum concurrent sessions reached",
 		}, nil
 	}
@@ -1436,7 +1436,7 @@ func stopPendingFlow(session *Session) {
 // runs the PAM stack for whatever username a client offers before anything about
 // that client has been authenticated, so ten abandoned connection attempts against
 // one account filled that account's max_concurrent_sessions with logins nobody had
-// approved. The eleventh — the real one — was refused TOO_MANY_SESSIONS for as long
+// approved. The eleventh — the real one — was refused TOO_MANY_SESSIONS (now SESSION_LIMIT_REACHED) for as long
 // as the device codes lived. The cap is a bound on how much access one identity may
 // hold at once, so what belongs in it is access that was granted.
 func (b *Broker) countActiveUserSessions(userID string) int {
@@ -1620,7 +1620,7 @@ func (b *Broker) admitPendingSession(session *Session, now time.Time) pendingAdm
 	mine := counts[key]
 	if mine >= perSourceCap {
 		return pendingAdmission{
-			errorCode: "TOO_MANY_PENDING_AUTHS",
+			errorCode: "SOURCE_AUTH_LIMIT_REACHED",
 			reason: "too many authentications from this address are already awaiting device " +
 				"approval for this account; complete or abandon one and try again",
 			perSource: mine,
@@ -1638,7 +1638,7 @@ func (b *Broker) admitPendingSession(session *Session, now time.Time) pendingAdm
 			// this one. Refusing is the only answer left, and it cannot be provoked by a
 			// client holding pending flows under other keys.
 			return pendingAdmission{
-				errorCode: "RATE_LIMITED",
+				errorCode: "AUTH_LIMIT_REACHED",
 				reason:    "too many pending device authorization flows on this host; try again shortly",
 				perSource: mine,
 				hostTotal: hostTotal,

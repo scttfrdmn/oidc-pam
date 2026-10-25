@@ -54,7 +54,7 @@ func TestEveryRefusedLoginIsAuditedWithItsErrorCode(t *testing.T) {
 		},
 		{
 			name:          "the user is at their concurrent session limit",
-			wantCode:      "TOO_MANY_SESSIONS",
+			wantCode:      "SESSION_LIMIT_REACHED",
 			wantReasonHas: "concurrent sessions",
 			setup: func(_ *testing.T, env *denialTestEnv) {
 				env.broker.config.Authentication.MaxConcurrentSessions = 1
@@ -82,7 +82,7 @@ func TestEveryRefusedLoginIsAuditedWithItsErrorCode(t *testing.T) {
 		},
 		{
 			name:          "the host is at its device-flow cap",
-			wantCode:      "RATE_LIMITED",
+			wantCode:      "AUTH_LIMIT_REACHED",
 			wantReasonHas: "pending device authorization flows",
 			setup: func(_ *testing.T, env *denialTestEnv) {
 				// (#163) A full pool refuses only a requester that already holds as many
@@ -100,7 +100,7 @@ func TestEveryRefusedLoginIsAuditedWithItsErrorCode(t *testing.T) {
 		},
 		{
 			name:          "this account and address are at their pending-flow cap",
-			wantCode:      "TOO_MANY_PENDING_AUTHS",
+			wantCode:      "SOURCE_AUTH_LIMIT_REACHED",
 			wantReasonHas: "awaiting device approval",
 			setup: func(_ *testing.T, env *denialTestEnv) {
 				for i := 0; i < defaultMaxPendingAuthsPerSource; i++ {

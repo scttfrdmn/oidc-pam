@@ -158,7 +158,7 @@ const brokerPending = int(C.BROKER_PENDING)
 // code it reached, or brokerPending.
 //
 // This is the module's whole verdict on a reply, and until now nothing called it:
-// both classify_response and map_error_code are static, the Go tests here drove them
+// both classify_response and map_error_code (now map_refusal) were static, the Go tests here drove them
 // only indirectly through a fake broker that a real one resembles, and e2e cannot
 // construct a malformed reply at all. A decision nothing tests is a decision that can
 // be deleted without a single suite noticing (#197).
@@ -182,19 +182,24 @@ func classifyBrokerResponseFor(response, username string) int {
 	return int(C.classify_response_text(cResponse, cUsername))
 }
 
-// mapBrokerErrorCode runs the C module's error_code -> PAM result mapping, the
-// second half of the same decision: which kind of denial a refusal becomes.
+// mapBrokerRefusal runs the C module's refusal -> PAM result mapping, the second
+// half of the same decision: which kind of failure a refusal becomes.
 //
-// A nil code is the NULL the module is handed whenever error_code is absent or is
-// not a JSON string — the case a Go string cannot express, and the one that has to
-// stay a denial (#197).
-func mapBrokerErrorCode(code *string) pam.PAMResultCode {
-	if code == nil {
-		return pam.PAMResultCode(C.map_error_code((*C.char)(nil)))
+// A nil argument is the NULL the module is handed whenever status or error_code is
+// absent or is not a JSON string — the case a Go string cannot express, and one
+// that has to stay a failure (#197).
+func mapBrokerRefusal(status, code *string) pam.PAMResultCode {
+	cString := func(s *string) *C.char {
+		if s == nil {
+			return nil
+		}
+		return C.CString(*s)
 	}
+	cStatus, cCode := cString(status), cString(code)
+	defer func() {
+		C.free(unsafe.Pointer(cStatus)) // #nosec G103 -- cgo: freeing a C.CString allocation (free(NULL) is a no-op)
+		C.free(unsafe.Pointer(cCode))   // #nosec G103 -- cgo: freeing a C.CString allocation (free(NULL) is a no-op)
+	}()
 
-	cCode := C.CString(*code)
-	defer C.free(unsafe.Pointer(cCode)) // #nosec G103 -- cgo: freeing a C.CString allocation
-
-	return pam.PAMResultCode(C.map_error_code(cCode))
+	return pam.PAMResultCode(C.map_refusal(cStatus, cCode))
 }
