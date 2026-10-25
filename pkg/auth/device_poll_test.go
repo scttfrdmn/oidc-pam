@@ -245,10 +245,17 @@ func (e *pollTestEnv) run(t *testing.T) time.Duration {
 }
 
 // activeSession is the session as the broker holds it, or nil if the loop
-// removed it. The loop replaces the map entry with a clone rather than mutating
-// in place, so re-reading through the broker is the only way to see the result.
+// removed it or ended it. The loop replaces the map entry with a clone rather than
+// mutating in place, so re-reading through the broker is the only way to see the
+// result. A failed login leaves the record of how it failed behind (see
+// endSession), which is not a session, so it reads as nil here too; what that
+// record says is ended_session_test.go's business.
 func (e *pollTestEnv) activeSession() *Session {
-	return e.broker.getSession(e.session.ID)
+	session := e.broker.getSession(e.session.ID)
+	if session != nil && session.isEnded() {
+		return nil
+	}
+	return session
 }
 
 // The regression gate for #150: a flow that answers authorization_pending twice

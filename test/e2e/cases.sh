@@ -437,6 +437,11 @@ case_denied_by_provider() {
     expect_login_refused "the identity provider answered access_denied"
     expect_audit device_authorization_failed
     expect_module_log 'Broker refused authentication'
+    # #179: and the module was told why. A failed flow used to delete its session,
+    # so the poll that followed read SESSION_NOT_FOUND and the module refused the
+    # login for a reason that was not the reason. The same check closes each of the
+    # refusal cases below.
+    expect_module_log 'status=denied, error_code=ACCESS_DENIED'
     expect_no_module_log 'Device authorization not completed within'
     expect_no_oidc_key_for alice
     expect_no_audit authentication_successful
@@ -452,6 +457,7 @@ case_identity_mismatch() {
 
     expect_login_refused "the ID token says carol, the login is for alice"
     expect_audit IDENTITY_MISMATCH
+    expect_module_log 'status=denied, error_code=IDENTITY_MISMATCH'
     expect_no_oidc_key_for alice
 }
 
@@ -477,6 +483,7 @@ case_privileged_account_refused() {
 
     expect_login_refused "svcacct is uid 400, below the privileged threshold"
     expect_audit PRIVILEGED_ACCOUNT_DENIED
+    expect_module_log 'status=denied, error_code=PRIVILEGED_ACCOUNT_DENIED'
     expect_no_oidc_key_for svcacct
 }
 
@@ -493,6 +500,7 @@ case_email_local_part_refused() {
 
     expect_login_refused "alice@example.org must not bind to local alice without the opt-in"
     expect_audit IDENTITY_MISMATCH
+    expect_module_log 'status=denied, error_code=IDENTITY_MISMATCH'
     expect_no_oidc_key_for alice
 }
 
@@ -506,6 +514,7 @@ case_group_denied() {
 
     expect_login_refused "alice is in none of the required groups"
     expect_audit GROUP_DENIED
+    expect_module_log 'status=denied, error_code=GROUP_DENIED'
     expect_no_oidc_key_for alice
 }
 

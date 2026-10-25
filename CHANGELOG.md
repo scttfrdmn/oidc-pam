@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `brokerclient` treat such a reply as a transport failure rather than reading
   its fields. A reply's `user_id` is now populated only when it is `authorized`.
 
+### Fixed
+
+- **A failed login now tells the client why (#179).** Every way a device flow could
+  fail used to delete its session. So the next `check_session` answered
+  `SESSION_NOT_FOUND`, which looks the same as a broker restart, and the user was
+  never told they had been refused. The broker now keeps the record of the failure
+  queryable for two minutes, as protocol version 1 requires. The reply has status
+  `denied` with `ACCESS_DENIED` (declined at the provider), `IDENTITY_MISMATCH`
+  (signed in as another account), `GROUP_DENIED`, `GROUP_NOT_ALLOWED`,
+  `PRIVILEGED_ACCOUNT_DENIED`, `USERNAME_CLAIM_MISSING` or `DEVICE_NOT_TRUSTED`.
+  Or it has status `expired` with `SESSION_EXPIRED`, or status `error` with
+  `AUTHENTICATION_FAILED` for failures inside the broker. Messages are fixed text.
+  The detail stays in the audit log. Only the owner can read the record, and it
+  carries no token or key. It also takes no slot in the pending-login pool, so
+  failing on purpose cannot lock an account out. It can't be refreshed, and
+  `oidc-admin sessions` lists it as `ended`.
+
 ## [0.5.3] - 2026-10-24
 
 ### Security
