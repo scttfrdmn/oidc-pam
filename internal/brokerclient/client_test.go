@@ -244,8 +244,7 @@ func TestAuthenticateAndWaitSucceedsAfterDeviceApproval(t *testing.T) {
 }
 
 func TestAuthenticateAndWaitDeniesOnTerminalPollErrors(t *testing.T) {
-	// The broker deletes the session on identity mismatch, group denial, poll
-	// failure and expiry, so these are decisions, not transient errors.
+	// Every answer that is neither pending nor RATE_LIMITED ends the wait.
 	for _, code := range []string{"SESSION_NOT_FOUND", "SESSION_EXPIRED", "FORBIDDEN", "DEVICE_FLOW_FAILED", "POLICY_DENIED"} {
 		t.Run(code, func(t *testing.T) {
 			broker := newFakeBroker(t, func(n int, _ Request) interface{} {
@@ -269,6 +268,91 @@ func TestAuthenticateAndWaitDeniesOnTerminalPollErrors(t *testing.T) {
 				t.Errorf("expected polling to stop at the first terminal answer, got %d requests", n)
 			}
 		})
+	}
+}
+
+// (#179) RATE_LIMITED on a poll means slow down. The login keeps polling at a
+// doubling interval, capped at MaxPollInterval, and completes once the broker
+// answers; it is not refused for having been throttled.
+func TestAuthenticateAndWaitBacksOffWhenAPollIsRateLimited(t *testing.T) {
+	broker := newFakeBroker(t, func(n int, _ Request) interface{} {
+		switch {
+		case n == 1:
+			return deviceStarted("sess-slow", 20)
+		case n <= 4:
+			return denied("RATE_LIMITED")
+		default:
+			return authenticated("sess-slow")
+		}
+	})
+
+	client, _ := testClient(t, broker.socketPath)
+	var waits []time.Duration
+	advance := client.sleep
+	client.sleep = func(ctx context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return advance(ctx, d)
+	}
+
+	resp, err := client.AuthenticateAndWait(context.Background(), authRequest(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("a throttled login was refused: %v", err)
+	}
+	if !resp.Granted("testuser") {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+
+	// 20s, then each RATE_LIMITED doubles it: 40s, then 80s capped to 60s, twice.
+	want := []time.Duration{20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second}
+	if len(waits) != len(want) {
+		t.Fatalf("waits = %v, want %v", waits, want)
+	}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Errorf("wait %d = %s, want %s (all: %v)", i+1, waits[i], want[i], waits)
+		}
+	}
+}
+
+// Backing off does not extend the login: the deadline still bounds the whole
+// wait, so a broker that never stops throttling ends in a timeout, not a hang.
+func TestAuthenticateAndWaitRateLimitedPollsStillTimeOut(t *testing.T) {
+	broker := newFakeBroker(t, func(n int, _ Request) interface{} {
+		if n == 1 {
+			return deviceStarted("sess-slow", 5)
+		}
+		return denied("RATE_LIMITED")
+	})
+
+	client, _ := testClient(t, broker.socketPath)
+	_, err := client.AuthenticateAndWait(context.Background(), authRequest(), 30*time.Second)
+
+	var timeout *TimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("expected *TimeoutError, got %T: %v", err, err)
+	}
+	// 5s, 10s, then the 15s left: three polls inside the 30s budget.
+	if n := len(broker.received()); n != 4 {
+		t.Errorf("expected 1 authenticate + 3 polls, got %d requests", n)
+	}
+}
+
+// RATE_LIMITED on authenticate is a refusal. The limiter's window is a minute,
+// which a login does not have to spend, so nothing is retried.
+func TestAuthenticateAndWaitDoesNotRetryARateLimitedAuthenticate(t *testing.T) {
+	broker := newFakeBroker(t, func(_ int, _ Request) interface{} {
+		return denied("RATE_LIMITED")
+	})
+
+	client, _ := testClient(t, broker.socketPath)
+	_, err := client.AuthenticateAndWait(context.Background(), authRequest(), 30*time.Second)
+
+	var denial *DenialError
+	if !errors.As(err, &denial) || denial.ErrorCode != "RATE_LIMITED" {
+		t.Fatalf("expected a RATE_LIMITED *DenialError, got %T: %v", err, err)
+	}
+	if n := len(broker.received()); n != 1 {
+		t.Errorf("expected one authenticate and nothing else, got %d requests", n)
 	}
 }
 

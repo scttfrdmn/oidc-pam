@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rate-limited poll slows the login down instead of ending it (#179).** When
+  the broker answered a `check_session` poll with `RATE_LIMITED`, the module and
+  `brokerclient` refused the login as `PAM_MAXTRIES`. The limiter's window clears
+  on its own, so a user who was only being throttled was turned away. Both now
+  double the poll interval, up to 60s, and keep polling. The login's own timeout
+  still bounds the wait. `RATE_LIMITED` on `authenticate` is still a refusal,
+  because the limiter's one-minute window is longer than a login can wait.
 - **A failed login now tells the client why (#179).** Every way a device flow could
   fail used to delete its session. So the next `check_session` answered
   `SESSION_NOT_FOUND`, which looks the same as a broker restart, and the user was

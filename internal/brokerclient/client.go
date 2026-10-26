@@ -171,6 +171,13 @@ func (r *Response) Granted(userID string) bool {
 	return r.Success && r.Status == StatusAuthorized && userID != "" && r.UserID == userID
 }
 
+// RateLimited reports whether r is the broker asking the client to slow down.
+// On a check_session poll that is neither a failure nor an answer: see
+// AuthenticateAndWait.
+func (r *Response) RateLimited() bool {
+	return !r.Success && r.Status == StatusError && r.ErrorCode == "RATE_LIMITED"
+}
+
 // Pending reports whether r is a device flow that has started and not finished.
 // A reply that says pending and success at once contradicts itself, and is not
 // pending.
@@ -342,8 +349,8 @@ func (c *Client) CheckSession(ctx context.Context, sessionID, userID string) (*R
 // that map to PAM codes should return PAM_AUTHINFO_UNAVAIL only for the latter.
 //
 // A response is a grant only by Response.Granted: success and status "authorized"
-// together, for req.UserID. A pending response is polled; anything else is a
-// denial. This used to decide on Success and RequiresDevice, the convention before
+// together, for req.UserID. A pending response is polled, and a rate-limited poll
+// is polled again more slowly; anything else is a denial. This used to decide on Success and RequiresDevice, the convention before
 // status existed, in which a started flow reported Success (#146).
 func (c *Client) AuthenticateAndWait(ctx context.Context, req *Request, timeout time.Duration) (*Response, error) {
 	if timeout <= 0 {
@@ -389,7 +396,16 @@ func (c *Client) AuthenticateAndWait(ctx context.Context, req *Request, timeout 
 		if err != nil {
 			return nil, err
 		}
-		if !resp.Pending() {
+		switch {
+		case resp.RateLimited():
+			// (#179) A rate-limited poll means "slow down", not "no". Ending the
+			// login on it failed users who were only being throttled, by a limiter
+			// whose window clears on its own. The interval doubles, up to
+			// MaxPollInterval, and the deadline below still bounds the whole wait.
+			// RATE_LIMITED on authenticate is different: it stays a refusal, because
+			// the limiter's window is longer than a login can wait.
+			interval = min(2*interval, MaxPollInterval)
+		case !resp.Pending():
 			return decided(resp, userID)
 		}
 

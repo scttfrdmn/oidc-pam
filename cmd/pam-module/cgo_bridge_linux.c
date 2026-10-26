@@ -1061,7 +1061,17 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
         result = classify_response(response_obj, username);
         json_object_put(response_obj);
 
-        if (result != BROKER_PENDING) {
+        if (result == PAM_MAXTRIES) {
+            // (#179) RATE_LIMITED — the only refusal map_refusal answers with
+            // PAM_MAXTRIES — means "slow down", not "no", when it answers a poll.
+            // Ending the login here failed users who were only being throttled, by a
+            // limiter whose window clears on its own. Double the interval, up to
+            // MAX_POLL_INTERVAL, and keep polling; the deadline below still bounds the
+            // wait. On authenticate, above, it stays a refusal: the limiter's window
+            // is longer than a login can wait.
+            poll_interval = poll_interval * 2 > MAX_POLL_INTERVAL ? MAX_POLL_INTERVAL : poll_interval * 2;
+            log_pam_message(LOG_NOTICE, "Broker is rate limiting session checks; polling every %ds", poll_interval);
+        } else if (result != BROKER_PENDING) {
             if (result == PAM_SUCCESS) {
                 log_pam_message(LOG_INFO, "Device authorization completed for user: %s", username);
             }
