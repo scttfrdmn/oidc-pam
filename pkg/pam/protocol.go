@@ -15,7 +15,7 @@ import (
 type AuthRequest struct {
 	Type       string            `json:"type"`
 	UserID     string            `json:"user_id"`
-	LoginType  string            `json:"login_type"`
+	LoginType  string            `json:"login_type,omitempty"`
 	SourceIP   string            `json:"source_ip,omitempty"`
 	TargetHost string            `json:"target_host,omitempty"`
 	Metadata   map[string]string `json:"metadata"`
@@ -66,7 +66,13 @@ func IsSocketPathValid(socketPath string) bool {
 	return len(socketPath) <= maxUnixSocketPath
 }
 
-// GetLoginType determines the login type based on service and TTY
+// GetLoginType determines the login type based on service and TTY: "ssh",
+// "gui" or "console", the three values protocol version 1 defines, or "" when it
+// is none of them. An empty login_type is omitted from the request, which the
+// broker treats as ssh for the one thing it uses the field for, formatting the
+// device-flow instructions. It used to be "unknown", which version 1 refuses
+// (#179). This must agree with classify_login_type in the C module; see
+// TestLoginTypeClassificationMatchesGo.
 func GetLoginType(service, tty string) string {
 	switch service {
 	case "sshd":
@@ -79,7 +85,7 @@ func GetLoginType(service, tty string) string {
 				return "console"
 			}
 		}
-		return "unknown"
+		return ""
 	}
 }
 

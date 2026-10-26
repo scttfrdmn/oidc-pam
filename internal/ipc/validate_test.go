@@ -335,20 +335,28 @@ func TestValidateRequest(t *testing.T) {
 func TestValidateMetadata(t *testing.T) {
 	tests := []struct {
 		name    string
-		meta    map[string]interface{}
+		meta    map[string]string
 		wantErr bool
 	}{
 		{"nil map", nil, false},
-		{"empty map", map[string]interface{}{}, false},
-		{"string value", map[string]interface{}{"k": "v"}, false},
-		{"bool value", map[string]interface{}{"flag": true}, false},
-		{"float64 value", map[string]interface{}{"score": float64(42)}, false},
-		{"nil value", map[string]interface{}{"k": nil}, false},
-		{"mixed valid types", map[string]interface{}{"a": "str", "b": true, "c": float64(1), "d": nil}, false},
+		{"empty map", map[string]string{}, false},
+		{"string value", map[string]string{"k": "v"}, false},
+		{"empty value", map[string]string{"k": ""}, false},
+		{
+			"as many keys as allowed",
+			func() map[string]string {
+				m := make(map[string]string)
+				for i := 0; i < maxMetadataKeys; i++ {
+					m[strings.Repeat("k", i+1)] = "v"
+				}
+				return m
+			}(),
+			false,
+		},
 		{
 			"too many keys",
-			func() map[string]interface{} {
-				m := make(map[string]interface{})
+			func() map[string]string {
+				m := make(map[string]string)
 				for i := 0; i < maxMetadataKeys+1; i++ {
 					m[strings.Repeat("k", i+1)] = "v"
 				}
@@ -356,14 +364,13 @@ func TestValidateMetadata(t *testing.T) {
 			}(),
 			true,
 		},
-		{"empty key", map[string]interface{}{"": "v"}, true},
-		{"key too long", map[string]interface{}{strings.Repeat("k", maxMetadataKeyLen+1): "v"}, true},
-		{"key with control char", map[string]interface{}{"key\x00bad": "v"}, true},
-		{"string value too long", map[string]interface{}{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
-		{"string value with control char", map[string]interface{}{"k": "val\x00ue"}, true},
-		{"unsupported type slice", map[string]interface{}{"k": []string{"a"}}, true},
-		{"unsupported type map", map[string]interface{}{"k": map[string]string{"a": "b"}}, true},
-		{"unsupported type int", map[string]interface{}{"k": 42}, true},
+		{"empty key", map[string]string{"": "v"}, true},
+		{"longest key", map[string]string{strings.Repeat("k", maxMetadataKeyLen): "v"}, false},
+		{"key too long", map[string]string{strings.Repeat("k", maxMetadataKeyLen+1): "v"}, true},
+		{"key with control char", map[string]string{"key\x00bad": "v"}, true},
+		{"longest value", map[string]string{"k": strings.Repeat("x", maxMetadataValueLen)}, false},
+		{"value too long", map[string]string{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
+		{"value with control char", map[string]string{"k": "val\x00ue"}, true},
 	}
 
 	for _, tt := range tests {
@@ -376,16 +383,26 @@ func TestValidateMetadata(t *testing.T) {
 	}
 }
 
+// The bounds are version 1's (#179): 64 entries, keys of 128 bytes, values of 1024.
+func TestMetadataBoundsAreTheContracts(t *testing.T) {
+	if maxMetadataKeys != 64 || maxMetadataKeyLen != 128 || maxMetadataValueLen != 1024 {
+		t.Errorf("metadata bounds = %d entries, %d-byte keys, %d-byte values; version 1 says 64, 128, 1024",
+			maxMetadataKeys, maxMetadataKeyLen, maxMetadataValueLen)
+	}
+	if maxUserAgentLen != 512 {
+		t.Errorf("user_agent bound = %d; version 1 says 512", maxUserAgentLen)
+	}
+}
+
 func TestValidateRequestMetadata(t *testing.T) {
 	// Verify metadata validation is wired into validateRequest for authenticate.
 	tests := []struct {
 		name    string
-		meta    map[string]interface{}
+		meta    map[string]string
 		wantErr bool
 	}{
-		{"valid metadata", map[string]interface{}{"service": "sshd", "tty": "pts/0"}, false},
-		{"unsupported value type", map[string]interface{}{"nested": map[string]interface{}{"a": "b"}}, true},
-		{"value too long", map[string]interface{}{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
+		{"valid metadata", map[string]string{"service": "sshd", "tty": "pts/0"}, false},
+		{"value too long", map[string]string{"k": strings.Repeat("x", maxMetadataValueLen+1)}, true},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +415,32 @@ func TestValidateRequestMetadata(t *testing.T) {
 			err := validateRequest(req)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// login_type is one of version 1's three values, or absent, which means ssh.
+// Anything else is refused: it used to be any string up to 256 bytes, and the
+// module sent "unknown" for every login it could not classify.
+func TestValidateRequestLoginType(t *testing.T) {
+	for _, tt := range []struct {
+		loginType string
+		wantErr   bool
+	}{
+		{"", false},
+		{"ssh", false},
+		{"console", false},
+		{"gui", false},
+		{"unknown", true},
+		{"SSH", true},
+		{"ssh ", true},
+		{"rdp", true},
+	} {
+		t.Run(tt.loginType, func(t *testing.T) {
+			err := validateRequest(&Request{Type: "authenticate", UserID: "testuser", LoginType: tt.loginType})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("login_type %q: error = %v, wantErr %v", tt.loginType, err, tt.wantErr)
 			}
 		})
 	}

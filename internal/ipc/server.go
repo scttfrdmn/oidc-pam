@@ -54,16 +54,19 @@ const (
 type Request struct {
 	// ProtocolVersion is the wire contract version the client speaks. Absent or 0
 	// means 1; see requestProtocolVersionSupported.
-	ProtocolVersion int                    `json:"protocol_version"`
-	Type            string                 `json:"type"`
-	UserID          string                 `json:"user_id"`
-	SourceIP        string                 `json:"source_ip"`
-	UserAgent       string                 `json:"user_agent"`
-	TargetHost      string                 `json:"target_host"`
-	LoginType       string                 `json:"login_type"`
-	DeviceID        string                 `json:"device_id"`
-	SessionID       string                 `json:"session_id"`
-	Metadata        map[string]interface{} `json:"metadata"`
+	ProtocolVersion int    `json:"protocol_version"`
+	Type            string `json:"type"`
+	UserID          string `json:"user_id"`
+	SourceIP        string `json:"source_ip"`
+	UserAgent       string `json:"user_agent"`
+	TargetHost      string `json:"target_host"`
+	LoginType       string `json:"login_type"`
+	DeviceID        string `json:"device_id"`
+	SessionID       string `json:"session_id"`
+	// Metadata is a string-to-string map, as version 1 defines it: free-form audit
+	// context that decides nothing. A value of any other JSON type fails to decode,
+	// which is INVALID_REQUEST.
+	Metadata map[string]string `json:"metadata"`
 }
 
 // Response represents a response to PAM module.
@@ -78,24 +81,24 @@ type Request struct {
 // RequiresDevice and RequiresApproval are legacy hints from before status existed,
 // still sent for older readers, and must never decide a grant.
 type Response struct {
-	ProtocolVersion  int                    `json:"protocol_version"`
-	Status           string                 `json:"status"`
-	Success          bool                   `json:"success"`
-	UserID           string                 `json:"user_id"`
-	Email            string                 `json:"email"`
-	Groups           []string               `json:"groups"`
-	SessionID        string                 `json:"session_id"`
-	DeviceCode       string                 `json:"device_code"`
-	DeviceURL        string                 `json:"device_url"`
-	ExpiresAt        time.Time              `json:"expires_at"`
-	SSHPublicKey     string                 `json:"ssh_public_key"`
-	RequiresDevice   bool                   `json:"requires_device"`
-	RequiresApproval bool                   `json:"requires_approval"`
-	ErrorCode        string                 `json:"error_code"`
-	ErrorMessage     string                 `json:"error_message"`
-	Instructions     string                 `json:"instructions"`
-	RiskScore        int                    `json:"risk_score"`
-	Metadata         map[string]interface{} `json:"metadata"`
+	ProtocolVersion  int               `json:"protocol_version"`
+	Status           string            `json:"status"`
+	Success          bool              `json:"success"`
+	UserID           string            `json:"user_id"`
+	Email            string            `json:"email"`
+	Groups           []string          `json:"groups"`
+	SessionID        string            `json:"session_id"`
+	DeviceCode       string            `json:"device_code"`
+	DeviceURL        string            `json:"device_url"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	SSHPublicKey     string            `json:"ssh_public_key"`
+	RequiresDevice   bool              `json:"requires_device"`
+	RequiresApproval bool              `json:"requires_approval"`
+	ErrorCode        string            `json:"error_code"`
+	ErrorMessage     string            `json:"error_message"`
+	Instructions     string            `json:"instructions"`
+	RiskScore        int               `json:"risk_score"`
+	Metadata         map[string]string `json:"metadata"`
 }
 
 // NewServer creates a new IPC server. maxRequestsPerMinute and
@@ -596,7 +599,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 		DeviceID:   request.DeviceID,
 		SessionID:  request.SessionID,
 		Timestamp:  time.Now(),
-		Metadata:   request.Metadata,
+		Metadata:   requestMetadata(request.Metadata),
 	}
 
 	// Call broker
@@ -631,7 +634,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 		ErrorCode:        authResponse.ErrorCode,
 		ErrorMessage:     authResponse.ErrorMessage,
 		RiskScore:        authResponse.RiskScore,
-		Metadata:         authResponse.Metadata,
+		Metadata:         replyMetadata(authResponse.Metadata),
 	}
 
 	// Add formatted instructions based on login type
@@ -672,7 +675,7 @@ func (s *Server) handleCheckSession(request *Request) *Response {
 		ErrorCode:        authResponse.ErrorCode,
 		ErrorMessage:     authResponse.ErrorMessage,
 		RiskScore:        authResponse.RiskScore,
-		Metadata:         authResponse.Metadata,
+		Metadata:         replyMetadata(authResponse.Metadata),
 	}
 }
 
@@ -704,7 +707,7 @@ func (s *Server) handleRefreshSession(request *Request) *Response {
 		ErrorCode:    authResponse.ErrorCode,
 		ErrorMessage: authResponse.ErrorMessage,
 		RiskScore:    authResponse.RiskScore,
-		Metadata:     authResponse.Metadata,
+		Metadata:     replyMetadata(authResponse.Metadata),
 	}
 }
 

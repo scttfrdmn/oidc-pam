@@ -11,10 +11,9 @@ import (
 const (
 	// maxRequestSize is the maximum allowed size for a JSON request (64 KiB).
 	//
-	// The largest request these limits permit is around 40 KiB: 32 metadata entries
-	// of maxMetadataKeyLen + maxMetadataValueLen, plus the fixed fields. 64 KiB
-	// leaves room for JSON syntax and for a field to grow, and nothing legitimate
-	// comes close.
+	// It is the contract's cap on a request read (version 1, broker conformance
+	// item 6), and the reference client's requests are a few hundred bytes, so
+	// nothing legitimate comes close.
 	//
 	// It was 1 MiB, which mattered once rate limiting moved to after the decode
 	// (#160): this bound times maxConcurrentConnections is how much a peer can make
@@ -37,13 +36,15 @@ const (
 	maxSourceIPLen   = 45
 	maxTargetHostLen = 253
 
-	// maxMetadataKeys is the maximum number of entries in the metadata map.
-	maxMetadataKeys = 32
+	// maxUserAgentLen is version 1's bound on user_agent.
+	maxUserAgentLen = 512
 
-	// maxMetadataKeyLen is the maximum length of a single metadata key.
-	maxMetadataKeyLen = 64
-
-	// maxMetadataValueLen is the maximum length of a string metadata value.
+	// The bounds version 1 sets on the metadata map: how many entries, and how long
+	// each key and each value may be. Together they permit more than maxRequestSize,
+	// which is the bound that binds first; they exist so that no single entry is a
+	// way to put an unbounded string in an audit record.
+	maxMetadataKeys     = 64
+	maxMetadataKeyLen   = 128
 	maxMetadataValueLen = 1024
 )
 
@@ -68,14 +69,14 @@ func validateRequest(req *Request) error {
 		if err := validateSourceIP(req.SourceIP); err != nil {
 			return err
 		}
-		if err := validateStringField(req.UserAgent, "user_agent", maxFieldLen); err != nil {
+		if err := validateStringField(req.UserAgent, "user_agent", maxUserAgentLen); err != nil {
 			return err
 		}
 		if err := validateStringField(req.TargetHost, "target_host", maxTargetHostLen); err != nil {
 			return err
 		}
-		if err := validateStringField(req.LoginType, "login_type", maxFieldLen); err != nil {
-			return err
+		if !loginTypes[req.LoginType] {
+			return fmt.Errorf("login_type must be ssh, console or gui")
 		}
 		if err := validateStringField(req.DeviceID, "device_id", maxFieldLen); err != nil {
 			return err
@@ -185,13 +186,11 @@ func validateStringField(val, name string, maxLen int) error {
 	return nil
 }
 
-// validateMetadata validates the metadata map: enforces limits on key count,
-// key length, and value types/sizes. Allowed value types are string, bool,
-// float64 (JSON number), and nil.
-func validateMetadata(m map[string]interface{}) error {
-	if len(m) == 0 {
-		return nil
-	}
+// validateMetadata validates the metadata map against version 1's bounds: at most
+// maxMetadataKeys entries, each key non-empty and at most maxMetadataKeyLen bytes,
+// each value at most maxMetadataValueLen, and no control characters in either.
+// That every value is a string is enforced by the type the request decodes into.
+func validateMetadata(m map[string]string) error {
 	if len(m) > maxMetadataKeys {
 		return fmt.Errorf("metadata exceeds maximum of %d keys", maxMetadataKeys)
 	}
@@ -207,24 +206,13 @@ func validateMetadata(m map[string]interface{}) error {
 				return fmt.Errorf("metadata key %q contains invalid control characters", k)
 			}
 		}
-		switch val := v.(type) {
-		case nil:
-			// allowed
-		case bool:
-			// allowed
-		case float64:
-			// allowed (JSON numbers decode to float64)
-		case string:
-			if len(val) > maxMetadataValueLen {
-				return fmt.Errorf("metadata value for key %q exceeds maximum length of %d", k, maxMetadataValueLen)
+		if len(v) > maxMetadataValueLen {
+			return fmt.Errorf("metadata value for key %q exceeds maximum length of %d", k, maxMetadataValueLen)
+		}
+		for _, r := range v {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("metadata value for key %q contains invalid control characters", k)
 			}
-			for _, r := range val {
-				if unicode.IsControl(r) {
-					return fmt.Errorf("metadata value for key %q contains invalid control characters", k)
-				}
-			}
-		default:
-			return fmt.Errorf("metadata value for key %q has unsupported type %T (allowed: string, bool, number, null)", k, v)
 		}
 	}
 	return nil

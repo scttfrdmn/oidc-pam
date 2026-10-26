@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `SERVER_BUSY` was already what the connection cap sent. The contract does not
   register it yet.
+- **Request and reply fields take version 1's types and bounds (#179).**
+  - **`metadata`** is a string-to-string map in both directions. The broker
+    refuses a request whose metadata holds a number, bool, null or nested object
+    with `INVALID_REQUEST`. The module used to send `pid` as a number.
+  - **`metadata.polling_interval`** on a reply is now a string (`"5"`, not `5`).
+    Both clients accept either form, and only plain decimal digits count as a
+    string value.
+  - **`login_type`** must be `ssh`, `console` or `gui`, or be absent, in which case
+    the broker formats the instructions for ssh. Anything else is refused. Both
+    clients used to send `unknown` for a login they could not classify, such as
+    `su` or `sudo`, and now omit the field. The broker makes no policy decision on
+    `login_type`, so this changes only how instructions are formatted and what the
+    audit record says.
+  - **Bounds:** `metadata` may hold 64 entries with 128-byte keys (it was 32 and
+    64), and `user_agent` may be 512 bytes (it was 256).
 
 ### Changed
 

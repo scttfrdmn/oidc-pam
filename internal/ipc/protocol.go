@@ -1,6 +1,11 @@
 package ipc
 
-import "github.com/scttfrdmn/oidc-pam/pkg/auth"
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/scttfrdmn/oidc-pam/pkg/auth"
+)
 
 // ProtocolVersion is the version of the broker<->module wire contract this broker
 // speaks.
@@ -94,4 +99,53 @@ func finalizeResponse(r *Response) {
 	if r.Status != StatusAuthorized {
 		r.UserID = ""
 	}
+}
+
+// The login types version 1 defines. login_type is optional, and empty is treated
+// as ssh; anything else is refused. It selects how the device-flow instructions are
+// formatted and is recorded in the audit trail, and decides nothing.
+var loginTypes = map[string]bool{"": true, "ssh": true, "console": true, "gui": true}
+
+// requestMetadata hands a request's metadata to pkg/auth, whose AuthRequest keeps
+// the generic map it has always had. The wire form is string to string; see
+// Request.Metadata.
+func requestMetadata(m map[string]string) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// replyMetadata renders pkg/auth's reply metadata as the string-to-string map
+// version 1 defines, which is why metadata.polling_interval goes on the wire as
+// "5" and not 5. Integers are written in decimal, so a client that parses the
+// string gets the number the broker meant.
+func replyMetadata(m map[string]interface{}) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			out[k] = val
+		case int:
+			out[k] = strconv.Itoa(val)
+		case int64:
+			out[k] = strconv.FormatInt(val, 10)
+		case float64:
+			out[k] = strconv.FormatFloat(val, 'f', -1, 64)
+		case bool:
+			out[k] = strconv.FormatBool(val)
+		case nil:
+			out[k] = ""
+		default:
+			out[k] = fmt.Sprint(val)
+		}
+	}
+	return out
 }

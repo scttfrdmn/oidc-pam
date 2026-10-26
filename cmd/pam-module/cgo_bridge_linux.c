@@ -152,9 +152,12 @@ int get_user_info(pam_handle_t *pamh, const char **username, const char **servic
     return PAM_SUCCESS;
 }
 
-// Classify the login for the broker's per-login-type policies. This must agree
-// with GetLoginType in cgo_wrapper.go: the C module and the Go client would
-// otherwise select different policies for the same login. See
+// Classify the login as one of the three login types protocol version 1 defines,
+// or "" when it is none of them. The broker uses it to format the device-flow
+// instructions and records it in the audit trail; an empty one is omitted from the
+// request, which the broker treats as ssh. It used to be "unknown", which version 1
+// refuses (#179). This must agree with GetLoginType in pkg/pam, so that the two
+// clients describe the same login the same way; see
 // TestLoginTypeClassificationMatchesGo.
 const char *classify_login_type(const char *service, const char *tty) {
     if (service == NULL) {
@@ -174,7 +177,7 @@ const char *classify_login_type(const char *service, const char *tty) {
     if (strncmp(tty, "tty", 3) == 0) {
         return "console";
     }
-    return "unknown";
+    return "";
 }
 
 // Derive the request's source_ip from PAM_RHOST: where the login is coming from.
@@ -243,11 +246,15 @@ int send_auth_request(int sock, const char *username, const char *service, const
     const char *source_ip = source_ip_from_rhost(rhost);
     char host_buf[MAX_TARGET_HOST_LEN + 1];
     const char *target_host = this_host(host_buf, sizeof(host_buf));
+    char pid_buf[24];
 
     // Add metadata
     json_object_object_add(metadata, "service", service_obj);
     json_object_object_add(metadata, "tty", tty_obj);
-    json_object_object_add(metadata, "pid", json_object_new_int(getpid()));
+    // metadata is a string-to-string map in version 1 (#179), so the pid goes as
+    // decimal text; a number here is a request the broker refuses to decode.
+    snprintf(pid_buf, sizeof(pid_buf), "%ld", (long)getpid());
+    json_object_object_add(metadata, "pid", json_object_new_string(pid_buf));
     if (rhost != NULL && rhost[0] != '\0') {
         json_object_object_add(metadata, "rhost", json_object_new_string(rhost));
     }
@@ -258,7 +265,9 @@ int send_auth_request(int sock, const char *username, const char *service, const
     json_object_object_add(request, "protocol_version", json_object_new_int(PROTOCOL_VERSION));
     json_object_object_add(request, "type", type);
     json_object_object_add(request, "user_id", user_id);
-    json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
+    if (login_type_str[0] != '\0') {
+        json_object_object_add(request, "login_type", json_object_new_string(login_type_str));
+    }
     // (#169) Both fields are omitted rather than sent empty when unknown: absent
     // and empty mean the same thing to the broker, and an omitted field is the one
     // the wire protocol describes. This used to send rhost as target_host and no
@@ -655,17 +664,32 @@ static int response_poll_interval(json_object *obj) {
     if (!json_object_object_get_ex(metadata, "polling_interval", &field)) {
         return DEFAULT_POLL_INTERVAL;
     }
-    // A JSON number, and not something rendered into one: json_object_get_int
-    // parses a JSON *string* ("30"), and answers 1 for `true`. Both int and
-    // double are accepted, which is what internal/brokerclient's pollInterval
-    // accepts; the broker sends an int. json_object_is_type answers false for the
-    // NULL a JSON null produces, so that case needs no separate test.
-    if (!json_object_is_type(field, json_type_int) &&
-        !json_object_is_type(field, json_type_double)) {
+    // Version 1 sends it as a string, because reply metadata is a string map
+    // (#179); a broker before that sent a JSON number, which is still accepted.
+    // The string is parsed here rather than by json_object_get_int, which renders
+    // whatever it is given — it answers 1 for `true` — and accepts "30abc" as 30. A
+    // string must be decimal digits and nothing else. json_object_is_type answers
+    // false for the NULL a JSON null produces, so that case needs no separate test.
+    if (json_object_is_type(field, json_type_string)) {
+        const char *text = json_object_get_string(field);
+        char *end = NULL;
+        long parsed;
+
+        if (text == NULL || text[0] < '0' || text[0] > '9') {
+            return DEFAULT_POLL_INTERVAL;
+        }
+        errno = 0;
+        parsed = strtol(text, &end, 10);
+        if (errno != 0 || end == text || *end != '\0') {
+            return DEFAULT_POLL_INTERVAL;
+        }
+        interval = parsed > MAX_POLL_INTERVAL ? MAX_POLL_INTERVAL : (int)parsed;
+    } else if (json_object_is_type(field, json_type_int) || json_object_is_type(field, json_type_double)) {
+        interval = json_object_get_int(field);
+    } else {
         return DEFAULT_POLL_INTERVAL;
     }
 
-    interval = json_object_get_int(field);
     if (interval < MIN_POLL_INTERVAL) {
         return MIN_POLL_INTERVAL;
     }

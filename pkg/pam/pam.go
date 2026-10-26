@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/syslog"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -216,10 +217,10 @@ func (p *PAMModule) AuthenticateUserContext(ctx context.Context, username, servi
 	// target_host, and nothing as source_ip, is what made require_private_network
 	// refuse every login. The unabridged rhost goes in metadata for the audit
 	// trail, since source_ip carries only an address.
-	metadata := map[string]interface{}{
+	metadata := map[string]string{
 		"service": service,
 		"tty":     tty,
-		"pid":     os.Getpid(),
+		"pid":     strconv.Itoa(os.Getpid()),
 	}
 	if rhost != "" {
 		metadata["rhost"] = rhost

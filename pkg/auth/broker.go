@@ -77,8 +77,10 @@ type Session struct {
 	Groups   []string
 	Provider string
 	// LoginType is the kind of login this session was opened for ("ssh",
-	// "console", "gui"), as classified by the PAM client. The broker applies
-	// per-login-type policy on it, and `oidc-admin sessions` reports it.
+	// "console", "gui", or "" when the client could not classify it), as the PAM
+	// client reports it. It is a client's claim and decides nothing: the broker
+	// formats the device-flow instructions by it, and `oidc-admin sessions` and
+	// the audit trail report it.
 	LoginType        string
 	DeviceID         string
 	CreatedAt        time.Time

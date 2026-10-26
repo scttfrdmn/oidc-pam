@@ -276,7 +276,7 @@ func TestServerWithValidRequestStructure(t *testing.T) {
 		TargetHost: "test-host",
 		LoginType:  "ssh",
 		SessionID:  "test-session",
-		Metadata: map[string]interface{}{
+		Metadata: map[string]string{
 			"service": "sshd",
 		},
 	}

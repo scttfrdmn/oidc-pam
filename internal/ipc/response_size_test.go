@@ -93,9 +93,9 @@ func worstCaseDeviceResponse(t *testing.T, withQR bool) *Response {
 		RequiresDevice: true,
 		Instructions:   auth.FormatDeviceInstructions(deviceURL, deviceCode, qrCode),
 		RiskScore:      42,
-		Metadata: map[string]interface{}{
+		Metadata: map[string]string{
 			"provider":         "keycloak",
-			"polling_interval": 5,
+			"polling_interval": "5",
 		},
 	}
 }
