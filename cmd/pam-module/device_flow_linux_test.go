@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scttfrdmn/oidc-pam/pkg/pam"
 )
@@ -193,6 +194,58 @@ func TestPerformAuthenticationDeniesWhenDeviceFlowNeverCompletes(t *testing.T) {
 	}
 }
 
+// (#179) RATE_LIMITED on a poll means slow down. The module keeps polling at a
+// doubling interval and completes the login once the broker answers, rather than
+// refusing a user who was only being throttled. The fake starts at a 1s interval,
+// so two throttled polls make the waits 1s, 2s and 4s; without the backoff the
+// same exchange is over in 3s.
+func TestPerformAuthenticationBacksOffWhenAPollIsRateLimited(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+		switch {
+		case n == 1:
+			return deviceStarted("sess-slow")
+		case n <= 3:
+			return denied("RATE_LIMITED")
+		default:
+			return authenticated("sess-slow")
+		}
+	})
+
+	started := time.Now()
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 30); got != pam.PAMSuccess {
+		t.Fatalf("a throttled login: got PAM result %d, want pam.PAMSuccess", got)
+	}
+	if elapsed := time.Since(started); elapsed < 6500*time.Millisecond {
+		t.Errorf("the login completed after %s; backing off from 1s should take about 7s", elapsed)
+	}
+	if n := len(broker.received()); n != 4 {
+		t.Errorf("expected 1 authenticate + 3 polls, got %d requests", n)
+	}
+}
+
+// Backing off does not extend the login: a broker that never stops throttling
+// ends at the deadline, with the module's timeout denial, not a hang.
+func TestPerformAuthenticationRateLimitedPollsStillTimeOut(t *testing.T) {
+	t.Parallel()
+
+	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+		if n == 1 {
+			return deviceStarted("sess-slow")
+		}
+		return denied("RATE_LIMITED")
+	})
+
+	started := time.Now()
+	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 3); got != pam.PAMAuthError {
+		t.Fatalf("throttled until the deadline: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Errorf("the login ran for %s against a 3s deadline", elapsed)
+	}
+}
+
 func TestPerformAuthenticationSucceedsAfterDeviceApproval(t *testing.T) {
 	t.Parallel()
 
@@ -251,7 +304,6 @@ func TestPerformAuthenticationDeniesOnTerminalPollErrors(t *testing.T) {
 		{"SESSION_EXPIRED", pam.PAMAuthError},
 		{"FORBIDDEN", pam.PAMAuthError},
 		{"POLICY_DENIED", pam.PAMPermDenied},
-		{"RATE_LIMITED", pam.PAMMaxTries},
 		{"SESSION_NOT_FOUND", pam.PAMAuthInfoUnavail},
 		{"AUTHENTICATION_FAILED", pam.PAMAuthInfoUnavail},
 	}
