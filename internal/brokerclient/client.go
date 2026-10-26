@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -68,16 +69,16 @@ const (
 // that reads source_ip evaluating the empty string. Use SourceIPFromRHost and
 // ThisHost rather than filling them in by hand.
 type Request struct {
-	ProtocolVersion int                    `json:"protocol_version"`
-	Type            string                 `json:"type"`
-	UserID          string                 `json:"user_id,omitempty"`
-	SourceIP        string                 `json:"source_ip,omitempty"`
-	UserAgent       string                 `json:"user_agent,omitempty"`
-	TargetHost      string                 `json:"target_host,omitempty"`
-	LoginType       string                 `json:"login_type,omitempty"`
-	DeviceID        string                 `json:"device_id,omitempty"`
-	SessionID       string                 `json:"session_id,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	ProtocolVersion int               `json:"protocol_version"`
+	Type            string            `json:"type"`
+	UserID          string            `json:"user_id,omitempty"`
+	SourceIP        string            `json:"source_ip,omitempty"`
+	UserAgent       string            `json:"user_agent,omitempty"`
+	TargetHost      string            `json:"target_host,omitempty"`
+	LoginType       string            `json:"login_type,omitempty"`
+	DeviceID        string            `json:"device_id,omitempty"`
+	SessionID       string            `json:"session_id,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
 }
 
 // MaxSourceIPLen is the wire contract's bound on source_ip: an IPv6 literal with
@@ -440,8 +441,16 @@ func pollInterval(resp *Response) time.Duration {
 		return DefaultPollInterval
 	}
 
+	// Version 1 sends it as a string, because reply metadata is a string map
+	// (#179); brokers before that sent a JSON number, which is still accepted.
 	var seconds float64
 	switch v := raw.(type) {
+	case string:
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return DefaultPollInterval
+		}
+		seconds = parsed
 	case float64: // JSON numbers
 		seconds = v
 	case int:

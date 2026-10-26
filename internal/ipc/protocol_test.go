@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"regexp"
@@ -194,5 +195,72 @@ func TestRequestProtocolVersions(t *testing.T) {
 				t.Errorf("success = %v, want false", got)
 			}
 		})
+	}
+}
+
+// Request metadata is string to string in version 1 (#179). A value of any other
+// JSON type is refused at the decode, before any handler sees it — the module used
+// to send pid as a number. A request that decodes is answered by a handler, so any
+// code other than INVALID_REQUEST is what "accepted" looks like here.
+func TestRequestMetadataIsAStringMap(t *testing.T) {
+	_, socketPath := startSocketTestServer(t, newTestBroker(t), 0, 0)
+
+	const poll = `{"type":"check_session","user_id":"u","session_id":"nope","metadata":%s}`
+	tests := []struct {
+		name     string
+		metadata string
+		refused  bool
+	}{
+		{"strings", `{"service":"sshd","pid":"4242"}`, false},
+		{"empty", `{}`, false},
+		{"a number", `{"pid":4242}`, true},
+		{"a bool", `{"debug":true}`, true},
+		{"a nested object", `{"nested":{"a":"b"}}`, true},
+		{"an array", `{"list":["a"]}`, true},
+		{"not an object", `["service"]`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reply := sendRawOverSocket(t, socketPath, fmt.Sprintf(poll, tt.metadata))
+			if refused := reply["error_code"] == "INVALID_REQUEST"; refused != tt.refused {
+				t.Errorf("metadata %s: error_code = %v, refused = %v, want %v",
+					tt.metadata, reply["error_code"], refused, tt.refused)
+			}
+		})
+	}
+}
+
+// Reply metadata is string to string too, so metadata.polling_interval goes on the
+// wire as "5" (#179). Integers are written in decimal so the client parses the
+// number the broker meant.
+func TestReplyMetadataIsAStringMap(t *testing.T) {
+	got := replyMetadata(map[string]interface{}{
+		"provider":         "keycloak",
+		"polling_interval": 5,
+		"large":            int64(1) << 40,
+		"fraction":         2.5,
+		"whole":            float64(30),
+		"flag":             true,
+		"absent":           nil,
+	})
+	want := map[string]string{
+		"provider":         "keycloak",
+		"polling_interval": "5",
+		"large":            "1099511627776",
+		"fraction":         "2.5",
+		"whole":            "30",
+		"flag":             "true",
+		"absent":           "",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("replyMetadata = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("metadata[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+	if replyMetadata(nil) != nil {
+		t.Error("nil metadata should stay nil, so the reply carries metadata: null as before")
 	}
 }

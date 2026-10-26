@@ -114,7 +114,7 @@ func deviceStarted(sessionID string) map[string]interface{} {
 		"instructions":     "Visit https://idp.example.com/device and enter WDJB-MJHT",
 		"metadata": map[string]interface{}{
 			"provider":         "test",
-			"polling_interval": 1,
+			"polling_interval": "1",
 		},
 	}
 }
@@ -626,30 +626,56 @@ func TestPerformAuthenticationDeniesWithANonStringErrorCode(t *testing.T) {
 	}
 }
 
-// metadata.polling_interval is read with json_object_get_int, which parses a JSON
-// *string* too, so a broker could set the module's poll rate with a value that is
-// not a number. It is now ignored unless it really is a JSON number, which leaves
-// DEFAULT_POLL_INTERVAL in force.
+// metadata.polling_interval is a string in version 1, because reply metadata is a
+// string map (#179), and a JSON number from a broker before that is still read.
+// What must not happen is something that is not a number being read as one:
+// json_object_get_int answers 1 for `true` and 30 for "30abc", so the module
+// parses the string itself and accepts decimal digits and nothing else.
 //
-// The count is what shows it: a 2-second budget with the default 5-second interval
-// leaves time for exactly one poll, where a honored "1" would have allowed two.
-func TestPerformAuthenticationIgnoresANonNumericPollInterval(t *testing.T) {
+// The count is what shows it. In a 2-second budget an honoured 1-second interval
+// leaves time for two polls; the 5-second default, for one.
+func TestPerformAuthenticationReadsThePollInterval(t *testing.T) {
 	t.Parallel()
 
-	broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
-		if n == 1 {
-			return `{"status":"pending","success":false,"session_id":"sess-pi",` +
-				`"metadata":{"polling_interval":"1"}}` + "\n"
-		}
-		return devicePending("sess-pi")
-	})
-
-	if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 2); got != pam.PAMAuthError {
-		t.Fatalf("unfinished device flow: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+	tests := []struct {
+		name     string
+		interval string
+		honoured bool
+	}{
+		{"a string", `"1"`, true},
+		{"a number", `1`, true},
+		{"a string with a unit", `"1s"`, false},
+		{"a string with a sign", `"-1"`, false},
+		{"a string with a space", `" 1"`, false},
+		{"an empty string", `""`, false},
+		{"a bool", `true`, false},
+		{"null", `null`, false},
 	}
-	if n := len(broker.received()); n != 2 {
-		t.Errorf("expected authenticate + 1 poll in a 2s budget at the default 5s interval, got %d "+
-			"requests: a non-numeric polling_interval is being read as a number", n)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+				if n == 1 {
+					return `{"protocol_version":1,"status":"pending","success":false,"session_id":"sess-pi",` +
+						`"metadata":{"polling_interval":` + tt.interval + `}}` + "\n"
+				}
+				return devicePending("sess-pi")
+			})
+
+			if got := performAuthentication(broker.socketPath, "testuser", "sshd", "10.0.0.1", "ssh", 2); got != pam.PAMAuthError {
+				t.Fatalf("unfinished device flow: got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+			}
+			n := len(broker.received())
+			if tt.honoured && n < 3 {
+				t.Errorf("polling_interval %s: %d requests in a 2s budget; a 1s interval allows authenticate + 2 polls",
+					tt.interval, n)
+			}
+			if !tt.honoured && n != 2 {
+				t.Errorf("polling_interval %s: %d requests in a 2s budget; it should have been ignored, "+
+					"leaving the 5s default and so authenticate + 1 poll", tt.interval, n)
+			}
+		})
 	}
 }
 
@@ -727,9 +753,9 @@ func TestDebugFlagDoesNotOutliveItsInvocation(t *testing.T) {
 }
 
 // TestLoginTypeClassificationMatchesGo pins the C module's login-type
-// classification to pam.GetLoginType's. The broker applies per-login-type policy, so
-// if pam_oidc.so and the Go client disagreed, the same login would be evaluated
-// against different rules depending on which client handled it. The C side used
+// classification to pam.GetLoginType's. The broker formats instructions by it and
+// records it in the audit trail, so if pam_oidc.so and the Go client disagreed, the
+// same login would be described differently depending on which client handled it. The C side used
 // to differ on both counts covered here: it matched "gdm"/"lightdm" as
 // substrings but not "sddm" at all, and it tested the TTY before the service, so
 // a display manager on tty1 was classified "console".
@@ -760,6 +786,60 @@ func TestLoginTypeClassificationMatchesGo(t *testing.T) {
 			if got := classifyLoginTypeC(tc.service, tc.tty); got != want {
 				t.Errorf("C classify_login_type(%q, %q) = %q, Go pam.GetLoginType = %q",
 					tc.service, tc.tty, got, want)
+			}
+		})
+	}
+}
+
+// What the module sends must be a request a version 1 broker decodes (#179):
+// login_type is one of the three values or absent, and every metadata value is a
+// string — the pid used to go as a JSON number, which a string map refuses.
+func TestTheAuthenticateRequestIsVersion1(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		service       string
+		tty           string
+		wantLoginType any // nil means absent
+	}{
+		{"sshd", "pts/0", "ssh"},
+		{"login", "tty1", "console"},
+		{"su", "", nil},
+		{"sudo", "pts/3", nil},
+	} {
+		t.Run(tc.service, func(t *testing.T) {
+			t.Parallel()
+
+			broker := newFakeBroker(t, func(_ int, _ map[string]interface{}) interface{} {
+				return denied("POLICY_DENIED")
+			})
+			performAuthentication(broker.socketPath, "testuser", tc.service, "10.0.0.1", tc.tty, 5)
+
+			requests := broker.received()
+			if len(requests) != 1 {
+				t.Fatalf("expected one authenticate, got %d requests", len(requests))
+			}
+			req := requests[0]
+
+			loginType, present := req["login_type"]
+			if tc.wantLoginType == nil && present {
+				t.Errorf("login_type = %v, want it omitted for a login that is none of ssh, console, gui", loginType)
+			}
+			if tc.wantLoginType != nil && loginType != tc.wantLoginType {
+				t.Errorf("login_type = %v, want %v", loginType, tc.wantLoginType)
+			}
+
+			metadata, ok := req["metadata"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("metadata = %v, want an object", req["metadata"])
+			}
+			for key, value := range metadata {
+				if _, isString := value.(string); !isString {
+					t.Errorf("metadata[%q] = %v (%T); every value must be a string", key, value, value)
+				}
+			}
+			if metadata["pid"] == "" || metadata["pid"] == nil {
+				t.Error("metadata has no pid")
 			}
 		})
 	}

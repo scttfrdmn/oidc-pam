@@ -65,8 +65,8 @@ func TestGetLoginType(t *testing.T) {
 		{"gdm", "tty1", "gui"},
 		{"lightdm", "tty2", "gui"},
 		{"login", "tty1", "console"},
-		{"login", "pts/0", "unknown"},
-		{"unknown", "unknown", "unknown"},
+		{"login", "pts/0", ""},
+		{"unknown", "unknown", ""},
 	}
 
 	for _, test := range tests {
@@ -587,29 +587,29 @@ func TestGetLoginTypeEdgeCases(t *testing.T) {
 		expected string
 	}{
 		// Service variations
-		{"SSHD", "pts/0", "unknown"},    // Case sensitivity
-		{"SSH", "pts/0", "unknown"},     // Different SSH variant
-		{"openssh", "pts/0", "unknown"}, // Different SSH variant
-		{"gdm3", "tty1", "console"},     // GDM variant (tty1 -> console)
-		{"sddm", "tty1", "gui"},         // SDDM (additional GUI)
+		{"SSHD", "pts/0", ""},       // Case sensitivity
+		{"SSH", "pts/0", ""},        // Different SSH variant
+		{"openssh", "pts/0", ""},    // Different SSH variant
+		{"gdm3", "tty1", "console"}, // GDM variant (tty1 -> console)
+		{"sddm", "tty1", "gui"},     // SDDM (additional GUI)
 
 		// TTY variations
-		{"login", "tty", "console"},     // Incomplete TTY but starts with tty
-		{"login", "tty1", "console"},    // Console TTY
-		{"login", "tty12", "console"},   // Multi-digit TTY
-		{"login", "ttys0", "console"},   // Serial TTY
-		{"login", "console", "unknown"}, // Console but not tty format
+		{"login", "tty", "console"},   // Incomplete TTY but starts with tty
+		{"login", "tty1", "console"},  // Console TTY
+		{"login", "tty12", "console"}, // Multi-digit TTY
+		{"login", "ttys0", "console"}, // Serial TTY
+		{"login", "console", ""},      // Console but not tty format
 
 		// Edge cases
-		{"", "", "unknown"}, // Empty inputs
-		{"unknown-service", "pts/0", "unknown"},
-		{"login", "unknown-tty", "unknown"},
-		{"service", "ty1", "unknown"}, // Malformed TTY
+		{"", "", ""}, // Empty inputs
+		{"unknown-service", "pts/0", ""},
+		{"login", "unknown-tty", ""},
+		{"service", "ty1", ""}, // Malformed TTY
 
 		// Boundary conditions
-		{"a", "b", "unknown"},                          // Single character inputs
-		{strings.Repeat("a", 100), "pts/0", "unknown"}, // Long service name
-		{"login", strings.Repeat("t", 100), "unknown"}, // Long TTY name
+		{"a", "b", ""},                          // Single character inputs
+		{strings.Repeat("a", 100), "pts/0", ""}, // Long service name
+		{"login", strings.Repeat("t", 100), ""}, // Long TTY name
 	}
 
 	for _, tc := range testCases {

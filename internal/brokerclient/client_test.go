@@ -512,7 +512,13 @@ func TestPollIntervalClamping(t *testing.T) {
 	}{
 		{"absent metadata", nil, DefaultPollInterval},
 		{"absent key", map[string]interface{}{"provider": "test"}, DefaultPollInterval},
-		{"non-numeric", map[string]interface{}{"polling_interval": "5"}, DefaultPollInterval},
+		// Version 1 sends it as a string (#179); a broker before that, as a number.
+		{"a string", map[string]interface{}{"polling_interval": "7"}, 7 * time.Second},
+		{"a string clamps down", map[string]interface{}{"polling_interval": "3600"}, MaxPollInterval},
+		{"a string that is not a number", map[string]interface{}{"polling_interval": "soon"}, DefaultPollInterval},
+		{"an empty string", map[string]interface{}{"polling_interval": ""}, DefaultPollInterval},
+		{"NaN", map[string]interface{}{"polling_interval": "NaN"}, DefaultPollInterval},
+		{"a bool", map[string]interface{}{"polling_interval": true}, DefaultPollInterval},
 		{"in range", map[string]interface{}{"polling_interval": float64(7)}, 7 * time.Second},
 		{"zero clamps up", map[string]interface{}{"polling_interval": float64(0)}, MinPollInterval},
 		{"negative clamps up", map[string]interface{}{"polling_interval": float64(-10)}, MinPollInterval},
