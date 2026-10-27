@@ -3,6 +3,7 @@ package ipc
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -59,16 +60,17 @@ func TestResponseSizeMatchesTheModulesBuffer(t *testing.T) {
 }
 
 // worstCaseDeviceResponse is the largest device-flow response the broker's own
-// input validation permits: a verification URI at maxVerificationURILen, a user
-// code at maxUserCodeLen, and every other field filled to its limit.
-func worstCaseDeviceResponse(t *testing.T, withQR bool) *Response {
+// input validation permits for a verification URI of urlLen bytes: a user code at
+// maxUserCodeLen, every other field filled to its limit, and the QR art the broker
+// would draw for that URI if withQR is set.
+func worstCaseDeviceResponse(t *testing.T, urlLen int, withQR bool) *Response {
 	t.Helper()
 
-	// 512 and 64 are the caps validateDeviceAuthLengths enforces in
-	// pkg/auth/device_flow.go. They are not exported; a change there that this does
+	// 64 is the cap validateDeviceAuthLengths enforces on the user code in
+	// pkg/auth/device_flow.go. It is not exported; a change there that this does
 	// not follow shows up as a failure here, which is the intent.
-	deviceURL := "https://idp.example.com/device?user_code=" +
-		strings.Repeat("u", 512-len("https://idp.example.com/device?user_code="))
+	prefix := "https://idp.example.com/device?user_code="
+	deviceURL := prefix + strings.Repeat("u", urlLen-len(prefix))
 	deviceCode := strings.Repeat("C", 64)
 
 	qrCode := ""
@@ -88,10 +90,11 @@ func worstCaseDeviceResponse(t *testing.T, withQR bool) *Response {
 		SessionID:      strings.Repeat("s", maxSessionIDLen),
 		DeviceCode:     deviceCode,
 		DeviceURL:      deviceURL,
+		QRCode:         qrCode,
 		ExpiresAt:      time.Now().Add(15 * time.Minute),
 		SSHPublicKey:   "ssh-rsa " + strings.Repeat("A", 716) + " user@oidc-pam-1755000000",
 		RequiresDevice: true,
-		Instructions:   auth.FormatDeviceInstructions(deviceURL, deviceCode, qrCode),
+		Instructions:   auth.FormatDeviceInstructions(deviceURL, deviceCode),
 		RiskScore:      42,
 		Metadata: map[string]string{
 			"provider":         "keycloak",
@@ -103,32 +106,37 @@ func worstCaseDeviceResponse(t *testing.T, withQR bool) *Response {
 // The acceptance test for #162: the response the module actually has to parse has
 // to fit in its buffer.
 //
-// Both rungs are asserted here. Without the art there must be room to spare, or
-// there is no degradation left and every such login fails; with the art it should
-// fit too, so that the ladder is a bound on the pathological case rather than
-// something an ordinary long-URI login trips.
+// There are two worst cases, because the art is skipped above
+// auth.MaxQRCodeURILen: the longest URI the broker accepts (512 bytes, the cap in
+// pkg/auth/device_flow.go), which carries no art, and the longest it will draw,
+// which does. Both must fit, so that the degradation ladder is a bound on the
+// pathological case rather than something an ordinary long-URI login trips.
 func TestWorstCaseDeviceResponseFits(t *testing.T) {
-	withoutQR := worstCaseDeviceResponse(t, false)
-	if !fitsModuleBuffer(withoutQR) {
-		payload, err := json.Marshal(withoutQR)
-		if err != nil {
-			t.Fatalf("Marshal: %v", err)
-		}
-		t.Fatalf("the worst-case device response without the QR art is %d bytes, over the module's %d-byte "+
-			"buffer: there is no degradation left and every such login fails to parse",
-			len(payload)+1, maxResponseSize)
+	if _, err := auth.GenerateQRCode(worstCaseDeviceResponse(t, 512, false).DeviceURL); !errors.Is(err, auth.ErrQRCodeURITooLong) {
+		t.Fatalf("GenerateQRCode drew the longest verification URI the broker accepts (err = %v); "+
+			"the worst case below assumes it does not", err)
 	}
 
-	withQR := worstCaseDeviceResponse(t, true)
-	payload, err := json.Marshal(withQR)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	t.Logf("worst case with QR art: %d bytes (module buffer %d)", len(payload)+1, maxResponseSize)
-	if !fitsModuleBuffer(withQR) {
-		t.Errorf("the worst-case device response with the QR art is %d bytes, over the module's %d-byte "+
-			"buffer: the longest verification URI the broker accepts would lose its QR code",
-			len(payload)+1, maxResponseSize)
+	for _, tc := range []struct {
+		name   string
+		urlLen int
+		withQR bool
+	}{
+		{"the longest accepted URI, without art", 512, false},
+		{"the longest drawn URI, with art", auth.MaxQRCodeURILen, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := worstCaseDeviceResponse(t, tc.urlLen, tc.withQR)
+			payload, err := json.Marshal(response)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			t.Logf("%d bytes (module buffer %d)", len(payload)+1, maxResponseSize)
+			if !fitsModuleBuffer(response) {
+				t.Errorf("the worst-case device response is %d bytes, over the module's %d-byte buffer",
+					len(payload)+1, maxResponseSize)
+			}
+		})
 	}
 }
 
@@ -136,7 +144,7 @@ func TestWorstCaseDeviceResponseFits(t *testing.T) {
 // art keeps the URL and the code and loses the art, so the user can still finish
 // the login.
 func TestDeviceInstructionsDropTheQRArtWhenTheResponseWouldNotFit(t *testing.T) {
-	response := worstCaseDeviceResponse(t, false)
+	response := worstCaseDeviceResponse(t, auth.MaxQRCodeURILen, false)
 	qrCode, err := auth.GenerateQRCode(response.DeviceURL)
 	if err != nil {
 		t.Fatalf("GenerateQRCode: %v", err)
@@ -149,7 +157,7 @@ func TestDeviceInstructionsDropTheQRArtWhenTheResponseWouldNotFit(t *testing.T) 
 	// problem, and it sends a parseable RESPONSE_TOO_LARGE rather than a prefix.)
 	for {
 		probe := *response
-		probe.Instructions = auth.FormatDeviceInstructions(response.DeviceURL, response.DeviceCode, qrCode)
+		probe.QRCode = qrCode
 		if !fitsModuleBuffer(&probe) {
 			break
 		}
@@ -166,7 +174,7 @@ func TestDeviceInstructionsDropTheQRArtWhenTheResponseWouldNotFit(t *testing.T) 
 		}
 		t.Fatalf("device response is %d bytes, over the module's %d-byte buffer", len(payload)+1, maxResponseSize)
 	}
-	if strings.Contains(response.Instructions, qrCode) {
+	if response.QRCode != "" {
 		t.Error("the QR art was kept in a response that does not fit the module's buffer")
 	}
 	// Dropping the art must not drop what the user needs to act on.
@@ -195,7 +203,7 @@ func TestDeviceInstructionsKeepAQRCodeThatFits(t *testing.T) {
 
 	(&Server{}).setDeviceInstructions(response, "ssh", qrCode)
 
-	if !strings.Contains(response.Instructions, qrCode) {
+	if response.QRCode != qrCode {
 		t.Error("a QR code that fits the module's buffer was dropped")
 	}
 	if !fitsModuleBuffer(response) {
@@ -361,4 +369,34 @@ func readOneResponse(conn net.Conn) ([]byte, error) {
 		return line, err
 	}
 	return line[:len(line)-1], nil
+}
+
+// Version 1 sends the QR art once, in qr_code, and never inside instructions
+// (#179), whatever the login type.
+func TestTheQRArtTravelsOnlyInQRCode(t *testing.T) {
+	deviceURL := "https://idp.example.com/device"
+	qrCode, err := auth.GenerateQRCode(deviceURL)
+	if err != nil {
+		t.Fatalf("GenerateQRCode: %v", err)
+	}
+
+	for _, loginType := range []string{"", "ssh", "console", "gui"} {
+		response := &Response{
+			SessionID:      "sess-1",
+			DeviceCode:     "WDJB-MJHT",
+			DeviceURL:      deviceURL,
+			RequiresDevice: true,
+		}
+		(&Server{}).setDeviceInstructions(response, loginType, qrCode)
+
+		if response.QRCode != qrCode {
+			t.Errorf("login_type %q: qr_code is not the art the broker drew", loginType)
+		}
+		if strings.ContainsAny(response.Instructions, "█▀▄") {
+			t.Errorf("login_type %q: instructions embed QR art:\n%s", loginType, response.Instructions)
+		}
+		if !strings.Contains(response.Instructions, deviceURL) || !strings.Contains(response.Instructions, "WDJB-MJHT") {
+			t.Errorf("login_type %q: instructions lack the URL or the user code", loginType)
+		}
+	}
 }

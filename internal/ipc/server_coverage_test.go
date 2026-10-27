@@ -62,10 +62,8 @@ func TestServerFormatInstructionsExtended(t *testing.T) {
 
 	deviceURL := "https://example.com/device"
 	deviceCode := "ABC123"
-	qrCode := "sample-qr-code"
-
 	// Test console instructions
-	consoleInstructions := server.formatInstructions("console", deviceURL, deviceCode, qrCode)
+	consoleInstructions := server.formatInstructions("console", deviceURL, deviceCode)
 	if consoleInstructions == "" {
 		t.Error("Expected non-empty console instructions")
 	}
@@ -74,7 +72,7 @@ func TestServerFormatInstructionsExtended(t *testing.T) {
 	}
 
 	// Test GUI instructions
-	guiInstructions := server.formatInstructions("gui", deviceURL, deviceCode, qrCode)
+	guiInstructions := server.formatInstructions("gui", deviceURL, deviceCode)
 	if guiInstructions == "" {
 		t.Error("Expected non-empty GUI instructions")
 	}
@@ -83,7 +81,7 @@ func TestServerFormatInstructionsExtended(t *testing.T) {
 	}
 
 	// Test SSH instructions (default case)
-	sshInstructions := server.formatInstructions("ssh", deviceURL, deviceCode, qrCode)
+	sshInstructions := server.formatInstructions("ssh", deviceURL, deviceCode)
 	if sshInstructions == "" {
 		t.Error("Expected non-empty SSH instructions")
 	}
@@ -92,7 +90,7 @@ func TestServerFormatInstructionsExtended(t *testing.T) {
 	}
 
 	// Test unknown type (should default to SSH)
-	unknownInstructions := server.formatInstructions("unknown", deviceURL, deviceCode, qrCode)
+	unknownInstructions := server.formatInstructions("unknown", deviceURL, deviceCode)
 	if unknownInstructions == "" {
 		t.Error("Expected non-empty instructions for unknown type")
 	}

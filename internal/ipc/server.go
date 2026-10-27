@@ -71,10 +71,14 @@ type Request struct {
 
 // Response represents a response to PAM module.
 //
-// Every field here costs part of maxResponseSize, so nothing goes in twice. There
-// used to be a qr_code field alongside Instructions, which already embeds the same
-// ASCII art: no client ever read it, and the two copies together put an ordinary
-// device-flow response ~20 bytes under the module's 8 KiB buffer (#162).
+// Every field here costs part of maxResponseSize, so nothing goes in twice. The
+// QR art travels once, in QRCode, and Instructions is text without it, as version
+// 1 defines them (#179). It used to be the other way round — the art inside
+// Instructions, after a period of being in both, which put an ordinary
+// device-flow response ~20 bytes under the module's then 8 KiB buffer (#162).
+// QRCode is optional on a perfectly good pending reply: it is empty when the
+// broker drew none or dropped it for size, and a client renders it only if it is
+// there.
 //
 // Status is the authoritative field, and ProtocolVersion is on every reply; both
 // are set by finalizeResponse, which also derives Success from Status (#146).
@@ -90,6 +94,7 @@ type Response struct {
 	SessionID        string            `json:"session_id"`
 	DeviceCode       string            `json:"device_code"`
 	DeviceURL        string            `json:"device_url"`
+	QRCode           string            `json:"qr_code"`
 	ExpiresAt        time.Time         `json:"expires_at"`
 	SSHPublicKey     string            `json:"ssh_public_key"`
 	RequiresDevice   bool              `json:"requires_device"`
@@ -733,14 +738,14 @@ func (s *Server) handleRevokeSession(request *Request) *Response {
 }
 
 // formatInstructions formats instructions based on login type
-func (s *Server) formatInstructions(loginType, deviceURL, deviceCode, qrCode string) string {
+func (s *Server) formatInstructions(loginType, deviceURL, deviceCode string) string {
 	switch loginType {
 	case "console":
-		return auth.FormatConsoleInstructions(deviceURL, deviceCode, qrCode)
+		return auth.FormatConsoleInstructions(deviceURL, deviceCode)
 	case "gui":
-		return auth.FormatGUIInstructions(deviceURL, deviceCode, qrCode)
+		return auth.FormatGUIInstructions(deviceURL, deviceCode)
 	default: // ssh
-		return auth.FormatDeviceInstructions(deviceURL, deviceCode, qrCode)
+		return auth.FormatDeviceInstructions(deviceURL, deviceCode)
 	}
 }
 

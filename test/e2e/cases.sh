@@ -373,6 +373,18 @@ case_approved_login() {
         fail "the client was never shown the verification URL or user code"
         printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
     fi
+
+    # Version 1 carries the QR art only in qr_code, so the module draws it from
+    # there (#179). The fake issuer's URI is short enough to be drawn, so an ssh
+    # login has to show it. go-qrcode draws in full blocks; the ssh client here runs
+    # in the C locale and prints them as octal escapes, so either spelling counts.
+    if grep -q 'Or scan this QR code' <<<"${LOGIN_OUTPUT}" &&
+        grep -qF -e '█' -e '\342\226\210' <<<"${LOGIN_OUTPUT}"; then
+        log "the QR code reached the client"
+    else
+        fail "the client was never shown the QR code"
+        printf '%s\n' "${LOGIN_OUTPUT}" | sed 's/^/      ssh: /'
+    fi
 }
 
 # #169: which end of the connection each field describes. The module used to send
@@ -767,6 +779,14 @@ case_long_verification_uri() {
     # which the broker must have prevented by degrading the response instead.
     expect_no_module_log 'Failed to parse broker response'
     expect_no_module_log 'does not fit this module'
+
+    # A URI this long is over the 200 bytes the broker will draw (MaxQRCodeURILen,
+    # #179), so the login completes from the text alone and the module shows no art.
+    if grep -q 'Or scan this QR code' <<<"${LOGIN_OUTPUT}"; then
+        fail "the client was shown a QR code for a URI too long to draw"
+    else
+        log "no QR code was drawn for the overlong URI"
+    fi
 }
 
 # Two concurrent sessions for one account, both authorized (#227). This case used

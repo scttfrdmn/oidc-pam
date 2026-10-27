@@ -911,6 +911,26 @@ static void show_message(pam_handle_t *pamh, const char *message) {
     display_message(pamh, message);
 }
 
+// Tell the user how to complete the device flow: the instructions, then the QR
+// art if the broker sent some and this login can draw it.
+//
+// Version 1 carries the art only in qr_code, never inside instructions, and makes
+// it optional: a perfectly good pending reply may have none, because the broker
+// skips an overlong URL or drops the art for size (#179). So the instructions are
+// shown on their own and are complete without it. A graphical login is never
+// shown the art — a greeter puts PAM_TEXT_INFO in a dialog in whatever font it
+// likes, where block characters are noise rather than a code (#172) — and its
+// instructions never carried it either.
+static void show_device_prompt(pam_handle_t *pamh, json_object *response_obj, const char *login_type) {
+    const char *qr_code = json_get_string(response_obj, "qr_code");
+
+    show_message(pamh, json_get_string(response_obj, "instructions"));
+    if (qr_code != NULL && qr_code[0] != '\0' && strcmp(login_type, "gui") != 0) {
+        show_message(pamh, "Or scan this QR code with your phone:");
+        show_message(pamh, qr_code);
+    }
+}
+
 // Seconds on a monotonic clock, so a wall-clock adjustment mid-login cannot
 // extend or collapse the authentication budget.
 static long monotonic_seconds(void) {
@@ -1054,7 +1074,7 @@ int perform_authentication(pam_handle_t *pamh, const char *socket_path, const ch
     memcpy(session_id, session, strlen(session) + 1);
 
     poll_interval = response_poll_interval(response_obj);
-    show_message(pamh, json_get_string(response_obj, "instructions"));
+    show_device_prompt(pamh, response_obj, classify_login_type(service, tty));
     json_object_put(response_obj);
 
     log_pam_message(LOG_INFO, "Waiting up to %ds for device authorization by user %s (session %s)",

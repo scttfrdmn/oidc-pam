@@ -714,6 +714,74 @@ func TestAuthenticateSurvivesAMissingConversationFunction(t *testing.T) {
 	}
 }
 
+// Version 1 carries the QR art only in qr_code (#179), so the module draws it
+// itself: after the instructions, for a login that can show it, and not at all for
+// a graphical one or when the broker sent none. The instructions are shown in every
+// case, since they are what the user acts on.
+func TestTheModuleDrawsTheQRCodeFromItsOwnField(t *testing.T) {
+	// Not parallel: the captured conversation and the module's debug flag are both
+	// process-wide.
+	const art = "█▀▀▀▀▀█ ▄▄▄ █▀▀▀▀▀█\n█ ███ █ ▀▄▀ █ ███ █"
+
+	for _, tt := range []struct {
+		name    string
+		service string
+		qrCode  interface{} // nil leaves the field out
+		drawn   bool
+	}{
+		{"ssh login with art", "sshd", art, true},
+		{"unclassified login with art", "su", art, true},
+		{"graphical login with art", "gdm", art, false},
+		{"empty qr_code", "sshd", "", false},
+		{"no qr_code", "sshd", nil, false},
+		{"non-string qr_code", "sshd", 42, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			broker := newFakeBroker(t, func(n int, _ map[string]interface{}) interface{} {
+				if n == 1 {
+					reply := deviceStarted("sess-qr")
+					if tt.qrCode != nil {
+						reply["qr_code"] = tt.qrCode
+					}
+					return reply
+				}
+				return denied("ACCESS_DENIED")
+			})
+
+			handle, rc := startPAMHandleCapturingMessages(tt.service, "testuser")
+			if rc != pam.PAMSuccess {
+				t.Fatalf("pam_start: PAM result %d", rc)
+			}
+			defer handle.close()
+
+			if got := smAuthenticate(handle, []string{"socket=" + broker.socketPath, "timeout=10"}); got != pam.PAMAuthError {
+				t.Fatalf("got PAM result %d, want pam.PAMAuthError (%d)", got, pam.PAMAuthError)
+			}
+
+			messages, dropped := capturedMessages()
+			if dropped != 0 {
+				t.Fatalf("%d message(s) did not fit the capture buffer", dropped)
+			}
+			instructions := deviceStarted("sess-qr")["instructions"]
+			if len(messages) == 0 || messages[0] != instructions {
+				t.Fatalf("first message shown = %q, want the instructions %q", messages, instructions)
+			}
+			drawn := false
+			for _, m := range messages {
+				if m == art {
+					drawn = true
+				}
+			}
+			if drawn != tt.drawn {
+				t.Errorf("QR art drawn = %v, want %v; messages shown: %q", drawn, tt.drawn, messages)
+			}
+			if !tt.drawn && len(messages) != 1 {
+				t.Errorf("shown %q; want only the instructions", messages)
+			}
+		})
+	}
+}
+
 // `debug` is a per-invocation module argument, but the flag it set was a process
 // global that was never cleared. pam_sm_authenticate runs inside sshd, which serves
 // many logins from one process and may run more than one service's stack there, so a
