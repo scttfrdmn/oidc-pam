@@ -788,11 +788,13 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 		}, nil
 	}
 
-	// Generate QR code for device flow
+	// Generate QR code for device flow. The art is optional, so a URL too long to
+	// draw, or one that fails to encode, costs the login its QR code and nothing
+	// else.
 	qrCode, err := GenerateQRCode(deviceFlow.DeviceURL)
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to generate QR code")
-		qrCode = "" // Continue without QR code
+		log.Warn().Err(err).Msg("Failed to generate QR code; sending the device flow without one")
+		qrCode = ""
 	}
 
 	// Start polling for device authorization in background

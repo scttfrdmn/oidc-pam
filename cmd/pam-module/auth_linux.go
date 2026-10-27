@@ -24,6 +24,46 @@ package main
 /*
 #include <stdlib.h>
 #include "cgo_bridge.h"
+
+// A conversation function that records every message it is asked to show, so a
+// test can see exactly what the user would. Messages are stored back to back, each
+// NUL terminated; one that does not fit is dropped and counted in
+// captured_overflow, so a test cannot mistake a full buffer for a short prompt.
+static char captured[65536];
+static size_t captured_len;
+static int captured_overflow;
+
+static int capture_conv(int n, const struct pam_message **msg, struct pam_response **resp, void *appdata) {
+    (void)appdata;
+    for (int i = 0; i < n; i++) {
+        size_t len = strlen(msg[i]->msg) + 1;
+        if (len > sizeof(captured) - captured_len) {
+            captured_overflow++;
+            continue;
+        }
+        memcpy(captured + captured_len, msg[i]->msg, len);
+        captured_len += len;
+    }
+    *resp = calloc((size_t)n, sizeof(struct pam_response));
+    return *resp == NULL ? PAM_BUF_ERR : PAM_SUCCESS;
+}
+
+// pam_start with the capturing conversation, after clearing the record. cgo cannot
+// name a C static from Go, so the conversation and the record are reached only
+// through this and captured_messages.
+static int pam_start_capturing(const char *service, const char *user, pam_handle_t **handle) {
+    static const struct pam_conv capturing_conv = { capture_conv, NULL };
+
+    captured_len = 0;
+    captured_overflow = 0;
+    return pam_start(service, user, &capturing_conv, handle);
+}
+
+static const char *captured_messages(size_t *len, int *dropped) {
+    *len = captured_len;
+    *dropped = captured_overflow;
+    return captured;
+}
 */
 import "C"
 
@@ -93,6 +133,45 @@ func startPAMHandleWithoutConversation(service, user string) (*pamHandle, pam.PA
 	return &pamHandle{h: handle}, rc
 }
 
+// startPAMHandleCapturingMessages returns a handle whose conversation records
+// every message the module shows; read them back with capturedMessages. The
+// record is process-wide, so a test using it must not run in parallel with
+// another that does.
+func startPAMHandleCapturingMessages(service, user string) (*pamHandle, pam.PAMResultCode) {
+	cService := C.CString(service)
+	cUser := C.CString(user)
+	defer func() {
+		C.free(unsafe.Pointer(cService)) // #nosec G103 -- cgo: freeing a C.CString allocation
+		C.free(unsafe.Pointer(cUser))    // #nosec G103 -- cgo: freeing a C.CString allocation
+	}()
+
+	var handle *C.pam_handle_t
+	rc := pam.PAMResultCode(C.pam_start_capturing(cService, cUser, &handle))
+	if rc != pam.PAMSuccess {
+		return nil, rc
+	}
+	return &pamHandle{h: handle}, rc
+}
+
+// capturedMessages returns the messages shown through a handle from
+// startPAMHandleCapturingMessages, in order, and how many were dropped because
+// the record was full.
+func capturedMessages() (messages []string, dropped int) {
+	var size C.size_t
+	var overflow C.int
+	start := C.captured_messages(&size, &overflow)
+	raw := C.GoBytes(unsafe.Pointer(start), C.int(size)) // #nosec G103 -- cgo: copying a C buffer into Go memory
+	for len(raw) > 0 {
+		end := 0
+		for raw[end] != 0 {
+			end++
+		}
+		messages = append(messages, string(raw[:end]))
+		raw = raw[end+1:]
+	}
+	return messages, int(overflow)
+}
+
 func (p *pamHandle) close() {
 	C.pam_end(p.h, C.PAM_SUCCESS)
 }
@@ -128,9 +207,10 @@ func debugLoggingEnabled() bool {
 }
 
 // classifyLoginTypeC exposes the C module's login-type classification so a Go
-// test can assert it agrees with GetLoginType. The two must match: the broker
-// applies per-login-type policy, and the C module and the Go client would
-// otherwise get different answers for the same login.
+// test can assert it agrees with GetLoginType. The two must match: the login type
+// decides how the broker formats the instructions and whether the module draws the
+// QR art, and the C module and the Go client would otherwise describe the same
+// login differently.
 func classifyLoginTypeC(service, tty string) string {
 	cService := C.CString(service)
 	cTTY := C.CString(tty)

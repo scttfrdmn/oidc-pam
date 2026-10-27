@@ -309,19 +309,19 @@ func TestQRCodeGenerationCore(t *testing.T) {
 	}
 
 	// Test device instructions formatting
-	instructions := FormatDeviceInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode, qrCode)
+	instructions := FormatDeviceInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode)
 	if instructions == "" {
 		t.Error("Expected non-empty device instructions")
 	}
 
 	// Test console instructions formatting
-	consoleInstructions := FormatConsoleInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode, qrCode)
+	consoleInstructions := FormatConsoleInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode)
 	if consoleInstructions == "" {
 		t.Error("Expected non-empty console instructions")
 	}
 
 	// Test GUI instructions formatting
-	guiInstructions := FormatGUIInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode, qrCode)
+	guiInstructions := FormatGUIInstructions(deviceFlow.DeviceURL, deviceFlow.UserCode)
 	if guiInstructions == "" {
 		t.Error("Expected non-empty GUI instructions")
 	}

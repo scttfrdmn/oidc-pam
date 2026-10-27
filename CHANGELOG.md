@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     audit record says.
   - **Bounds:** `metadata` may hold 64 entries with 128-byte keys (it was 32 and
     64), and `user_agent` may be 512 bytes (it was 256).
+- **The QR code travels in its own `qr_code` field, and `instructions` no longer
+  contain it (#179).** Version 1 sends the art once, in `qr_code`, and makes it
+  optional. A pending reply now carries it there, and `instructions` is text that
+  gives the URL and user code for every login type. The module shows the
+  instructions and then draws `qr_code` if it is there, except on a graphical login,
+  which never showed the art. A third-party client that showed `instructions` alone
+  will no longer show a QR code until it renders `qr_code`.
+  - The broker draws no QR code for a `verification_uri` over 200 bytes, the bound
+    version 1 sets. The login goes ahead without one (`auth.MaxQRCodeURILen`,
+    `auth.ErrQRCodeURITooLong`).
+  - When a reply would not fit the module's buffer, the broker now drops `qr_code`.
+    It used to render the instructions again without the art.
+  - `auth.FormatDeviceInstructions`, `FormatConsoleInstructions` and
+    `FormatGUIInstructions` drop their `qrCode` parameter. The GUI instructions also
+    no longer skip step 2 when there is no QR code.
 
 ### Changed
 

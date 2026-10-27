@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -45,9 +46,8 @@ func TestGenerateQRCodePNG(t *testing.T) {
 func TestFormatDeviceInstructions(t *testing.T) {
 	deviceURL := "https://example.com/device"
 	deviceCode := "ABC123"
-	qrCode := "█▀▀▀▀▀█ ▀▀▀ █▀▀▀▀▀█\n█ ███ █ ███ █ ███ █\n█ ▀▀▀ █ ▀▀▀ █ ▀▀▀ █"
 
-	instructions := FormatDeviceInstructions(deviceURL, deviceCode, qrCode)
+	instructions := FormatDeviceInstructions(deviceURL, deviceCode)
 
 	if instructions == "" {
 		t.Error("Expected non-empty instructions")
@@ -63,9 +63,9 @@ func TestFormatDeviceInstructions(t *testing.T) {
 		t.Error("Expected instructions to contain device code")
 	}
 
-	// Should contain the QR code
-	if !strings.Contains(instructions, qrCode) {
-		t.Error("Expected instructions to contain QR code")
+	// The art travels in the reply's qr_code field, never in the text (#179)
+	if strings.ContainsAny(instructions, "█▀▄") {
+		t.Error("Expected instructions to carry no QR art")
 	}
 
 	// Should have proper formatting - check what the actual function returns
@@ -77,9 +77,8 @@ func TestFormatDeviceInstructions(t *testing.T) {
 func TestFormatConsoleInstructions(t *testing.T) {
 	deviceURL := "https://example.com/device"
 	deviceCode := "ABC123"
-	qrCode := "█▀▀▀▀▀█ ▀▀▀ █▀▀▀▀▀█\n█ ███ █ ███ █ ███ █\n█ ▀▀▀ █ ▀▀▀ █ ▀▀▀ █"
 
-	instructions := FormatConsoleInstructions(deviceURL, deviceCode, qrCode)
+	instructions := FormatConsoleInstructions(deviceURL, deviceCode)
 
 	if instructions == "" {
 		t.Error("Expected non-empty console instructions")
@@ -104,9 +103,8 @@ func TestFormatConsoleInstructions(t *testing.T) {
 func TestFormatGUIInstructions(t *testing.T) {
 	deviceURL := "https://example.com/device"
 	deviceCode := "ABC123"
-	qrCode := "█▀▀▀▀▀█ ▀▀▀ █▀▀▀▀▀█\n█ ███ █ ███ █ ███ █\n█ ▀▀▀ █ ▀▀▀ █ ▀▀▀ █"
 
-	instructions := FormatGUIInstructions(deviceURL, deviceCode, qrCode)
+	instructions := FormatGUIInstructions(deviceURL, deviceCode)
 
 	if instructions == "" {
 		t.Error("Expected non-empty GUI instructions")
@@ -233,7 +231,7 @@ func TestQRCodeWithInvalidURL(t *testing.T) {
 
 func TestFormatInstructionsWithEmptyInputs(t *testing.T) {
 	// Test with empty inputs
-	emptyInstructions := FormatDeviceInstructions("", "", "")
+	emptyInstructions := FormatDeviceInstructions("", "")
 	if emptyInstructions == "" {
 		t.Error("Expected some instructions even with empty inputs")
 	}
@@ -248,9 +246,8 @@ func TestFormatInstructionsWithLongInputs(t *testing.T) {
 	// Test with very long inputs
 	longURL := "https://very-long-domain-name-that-exceeds-normal-length.example.com/device/authorization/endpoint/with/many/path/segments"
 	longCode := "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"
-	longQRCode := strings.Repeat("█▀▀▀▀▀█ ▀▀▀ █▀▀▀▀▀█\n█ ███ █ ███ █ ███ █\n█ ▀▀▀ █ ▀▀▀ █ ▀▀▀ █\n", 5)
 
-	instructions := FormatDeviceInstructions(longURL, longCode, longQRCode)
+	instructions := FormatDeviceInstructions(longURL, longCode)
 
 	if instructions == "" {
 		t.Error("Expected instructions even with long inputs")
@@ -347,11 +344,10 @@ func TestInstructionFormatting(t *testing.T) {
 	// Test that different instruction formats produce different outputs
 	deviceURL := "https://example.com/device"
 	deviceCode := "ABC123"
-	qrCode := "█▀▀▀▀▀█"
 
-	deviceInstructions := FormatDeviceInstructions(deviceURL, deviceCode, qrCode)
-	consoleInstructions := FormatConsoleInstructions(deviceURL, deviceCode, qrCode)
-	guiInstructions := FormatGUIInstructions(deviceURL, deviceCode, qrCode)
+	deviceInstructions := FormatDeviceInstructions(deviceURL, deviceCode)
+	consoleInstructions := FormatConsoleInstructions(deviceURL, deviceCode)
+	guiInstructions := FormatGUIInstructions(deviceURL, deviceCode)
 
 	// All should be different
 	if deviceInstructions == consoleInstructions {
@@ -375,5 +371,25 @@ func TestInstructionFormatting(t *testing.T) {
 		if !strings.Contains(instructions, deviceCode) {
 			t.Errorf("Instructions %d should contain device code", i)
 		}
+	}
+}
+
+// The QR art is skipped, not failed, above MaxQRCodeURILen (#179), and that is the
+// only length bound GenerateQRCode applies.
+func TestGenerateQRCodeSkipsAnOverlongURL(t *testing.T) {
+	prefix := "https://idp.example.com/device?user_code="
+
+	atLimit := prefix + strings.Repeat("u", MaxQRCodeURILen-len(prefix))
+	if qr, err := GenerateQRCode(atLimit); err != nil || qr == "" {
+		t.Errorf("GenerateQRCode(%d bytes) = %d bytes of art, %v; want art", len(atLimit), len(qr), err)
+	}
+
+	overLimit := atLimit + "u"
+	qr, err := GenerateQRCode(overLimit)
+	if !errors.Is(err, ErrQRCodeURITooLong) {
+		t.Errorf("GenerateQRCode(%d bytes) error = %v; want ErrQRCodeURITooLong", len(overLimit), err)
+	}
+	if qr != "" {
+		t.Errorf("GenerateQRCode(%d bytes) returned %d bytes of art; want none", len(overLimit), len(qr))
 	}
 }

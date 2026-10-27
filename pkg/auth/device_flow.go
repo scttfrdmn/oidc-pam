@@ -60,8 +60,9 @@ const (
 // module reads.
 //
 // The module reads a response into a fixed-size buffer (MAX_RESPONSE_SIZE, 16 KiB),
-// and the verification URI is in there twice over: as device_url, and inside the
-// formatted instructions as both text and QR art whose size grows with the URI. A
+// and the verification URI is in there three times over: as device_url, as text
+// inside the formatted instructions, and as QR art in qr_code whose size grows with
+// the URI (the art itself is skipped above MaxQRCodeURILen). A
 // provider (or anything that can answer as one) returning a kilobyte-long
 // verification_uri therefore pushes an ordinary login response past what the module
 // can parse, and every login on the host fails with nothing in syslog but "Failed

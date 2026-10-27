@@ -22,7 +22,7 @@ import (
 // on the host was refused with nothing in syslog but "Failed to parse broker
 // response". That was #162 — at 8 KiB, with the QR art serialized twice (once as
 // qr_code and again inside instructions), an ordinary device-flow response came
-// within ~20 bytes of the limit.
+// within ~20 bytes of the limit. The art now travels once, in qr_code (#179).
 //
 // So the broker owns the size of what it sends: it degrades the response while it
 // still can, and reports a parseable error when it cannot. The module's buffer is
@@ -51,17 +51,19 @@ const maxResponseSize = 16384
 // of it, and the only way to hit it is to land on it exactly.
 const maxResponseWire = maxResponseSize - 1
 
-// setDeviceInstructions renders the device-flow instructions into response,
-// dropping the QR art if the response would not otherwise fit the PAM module's
-// buffer.
+// setDeviceInstructions renders the device-flow instructions into response and
+// attaches the QR art, dropping the art if the response would not otherwise fit
+// the PAM module's buffer.
 //
-// The art is by far the largest thing in a device response — several kilobytes,
-// growing with the length of the verification URI — and it is a convenience: the
-// instructions carry the same URL and user code as text. So a response that does
-// not fit loses the art, not the login (#162). What is left is a login the user
-// completes by typing the URL, instead of one that fails to parse.
+// The art is by far the largest thing in a device response — kilobytes, growing
+// with the length of the verification URI — and it is a convenience: the
+// instructions carry the same URL and user code as text, and version 1 makes
+// qr_code optional on a pending reply for exactly this case. So a response that
+// does not fit loses the art, not the login (#162). What is left is a login the
+// user completes by typing the URL, instead of one that fails to parse.
 func (s *Server) setDeviceInstructions(response *Response, loginType, qrCode string) {
-	response.Instructions = s.formatInstructions(loginType, response.DeviceURL, response.DeviceCode, qrCode)
+	response.Instructions = s.formatInstructions(loginType, response.DeviceURL, response.DeviceCode)
+	response.QRCode = qrCode
 
 	if qrCode == "" || fitsModuleBuffer(response) {
 		return
@@ -70,9 +72,9 @@ func (s *Server) setDeviceInstructions(response *Response, loginType, qrCode str
 	log.Warn().
 		Str("user_id", response.UserID).
 		Int("device_url_len", len(response.DeviceURL)).
-		Msg("Device instructions do not fit the PAM module's buffer with the QR code; sending them without it")
+		Msg("Device response does not fit the PAM module's buffer with the QR code; sending it without one")
 
-	response.Instructions = s.formatInstructions(loginType, response.DeviceURL, response.DeviceCode, "")
+	response.QRCode = ""
 }
 
 // fitsModuleBuffer reports whether response, once marshalled and newline
