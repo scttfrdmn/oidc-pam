@@ -186,8 +186,11 @@ type AuthRequest struct {
 	LoginType  string // "ssh", "console", "gui"
 	DeviceID   string
 	SessionID  string
-	Timestamp  time.Time
-	Metadata   map[string]interface{}
+	// Provider is the provider the client asked for by name, or empty for the
+	// broker's choice. See selectProvider.
+	Provider  string
+	Timestamp time.Time
+	Metadata  map[string]interface{}
 }
 
 // AuthResponse represents the response to an authentication request
@@ -618,20 +621,35 @@ func (b *Broker) Authenticate(req *AuthRequest) (*AuthResponse, error) {
 
 	// Select the provider before evaluating policy: a provider-scoped time or
 	// geographic restriction cannot be applied without knowing which provider will
-	// serve the login, and taking the name from the request instead would let a
-	// client scope itself out of its own restrictions (#213). Selection depends on
-	// nothing in the policy result, so the order is free.
-	provider := b.selectProvider()
+	// serve the login (#213). The client may name the provider, but policy is always
+	// evaluated against the one that is selected and serves the login, never against
+	// a name taken separately from the request, so a client cannot be judged by one
+	// provider's restrictions and served by another. Selection depends on nothing in
+	// the policy result, so the order is free.
+	provider := b.selectProvider(req.Provider)
 	if provider == nil {
-		// Every login on the host fails this way, so the operator needs it in the
-		// trail alongside the refusals it looks nothing like: no provider is
-		// enabled_for_login, which is a configuration fault and not anything the
-		// user did.
-		log.Error().
-			Str("user_id", req.UserID).
-			Msg("No provider is enabled for login; refusing every authentication request")
-		b.auditLogger.LogAuthEvent(b.denialEvent(req, "NO_PROVIDER",
-			"no provider is enabled_for_login"))
+		if req.Provider != "" {
+			// One client asked for a provider this broker will not serve logins
+			// from. Version 1 refuses it rather than quietly substituting the
+			// default (#287): the client asked for a particular identity provider,
+			// and a device flow against a different one is not what it asked for.
+			log.Warn().
+				Str("user_id", req.UserID).
+				Str("provider", req.Provider).
+				Msg("Requested provider is not configured for login; refusing the authentication request")
+			b.auditLogger.LogAuthEvent(b.denialEvent(req, "NO_PROVIDER",
+				"the requested provider is not configured for login"))
+		} else {
+			// Every login on the host fails this way, so the operator needs it in
+			// the trail alongside the refusals it looks nothing like: no provider is
+			// enabled_for_login, which is a configuration fault and not anything the
+			// user did.
+			log.Error().
+				Str("user_id", req.UserID).
+				Msg("No provider is enabled for login; refusing every authentication request")
+			b.auditLogger.LogAuthEvent(b.denialEvent(req, "NO_PROVIDER",
+				"no provider is enabled_for_login"))
+		}
 		return &AuthResponse{
 			Success:      false,
 			ErrorCode:    "NO_PROVIDER",
@@ -1780,21 +1798,34 @@ func (b *Broker) createSuccessResponse(session *Session) *AuthResponse {
 }
 
 // selectProvider returns the provider a new login should be sent to, or nil if
-// the configuration has none that can serve one.
+// there is none that can serve it.
 //
-// It takes no request or policy argument on purpose: nothing about the request
-// influences the choice today. The previous signature accepted both and read
-// neither, which is how it went unnoticed that the body ranged over a map — so
-// with more than one login-enabled provider, consecutive logins on the same host
-// could be sent to different identity providers at random, and `priority` was
-// parsed from the config and never read. Reinstate the parameters along with the
-// logic that actually needs them.
-func (b *Broker) selectProvider() *OIDCProvider {
+// An empty name is the broker's choice: the first login provider in precedence
+// order. A non-empty name selects that login provider, compared exactly, and nil if
+// no provider by that name is eligible for login — not configured, or configured
+// but not enabled_for_login, or verification_only. Version 1 requires refusing such
+// a name rather than replacing it with the default (#287). Only a uid-0 peer can
+// send a request at all, so the name comes from root-controlled configuration, and
+// it can only select among providers the operator already enabled for login.
+//
+// Nothing else about the request influences the choice. This once ranged over a
+// map, so with more than one login-enabled provider consecutive logins could be
+// sent to different identity providers at random, and `priority` was parsed and
+// never read (#125).
+func (b *Broker) selectProvider(name string) *OIDCProvider {
 	candidates := b.loginProviders()
-	if len(candidates) == 0 {
-		return nil
+	if name == "" {
+		if len(candidates) == 0 {
+			return nil
+		}
+		return candidates[0]
 	}
-	return candidates[0]
+	for _, provider := range candidates {
+		if provider.Name == name {
+			return provider
+		}
+	}
+	return nil
 }
 
 // loginProviders returns every provider eligible to serve a login, in

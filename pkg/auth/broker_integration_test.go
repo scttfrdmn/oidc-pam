@@ -265,17 +265,17 @@ func TestBrokerProviderSelection(t *testing.T) {
 	// provider1 is priority 1 and provider2 is priority 2, so provider1 wins.
 	// This assertion used to accept either one, which is what allowed the map
 	// iteration to go unnoticed.
-	provider := broker.selectProvider()
+	provider := broker.selectProvider("")
 	if provider == nil {
 		t.Fatal("Expected non-nil provider")
 	}
 	if provider.Name != "provider1" {
-		t.Errorf("selectProvider() = %s, want provider1 (priority 1)", provider.Name)
+		t.Errorf("selectProvider(\"\") = %s, want provider1 (priority 1)", provider.Name)
 	}
 
 	// And it keeps winning: the choice must not vary between calls.
 	for i := 0; i < 20; i++ {
-		if again := broker.selectProvider(); again.Name != provider.Name {
+		if again := broker.selectProvider(""); again.Name != provider.Name {
 			t.Fatalf("call %d selected %s, first call selected %s", i, again.Name, provider.Name)
 		}
 	}

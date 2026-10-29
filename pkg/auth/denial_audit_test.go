@@ -53,6 +53,14 @@ func TestEveryRefusedLoginIsAuditedWithItsErrorCode(t *testing.T) {
 			req: &AuthRequest{UserID: "testuser", SourceIP: "192.0.2.10", LoginType: "ssh"},
 		},
 		{
+			// Version 1 refuses a provider name that is not configured rather than
+			// replacing it with the default (#287).
+			name:          "the requested provider is not configured for login",
+			wantCode:      "NO_PROVIDER",
+			wantReasonHas: "requested provider",
+			req:           &AuthRequest{UserID: "testuser", SourceIP: "192.0.2.10", LoginType: "ssh", Provider: "no-such-idp"},
+		},
+		{
 			name:          "the user is at their concurrent session limit",
 			wantCode:      "SESSION_LIMIT_REACHED",
 			wantReasonHas: "concurrent sessions",

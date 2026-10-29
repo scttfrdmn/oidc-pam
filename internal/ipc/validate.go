@@ -81,6 +81,9 @@ func validateRequest(req *Request) error {
 		if err := validateStringField(req.DeviceID, "device_id", maxFieldLen); err != nil {
 			return err
 		}
+		if err := validateStringField(req.Provider, "provider", maxFieldLen); err != nil {
+			return err
+		}
 		if req.SessionID != "" {
 			if err := validateSessionID(req.SessionID); err != nil {
 				return err

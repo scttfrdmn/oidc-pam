@@ -35,12 +35,12 @@ func TestSelectProviderPrefersTheLowestPriorityNumber(t *testing.T) {
 		loginProvider("corporate-backup", 2),
 	)
 
-	provider := broker.selectProvider()
+	provider := broker.selectProvider("")
 	if provider == nil {
 		t.Fatal("selectProvider returned nil with four eligible providers")
 	}
 	if provider.Name != "corporate-primary" {
-		t.Errorf("selectProvider() = %s, want corporate-primary (priority 1)", provider.Name)
+		t.Errorf("selectProvider(\"\") = %s, want corporate-primary (priority 1)", provider.Name)
 	}
 
 	// The full order matters too: it is the failover order.
@@ -60,18 +60,18 @@ func TestSelectProviderIsStableAcrossCalls(t *testing.T) {
 		loginProvider("echo", 5),
 	)
 
-	first := broker.selectProvider()
+	first := broker.selectProvider("")
 	if first == nil {
 		t.Fatal("selectProvider returned nil")
 	}
 	// Equal priorities are broken by name, so this is deterministic rather than
 	// merely repeatable-by-luck.
 	if first.Name != "alpha" {
-		t.Errorf("selectProvider() = %s, want alpha (first by name among equal priorities)", first.Name)
+		t.Errorf("selectProvider(\"\") = %s, want alpha (first by name among equal priorities)", first.Name)
 	}
 
 	for i := 0; i < 100; i++ {
-		if got := broker.selectProvider(); got.Name != first.Name {
+		if got := broker.selectProvider(""); got.Name != first.Name {
 			t.Fatalf("call %d selected %s, want %s on every call", i, got.Name, first.Name)
 		}
 	}
@@ -85,8 +85,8 @@ func TestSelectProviderTreatsUnsetPriorityAsLast(t *testing.T) {
 		loginProvider("declared", 2),
 	)
 
-	if provider := broker.selectProvider(); provider.Name != "declared" {
-		t.Errorf("selectProvider() = %s, want declared (priority 2 beats unset)", provider.Name)
+	if provider := broker.selectProvider(""); provider.Name != "declared" {
+		t.Errorf("selectProvider(\"\") = %s, want declared (priority 2 beats unset)", provider.Name)
 	}
 	assertOrder(t, broker, []string{"declared", "undeclared"})
 }
@@ -100,8 +100,8 @@ func TestSelectProviderTreatsNegativePriorityAsUnset(t *testing.T) {
 		loginProvider("declared", 3),
 	)
 
-	if provider := broker.selectProvider(); provider.Name != "declared" {
-		t.Errorf("selectProvider() = %s, want declared", provider.Name)
+	if provider := broker.selectProvider(""); provider.Name != "declared" {
+		t.Errorf("selectProvider(\"\") = %s, want declared", provider.Name)
 	}
 }
 
@@ -123,12 +123,12 @@ func TestSelectProviderSkipsProvidersNotEnabledForLogin(t *testing.T) {
 		loginProvider("enabled", 9),
 	)
 
-	provider := broker.selectProvider()
+	provider := broker.selectProvider("")
 	if provider == nil {
 		t.Fatal("selectProvider returned nil with one eligible provider")
 	}
 	if provider.Name != "enabled" {
-		t.Errorf("selectProvider() = %s, want enabled", provider.Name)
+		t.Errorf("selectProvider(\"\") = %s, want enabled", provider.Name)
 	}
 }
 
@@ -141,12 +141,12 @@ func TestSelectProviderSkipsVerificationOnlyProviders(t *testing.T) {
 
 	broker := selectionBroker(verificationOnly, loginProvider("globus", 2))
 
-	provider := broker.selectProvider()
+	provider := broker.selectProvider("")
 	if provider == nil {
 		t.Fatal("selectProvider returned nil with one eligible provider")
 	}
 	if provider.Name != "globus" {
-		t.Errorf("selectProvider() = %s, want globus (orcid is verification_only)", provider.Name)
+		t.Errorf("selectProvider(\"\") = %s, want globus (orcid is verification_only)", provider.Name)
 	}
 	assertOrder(t, broker, []string{"globus"})
 }
@@ -162,10 +162,49 @@ func TestSelectProviderWithNoEligibleProviders(t *testing.T) {
 
 	for name, broker := range tests {
 		t.Run(name, func(t *testing.T) {
-			if provider := broker.selectProvider(); provider != nil {
-				t.Errorf("selectProvider() = %s, want nil", provider.Name)
+			if provider := broker.selectProvider(""); provider != nil {
+				t.Errorf("selectProvider(\"\") = %s, want nil", provider.Name)
 			}
 		})
+	}
+}
+
+// A client may name the provider (#287). The name selects that login provider
+// whatever its precedence, and a name that is not a login provider selects
+// nothing — so the login is refused with NO_PROVIDER rather than served by the
+// default.
+func TestSelectProviderByName(t *testing.T) {
+	verificationOnly := loginProvider("orcid", 1)
+	verificationOnly.VerificationOnly = true
+	broker := selectionBroker(
+		loginProvider("corporate-primary", 1),
+		loginProvider("corporate-backup", 2),
+		config.OIDCProvider{Name: "disabled", Priority: 3},
+		verificationOnly,
+	)
+
+	for _, tc := range []struct {
+		name string
+		want string // "" for nil
+	}{
+		{"", "corporate-primary"},
+		{"corporate-primary", "corporate-primary"},
+		{"corporate-backup", "corporate-backup"},
+		{"no-such-idp", ""},
+		{"disabled", ""},
+		{"orcid", ""},
+		// Names are compared exactly, as the config spells them.
+		{"Corporate-Backup", ""},
+		{" corporate-backup", ""},
+	} {
+		got := broker.selectProvider(tc.name)
+		gotName := ""
+		if got != nil {
+			gotName = got.Name
+		}
+		if gotName != tc.want {
+			t.Errorf("selectProvider(%q) = %q, want %q", tc.name, gotName, tc.want)
+		}
 	}
 }
 

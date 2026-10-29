@@ -103,6 +103,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A request that names a provider is served by that provider, or refused
+  (#287).** The IPC request had no `provider` field, so a client's choice was
+  dropped during decoding and the login went to the default provider. A name the
+  broker had no provider for got a device flow from the default instead of the
+  `NO_PROVIDER` that version 1 requires. `authenticate` now takes `provider`,
+  bounded at 256 bytes with no control characters. An empty value is the
+  broker's choice, as before. A name selects that `enabled_for_login` provider,
+  compared exactly. Any other name, including a `verification_only` provider, is
+  refused with `NO_PROVIDER` and audited. Policy is evaluated against the
+  provider that serves the login, so provider-scoped restrictions on it still
+  apply (#213). Only uid-0 peers can send a request, so the name comes from
+  root-controlled configuration. Neither shipped client sends `provider`;
+  `brokerclient.Request` now has the field for Go callers.
 - **A rate-limited poll slows the login down instead of ending it (#179).** When
   the broker answered a `check_session` poll with `RATE_LIMITED`, the module and
   `brokerclient` refused the login as `PAM_MAXTRIES`. The limiter's window clears
