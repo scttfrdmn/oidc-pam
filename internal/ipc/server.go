@@ -63,6 +63,11 @@ type Request struct {
 	LoginType       string `json:"login_type"`
 	DeviceID        string `json:"device_id"`
 	SessionID       string `json:"session_id"`
+	// Provider names the configured provider an authenticate request is to be
+	// served by; empty means the broker's own choice. A name that is not configured
+	// for login is refused with NO_PROVIDER rather than replaced by the default, as
+	// version 1 requires (#287).
+	Provider string `json:"provider"`
 	// Metadata is a string-to-string map, as version 1 defines it: free-form audit
 	// context that decides nothing. A value of any other JSON type fails to decode,
 	// which is INVALID_REQUEST.
@@ -603,6 +608,7 @@ func (s *Server) handleAuthenticate(request *Request) *Response {
 		LoginType:  request.LoginType,
 		DeviceID:   request.DeviceID,
 		SessionID:  request.SessionID,
+		Provider:   request.Provider,
 		Timestamp:  time.Now(),
 		Metadata:   requestMetadata(request.Metadata),
 	}

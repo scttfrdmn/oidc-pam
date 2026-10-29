@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,6 +226,37 @@ func TestRequestMetadataIsAStringMap(t *testing.T) {
 			if refused := reply["error_code"] == "INVALID_REQUEST"; refused != tt.refused {
 				t.Errorf("metadata %s: error_code = %v, refused = %v, want %v",
 					tt.metadata, reply["error_code"], refused, tt.refused)
+			}
+		})
+	}
+}
+
+// provider reaches the broker (#287): a name that is not configured for login is
+// refused with NO_PROVIDER rather than served by the default, and version 1's
+// bounds on the field are enforced before the broker sees it. Without the field on
+// Request the name was dropped in decoding, and the login went to "okta".
+func TestTheRequestedProviderReachesTheBroker(t *testing.T) {
+	_, socketPath := startSocketTestServer(t, newTestBroker(t), 0, 0)
+
+	for _, tt := range []struct {
+		name, provider, wantCode string
+	}{
+		{"not configured", "no-such-idp", "NO_PROVIDER"},
+		{"over-long", strings.Repeat("p", maxFieldLen+1), "INVALID_REQUEST"},
+		{"a control character", "okta\x01", "INVALID_REQUEST"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// Marshalled rather than formatted, so the control character arrives as a
+			// valid JSON escape and is refused by validation, not by the decoder.
+			request, err := json.Marshal(map[string]string{
+				"type": "authenticate", "user_id": "testuser", "login_type": "ssh", "provider": tt.provider,
+			})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			reply := sendRawOverSocket(t, socketPath, string(request))
+			if reply["error_code"] != tt.wantCode {
+				t.Errorf("provider %q: error_code = %v, want %s", tt.provider, reply["error_code"], tt.wantCode)
 			}
 		})
 	}

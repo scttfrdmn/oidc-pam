@@ -69,16 +69,20 @@ const (
 // that reads source_ip evaluating the empty string. Use SourceIPFromRHost and
 // ThisHost rather than filling them in by hand.
 type Request struct {
-	ProtocolVersion int               `json:"protocol_version"`
-	Type            string            `json:"type"`
-	UserID          string            `json:"user_id,omitempty"`
-	SourceIP        string            `json:"source_ip,omitempty"`
-	UserAgent       string            `json:"user_agent,omitempty"`
-	TargetHost      string            `json:"target_host,omitempty"`
-	LoginType       string            `json:"login_type,omitempty"`
-	DeviceID        string            `json:"device_id,omitempty"`
-	SessionID       string            `json:"session_id,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	ProtocolVersion int    `json:"protocol_version"`
+	Type            string `json:"type"`
+	UserID          string `json:"user_id,omitempty"`
+	SourceIP        string `json:"source_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
+	TargetHost      string `json:"target_host,omitempty"`
+	LoginType       string `json:"login_type,omitempty"`
+	DeviceID        string `json:"device_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	// Provider names the configured provider to authenticate against; empty is
+	// the broker's choice. A name the broker has not enabled for login is refused
+	// with NO_PROVIDER, not replaced by the default.
+	Provider string            `json:"provider,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // MaxSourceIPLen is the wire contract's bound on source_ip: an IPv6 literal with
